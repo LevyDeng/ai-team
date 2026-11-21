@@ -1,0 +1,62 @@
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function run({window,store,app,directory,services,fixture,js,errors}){
+  const until=async check=>{for(let n=0;n<80;n++){if(await check())return;await wait(100);}throw new Error('Interactive terminal fixture timed out.');};
+  const manager=services.interactiveAgents,launches=[],inputs=[],sizes=[];
+  const node=require('node:child_process').execFileSync('where.exe',['node.exe'],{encoding:'utf8',windowsHide:true}).trim().split(/\r?\n/)[0];
+  const script=path.join(directory,'interactive-fixture.cjs');
+  fs.writeFileSync(script,String.raw`const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');const folder=path.join(process.env.CLAUDE_CONFIG_DIR,'projects','fixture');fs.mkdirSync(folder,{recursive:true});const file=path.join(folder,process.argv[2]+'.jsonl');fs.writeFileSync(file,'');const row=value=>fs.appendFileSync(file,JSON.stringify(value)+'\n');process.stdin.setRawMode(true);process.stdin.resume();process.stdout.write('Claude Code\r\nINTERACTIVE_READY\r\n\x1b[2K> \r\n\x1b[2K? for shortcuts\x1b[1A\r');let text='';process.stdin.on('data',data=>{let s=data.toString();if(s.includes('\x1b[B')){process.stdout.write('SELECT_SECOND\r\n');s=s.replaceAll('\x1b[B','');}text+=s;text=text.replaceAll('\x1b[200~','').replaceAll('\x1b[201~','');while(text.includes('\r')){const end=text.indexOf('\r'),line=text.slice(0,end);text=text.slice(end+1);if(line.includes('/mcp')){process.stdout.write('MCP_MENU\r\n> ');continue;}if(line.trim()){row({type:'user',uuid:crypto.randomUUID(),message:{content:line}});row({type:'assistant',message:{id:crypto.randomUUID(),content:[{type:'thinking',thinking:'PRIVATE_FIXTURE_REASONING'},{type:'text',text:'# Native reply\n\nReply to '+line}],stop_reason:'end_turn'}});row({type:'system',subtype:'turn_duration'});process.stdout.write('REPLY_READY\r\n');}else process.stdout.write('CONFIRMED\r\n');process.stdout.write('\x1b[2K> \r\n\x1b[2K? for shortcuts\x1b[1A\r');}});`);
+  services.agents.prepareLocal=async()=>({executable:'fixture-agent.exe',env:{...process.env,CLAUDE_CONFIG_DIR:path.join(directory,'interactive-history-fixture')},extra:[]});
+  manager.spawn=(command,args,options)=>{
+    launches.push({command,args});const pty=require('node-pty').spawn(node,[script,args[args.indexOf('--session-id')+1]],options);
+    return {onData:fn=>pty.onData(fn),onExit:fn=>pty.onExit(fn),write:data=>{inputs.push(data);pty.write(data);},resize:(cols,rows)=>{sizes.push([cols,rows]);pty.resize(cols,rows);},kill:()=>pty.kill()};
+  };
+  const rid=fixture.roles[1].id,cid=fixture.chat.id;
+  services.running.set(cid,{roleId:fixture.roles[0].id,roleIds:[fixture.roles[0].id],controller:new AbortController(),round:1,rounds:1,phase:'participant'});
+  await js('(async()=>{state=await api.snapshot();})()');
+  await js(`(async()=>{activityRoleId=${JSON.stringify(rid)};await openTools('activity');document.querySelector('#activity-mode').value='interactive';document.querySelector('#activity-mode').dispatchEvent(new Event('change'));})()`);
+  assert.equal(await js('document.querySelector("#agent-terminal-start").disabled'),true);assert.equal(await js('document.querySelector("#agent-terminal-end").disabled'),true);
+  assert((await js('document.querySelector("#agent-terminal-empty").textContent')).includes(fixture.roles[0].name));assert((await js('document.querySelector("#agent-terminal-start").title')).includes('本对话'));
+  await wait(100);fs.writeFileSync(path.join(directory,'interactive-blocked-reason.png'),(await window.webContents.capturePage()).toPNG());
+  await js('document.querySelector("#agent-terminal-active-log").click()');assert.equal(await js('activityMode'),'log');assert.equal(await js('activityRoleId'),fixture.roles[0].id);
+  services.running.delete(cid);await js(`(async()=>{state=await api.snapshot();activityRoleId=${JSON.stringify(rid)};activityMode='interactive';renderActivity();})()`);
+  assert.equal(launches.length,0);assert.equal(await js('document.querySelector("#agent-terminal-start").disabled'),false);
+  await js('document.querySelector("#agent-terminal-start").click()');
+  try{await until(async()=>await js('Boolean(selectedAgentTerminal()?.output.includes("INTERACTIVE_READY"))'));}catch(error){fs.writeFileSync(path.join(directory,'interactive-debug.json'),JSON.stringify({entries:manager.list(),launches,errors,ui:await js('({toast:document.querySelector("#toast").textContent,terminals:agentTerminals,role:activityRoleId})')},null,2));throw error;}
+  const id=manager.list().find(e=>e.chatId===cid).id;assert.equal(launches.length,1);assert(!launches[0].args.includes('-p'));assert.equal(await js('agentTerminalViews.get(selectedAgentTerminal().id).term.options.disableStdin'),false);
+  await js(`agentTerminals.unshift({id:'older-ended-fixture',chatId:${JSON.stringify(cid)},roleId:${JSON.stringify(rid)},state:'ended'});renderActivity();`);assert.equal(await js('selectedAgentTerminal().id'),id);
+  await js('agentTerminalViews.get(selectedAgentTerminal().id).term.focus()');
+  for(const char of '/mcp')window.webContents.sendInputEvent({type:'char',keyCode:char});
+  window.webContents.sendInputEvent({type:'keyDown',keyCode:'Enter'});window.webContents.sendInputEvent({type:'keyUp',keyCode:'Enter'});
+  await until(async()=>await js('selectedAgentTerminal().output.includes("MCP_MENU")'));
+  window.webContents.sendInputEvent({type:'keyDown',keyCode:'Down'});window.webContents.sendInputEvent({type:'keyUp',keyCode:'Down'});
+  await until(async()=>await js('selectedAgentTerminal().output.includes("SELECT_SECOND")'));
+  window.webContents.sendInputEvent({type:'keyDown',keyCode:'Enter'});window.webContents.sendInputEvent({type:'keyUp',keyCode:'Enter'});
+  await until(async()=>await js('selectedAgentTerminal().output.includes("CONFIRMED")'));
+  await js('agentTerminalViews.get(selectedAgentTerminal().id).term.paste("Terminal question");');
+  window.webContents.sendInputEvent({type:'keyDown',keyCode:'Enter'});window.webContents.sendInputEvent({type:'keyUp',keyCode:'Enter'});
+  await until(async()=>store.get('chats',cid).messages.some(m=>m.kind==='assistant'&&m.text.includes('Reply to Terminal question')));
+  try{await until(async()=>manager.list().find(e=>e.id===id).inputReady);}catch(error){fs.writeFileSync(path.join(directory,'interactive-readiness-debug.json'),JSON.stringify({entry:manager.list().find(e=>e.id===id),screen:manager.entries.get(id).screenText},null,2));throw error;}
+  const composerText='@'+fixture.roles[1].name+' Composer question';
+  await js(`document.querySelector('#input').value=${JSON.stringify(composerText)};document.querySelector('#input').dispatchEvent(new Event('input'));`);
+  await js('send()');
+  await until(async()=>store.get('chats',cid).messages.some(m=>m.kind==='assistant'&&m.text.includes('Composer question')));
+  assert.equal(await js('document.querySelector("#input").value'),'');
+  assert.equal(launches.length,1);assert.equal(store.get('chats',cid).messages.filter(m=>m.kind==='user'&&m.text===composerText).length,1);
+  assert(!JSON.stringify(store.get('chats',cid).messages).includes('PRIVATE_FIXTURE_REASONING'));
+  assert.equal(await js('document.querySelectorAll("#messages .message.assistant").length>=3'),true);
+  await wait(180);fs.writeFileSync(path.join(directory,'interactive-bubbles.png'),(await window.webContents.capturePage()).toPNG());
+  const other=store.state.chats.find(c=>c.id!==cid);
+  await js(`chatId=${JSON.stringify(other.id)};activateChat()`);assert.equal(manager.active(cid),true);assert.equal(await js('selectedAgentTerminal()===undefined'),true);
+  await js(`chatId=${JSON.stringify(cid)};activityRoleId=${JSON.stringify(rid)};activateChat();document.querySelector('#tools-wide').click()`);
+  await until(async()=>sizes.length>0);
+  await js('api["agent-terminal-open"](chatId,activityRoleId)');assert.equal(launches.length,1);
+  await wait(250);fs.writeFileSync(path.join(directory,'interactive-terminal.png'),(await window.webContents.capturePage()).toPNG());
+  await js('window.confirm=()=>true;document.querySelector("#agent-terminal-end").click()');
+  await until(async()=>manager.list().find(e=>e.id===id).state==='ended');assert.equal(await js('agentTerminalViews.get(selectedAgentTerminal().id).term.options.disableStdin'),true);
+  await js(`activityMode='log';renderActivity()`);assert.equal(await js('document.querySelector("#activity-run").hidden'),false);assert.equal(store.get('chats',cid).messages.length,8);
+  assert(inputs.some(x=>x.includes('\x1b[B')));assert.equal(errors.length,0,errors.join('\n'));
+  fs.writeFileSync(path.join(directory,'interactive-terminal-checks.json'),JSON.stringify({passed:true,at:Date.now(),checks:['explicit connection only','real node-pty and xterm keyboard input through IPC','native slash command and arrow/Enter interaction','native user and assistant JSONL sync into chat bubbles','composer sends through the same process','transcript acknowledgment merges user echo once','private reasoning excluded','no duplicate or cross-chat sessions','switching chat preserves process','output panel expand and resize','terminal output and original chat retained','end connection disables stdin','task log remains read-only'],consoleErrors:errors},null,2));
+  app.exit(0);
+}
+module.exports={run};

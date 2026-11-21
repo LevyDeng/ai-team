@@ -1,6 +1,39 @@
-# ai-team
-AI 小队: a desktop workspace for multi-agent collaboration and workflows
+# AI 小队 · ai-team
+
+AI 小队是一个中文优先的 Windows 桌面工作台。你可以在同一个项目里让多个 AI 分工，使用本机或 Linux VPS 上的 Claude Code、Codex CLI 等工具。界面和启动文件当前使用 Relay Desk 这个名称。
+
+## 快速上手
+
+1. 在 Windows 上安装带 npm 的 Node.js 24。先安装一个受支持的 Agent，例如 Claude Code 或 Codex CLI，并准备好账号。
+2. 下载或克隆本仓库，双击项目目录内的 `relay-desk.cmd`。首次打开会下载 Electron 和依赖。
+3. 在「角色」中选择 Agent 和运行位置。用原生账号时，可以在角色设置中点「登录原生账号」。
+4. 在「项目」里添加该角色运行位置上的工作目录，并邀请角色。然后新建单聊或群聊，发送一条短消息测试。
+
+只用本机角色时，可以直接启动。想在 Linux VPS 上运行角色时，按[安装与连接指南](docs/SETUP.md)添加 SSH 位置或运行自动安装。每个角色只需要其所在位置的项目目录。
+
+## 可以做什么
+
+- **单聊和群聊**：输入 `@` 指定发言角色，或让多个角色按顺序接力、独立作答。可以设置轮数、队列和主持人。
+- **工作流**：从目标生成步骤预览，确认后开始。自动选人的步骤启动时读取最新的「领域 × 职责」评分，关键步骤也可以指定名单。
+- **项目工具**：查看任务输出，打开本机或远程的终端和文件，或在有相应权限的角色中使用项目工具。
+- **技能与额度**：可管理全局技能、通过 `/` 调用技能，并在额度中心查看已接入的账号用量。
+
+更多操作见[中文工作台使用说明](docs/Relay-Desk-Workbench.md)。服务器部署参数和常见连接问题见[进阶配置与排障](docs/ADVANCED.md)。
+
+## 配置与数据
+
+真实的 `.env`、SSH 私钥、API 密钥、账号登录文件和 `.runtime/` 下的对话数据应保存在本机。仓库中的 [`.env.example`](.env.example) 是服务器配置模板。
+
+## 开发测试
+
+在项目根目录运行：
+
+```powershell
+Set-Location desktop
+npm ci
+npm test
+```
 
 ## Support the project
 
-Donation details will be listed here when they are available.
+在左下角「工作台 → 支持项目」可打开此处。收款二维码准备好后会在这里更新。

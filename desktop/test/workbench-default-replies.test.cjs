@@ -1,0 +1,55 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { Store } = require('../workbench/store.cjs');
+const { resolve, choices } = require('../workbench/mentions.js');
+const roles = [{id:'a',name:'Alpha'},{id:'b',name:'Beta'},{id:'c',name:'Gamma'}];
+test('Default subset is roster ordered; explicit mentions override; both all aliases expand', () => {
+  assert.deepEqual(resolve('hello', roles, ['c','b','b','missing']).roleIds, ['b','c']);
+  assert.deepEqual(resolve('@Alpha hello', roles, ['b','c']).roleIds, ['a']);
+  for (const all of ['所有人','所有角色']) assert.deepEqual(resolve('@'+all+' hello', roles, ['b']).roleIds, ['a','b','c']);
+  assert.deepEqual(resolve('@所有人 @Beta last', roles, ['a']).roleIds, ['a','c','b']);
+  for (const defaults of [undefined,[],['missing']]) assert.deepEqual(resolve('hello', roles, defaults).roleIds, ['a','b','c']);
+  assert.deepEqual(resolve('`@所有人` example', roles, ['b']).roleIds, ['b']);
+  assert.deepEqual(resolve('@unknown hello', roles, ['b']).roleIds, ['b']);
+  assert.deepEqual(resolve('hello', [roles[1]], ['a']).roleIds, ['b']);
+  const reserved = [...roles,{id:'d',name:'所有人'}];
+  const named = choices(reserved).find(r=>r.id==='d');
+  assert.notEqual(named.label,'所有人');
+  assert.deepEqual(resolve('@'+named.label+' hi',reserved).roleIds,['d']);
+});
+test('Per-chat defaults persist, migrate safely, reject invalid input atomically and follow member removal', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(),'relay-default-replies-'));
+  t.after(()=>fs.rmSync(directory,{recursive:true,force:true}));
+  const store = new Store(directory,directory), projectId=store.state.projects[0].id;
+  const ids=store.state.roles.map(r=>r.id);
+  const a=store.createChat({projectId,roleIds:ids}), b=store.createChat({projectId,roleIds:ids});
+  assert.deepEqual(a.defaultReplyRoleIds,[]);
+  assert.deepEqual(require('../workbench/conversations.cjs').replyRoleIds(a),ids);
+  store.saveChat({id:a.id,roleIds:ids,defaultReplyRoleIds:[ids[2],ids[1],ids[1]]});
+  assert.deepEqual(a.defaultReplyRoleIds,[ids[1],ids[2]]);
+  assert.deepEqual(b.defaultReplyRoleIds,[]);
+  for(const value of [null,'all',['missing']]) {
+    const before=JSON.stringify(a);
+    assert.throws(()=>store.saveChat({id:a.id,roleIds:ids,name:'changed',defaultReplyRoleIds:value}),/default reply role/);
+    assert.equal(JSON.stringify(a),before);
+  }
+  const loaded=new Store(directory,directory);
+  assert.deepEqual(loaded.get('chats',a.id).defaultReplyRoleIds,[ids[1],ids[2]]);
+  loaded.saveChat({id:a.id,roleIds:[ids[0],ids[2]]});
+  assert.deepEqual(loaded.get('chats',a.id).defaultReplyRoleIds,[ids[2]]);
+  loaded.saveChat({id:a.id,roleIds:[ids[0]]});
+  assert.deepEqual(loaded.get('chats',a.id).defaultReplyRoleIds,[]);
+  delete loaded.get('chats',b.id).defaultReplyRoleIds; loaded.save();
+  const reopened=new Store(directory,directory);
+  assert.deepEqual(reopened.get('chats',b.id).defaultReplyRoleIds,[]);
+  assert.deepEqual(require('../workbench/conversations.cjs').replyRoleIds(reopened.get('chats',b.id)),ids);
+  reopened.saveChat({id:b.id,roleIds:ids,defaultReplyRoleIds:[ids[0]]});
+  assert.deepEqual(new Store(directory,directory).get('chats',b.id).defaultReplyRoleIds,[ids[0]],'explicit first-role selection must not be overwritten');
+  reopened.saveChat({id:b.id,roleIds:ids,defaultReplyRoleIds:[]});
+  const cleared=new Store(directory,directory).get('chats',b.id);
+  assert.deepEqual(cleared.defaultReplyRoleIds,[]);
+  assert.deepEqual(require('../workbench/conversations.cjs').replyRoleIds(cleared),ids);
+});

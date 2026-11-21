@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "windows-mcp": {
+      "type": "http",
+      "url": "${WINDOWS_MCP_URL}",
+      "headers": {
+        "Authorization": "Bearer ${WINDOWS_MCP_SECRET}"
+      }
+    }
+  }
+}
+

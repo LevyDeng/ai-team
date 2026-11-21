@@ -1,0 +1,68 @@
+[
+  {
+    "id": "preset-gpt",
+    "name": "GPT",
+    "file": "gpt.jpg",
+    "source": "originals/gpt.webp"
+  },
+  {
+    "id": "preset-claude",
+    "name": "Claude",
+    "file": "claude.jpg",
+    "source": "originals/claude.webp"
+  },
+  {
+    "id": "preset-gemini",
+    "name": "Gemini",
+    "file": "gemini.jpg",
+    "source": "originals/gemini.webp"
+  },
+  {
+    "id": "preset-deepseek",
+    "name": "DeepSeek",
+    "file": "deepseek.jpg",
+    "source": "originals/deepseek.webp"
+  },
+  {
+    "id": "preset-deepseek-alt",
+    "name": "DeepSeek 2",
+    "file": "deepseek-alt.jpg",
+    "source": "originals/deepseek-alt.webp"
+  },
+  {
+    "id": "preset-deepseek-chibi",
+    "name": "DeepSeek Q",
+    "file": "deepseek-chibi.jpg",
+    "source": "originals/deepseek-chibi.webp"
+  },
+  {
+    "id": "preset-grok",
+    "name": "Grok",
+    "file": "grok.jpg",
+    "source": "originals/grok.webp"
+  },
+  {
+    "id": "preset-glm",
+    "name": "GLM",
+    "file": "glm.jpg",
+    "source": "originals/glm.webp"
+  },
+  {
+    "id": "preset-hunyuan",
+    "name": "Hunyuan",
+    "file": "hunyuan.jpg",
+    "source": "originals/hunyuan.webp"
+  },
+  {
+    "id": "preset-kimi",
+    "name": "Kimi",
+    "file": "kimi.jpg",
+    "source": "originals/kimi.webp"
+  },
+  {
+    "id": "preset-qwen",
+    "name": "Qwen",
+    "file": "qwen.jpg",
+    "source": "originals/qwen.webp"
+  }
+]

@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'none'">
+  <title>Relay Desk</title>
+  <link rel="stylesheet" href="node_modules/@xterm/xterm/css/xterm.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-mark">R</div><div>Relay Desk<small>连接远程助手与 Windows</small></div></div>
+    <div class="section-heading"><span>项目</span><button id="add-project" class="icon-button" aria-label="添加项目">+</button></div>
+    <div id="projects" class="project-list"></div>
+    <label class="provider-picker" for="new-provider">新对话使用<select id="new-provider" aria-label="选择新对话的助手"><option value="claude">Claude</option><option value="codex">Codex（备用）</option></select></label>
+    <div class="section-heading conversations-heading"><span>对话</span><button id="new-session" type="button" class="icon-button" aria-label="新建对话" title="在当前项目中新建对话">+</button></div>
+    <div id="sessions" class="session-list"></div>
+    <section id="usage-panel" class="usage-panel" aria-label="账号额度与服务器资源"><div class="usage-heading"><button id="usage-toggle" class="usage-toggle" type="button" aria-controls="usage-details" aria-expanded="true" title="收起额度与资源"><span id="usage-chevron" aria-hidden="true">▾</span><strong id="usage-provider">Claude · 额度与资源</strong></button><button id="usage-refresh" class="quiet" type="button" aria-label="刷新剩余额度" title="同步远端 CLI 已提供的额度；不会发送模型消息" disabled>↻</button></div><div id="usage-details"><div id="usage-windows" class="usage-windows"></div><small id="usage-state" class="usage-state">连接服务器后读取 · 账号共享</small><div id="server-resources" class="server-resources"></div></div></section>
+    <div class="sidebar-bottom"><label class="keep-awake-control" title="开启后，Relay Desk 在前台、后台或最小化时均防止空闲屏保、自动锁屏和休眠；关闭开关或退出后停止。手动锁屏和系统强制策略仍然有效。"><input id="keep-awake" type="checkbox"><span>保持唤醒<small id="keep-awake-state">前台和后台均生效</small></span></label><button id="new-window">新建窗口 <span>Ctrl+Shift+N</span></button><button id="configuration">连接配置 <span>设置</span></button></div>
+  </aside>
+  <main>
+    <header class="toolbar"><div><span id="project-label">个人工作区</span><span id="project-path" class="path">~/claude-workspace</span></div><div class="toolbar-actions"><label class="force-control-option" title="开启后不等待用户空闲，双方鼠标键盘输入可能互相干扰；切换会短暂重启本机 MCP。"><input id="force-control" type="checkbox" disabled aria-label="允许强制接管"><span>允许强制接管</span></label><button id="services-toggle" class="quiet services-toggle" aria-controls="services-panel" aria-expanded="true"><span id="services-summary-dot" class="status-dot"></span><span id="services-toggle-label">收起状态</span></button><button id="log-toggle" class="quiet">运行日志</button><button id="connect" class="primary">连接并启动</button><button id="disconnect" class="quiet" disabled>断开连接</button></div></header>
+    <section id="services-panel" class="services" aria-label="连接状态">
+      <div class="service"><span id="mcp-dot" class="status-dot"></span><div><strong>Windows MCP</strong><small id="mcp-status">未检查</small></div><span id="local-port" class="service-detail">本地服务</span></div>
+      <div class="service"><span id="ssh-dot" class="status-dot"></span><div><strong>SSH 连接</strong><small id="ssh-status">未连接</small></div><span id="ssh-target" class="service-detail">远程服务器</span></div>
+      <div class="service"><span id="tunnel-dot" class="status-dot"></span><div><strong>反向隧道</strong><small id="tunnel-status">未检查</small></div><span id="remote-port" class="service-detail">仅本机可访问</span></div>
+    </section>
+    <div id="notice" class="notice" role="status" hidden></div>
+    <div class="project-work-area">
+    <section class="workspace">
+      <div id="empty-state" class="empty-state"><div class="empty-symbol">R</div><h1>你的远程工作区</h1><p>连接服务器，然后选择 Claude 或 Codex 开始对话。<br>助手在服务器运行，Windows 工具由本机提供。</p><div id="empty-model-slot" class="empty-model-slot"></div><div class="empty-steps"><span><b>1</b> 连接并启动</span><span><b>2</b> 选择助手并新建对话</span><span><b>3</b> 发送任务</span></div><button id="empty-connect" class="primary">开始使用</button><p class="subtle">使用现有 SSH 密钥；两种助手各自登录一次。</p></div>
+      <div id="session-header" class="session-header" hidden><div><strong id="session-title"></strong><span id="session-state">未连接</span></div><div><button id="mcp-reconnect" type="button" class="quiet" title="通过 Claude 原生命令重连 Windows-MCP；空闲且终端输入为空时执行" disabled>重连 MCP</button><button id="history-search-toggle" class="quiet" title="搜索当前会话（Ctrl+F）" aria-controls="history-search" aria-expanded="false">搜索</button><button id="history-toggle" class="quiet">查看历史</button><button id="rename-session" class="quiet">重命名</button><button id="end-session" class="session-connection connect-session" type="button">建立连接</button></div></div>
+      <section id="history-panel" class="history-panel" aria-label="对话历史" hidden><div class="history-heading"><strong>对话历史</strong><span id="history-state">正在读取…</span><button id="history-refresh" class="quiet">刷新</button></div><div id="history-search" class="history-search" role="search" aria-label="搜索当前会话" hidden><input id="history-search-input" type="search" placeholder="搜索当前会话…" maxlength="500" aria-label="搜索关键词" autocomplete="off" spellcheck="false"><span id="history-search-count" class="history-search-count" role="status" aria-live="polite"></span><button id="history-search-previous" type="button" class="quiet" title="上一个（Shift+Enter）" aria-label="上一个搜索结果" disabled>↑</button><button id="history-search-next" type="button" class="quiet" title="下一个（Enter）" aria-label="下一个搜索结果" disabled>↓</button><button id="history-search-close" type="button" class="quiet" title="关闭搜索（Esc）" aria-label="关闭搜索">×</button><small id="history-search-scope">仅搜索当前已加载的消息</small></div><div id="history-messages" class="history-messages" tabindex="0"></div></section>
+      <div id="terminal-host" class="terminal-host" hidden></div>
+      <div id="terminal-controls" class="terminal-controls" hidden><span id="terminal-controls-label">助手确认操作</span><button data-key="\u001b[A">上</button><button data-key="\u001b[B">下</button><button data-key="\r">确认选择</button><button data-key="\u001b">取消</button><button id="copy-selection" class="copy-button" title="拖选终端文字后点击，或按 Ctrl+C">复制所选</button><button id="stop-task" class="stop-button">停止任务</button></div>
+      <div id="composer-area" class="composer-area" hidden>
+        <div class="composer">
+          <div id="send-recovery" class="send-recovery" role="status" hidden><span id="send-recovery-state"></span></div>
+          <textarea id="prompt" rows="3" placeholder="输入任务，也可以拖入本机文件..." aria-label="发送给远程助手的消息"></textarea>
+          <div id="staged-files" class="staged-files" hidden aria-live="polite"></div>
+          <div class="composer-footer">
+            <div class="composer-options"><button id="composer-expand" type="button" class="quiet" aria-expanded="false" aria-controls="prompt" title="展开输入框，编辑长消息">展开输入</button><button id="send-history" type="button" class="quiet" title="查看本机发送备份，复制或恢复文字">发送记录</button><button id="pick-files" type="button" class="quiet">＋ 添加本机文件</button><button id="paste-image" type="button" class="quiet" title="也可 Ctrl+V 粘贴图片；发送时上传压缩副本，最长边 1568 像素，单张不超过 2 MiB">粘贴图片</button><span title="普通文件仅发送路径；剪贴板图片发送压缩副本">Enter 发送 · Shift+Enter 换行</span></div>
+            <div class="composer-actions">
+              <div id="composer-model-slot">
+                <section id="model-settings" class="model-settings" aria-label="模型设置">
+                  <label for="model-select"><span id="model-scope" class="sr-only">新对话模型</span><select id="model-select"><option value="">沿用 CLI 设置</option></select></label>
+                  <label for="effort-select"><span class="sr-only">推理强度</span><select id="effort-select" disabled><option value="">沿用 CLI 设置</option></select></label>
+                  <button id="apply-model" type="button" class="quiet" disabled>保存默认设置</button>
+                  <span id="model-pending" class="model-pending" hidden>发送时生效</span>
+                  <span id="model-list-state" class="model-list-state" role="status">连接后获取模型列表</span>
+                </section>
+              </div>
+              <button id="send" class="primary">发送消息</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="drop-overlay" class="drop-overlay" hidden>松开鼠标，添加本机文件路径</div>
+    </section>
+    <aside id="project-tools" class="project-tools" aria-label="项目工具" hidden>
+      <div class="project-tools-heading"><strong id="project-tools-title">项目工具</strong><button id="project-tools-close" type="button" class="quiet" aria-label="收起项目工具">×</button></div>
+      <div class="project-tools-nav"><button id="project-tools-files" type="button" aria-pressed="true">文件</button><button id="project-tools-terminal" type="button" aria-pressed="false">终端</button><button id="project-tools-settings" type="button" class="quiet">配置目录</button></div>
+      <label class="project-tools-location">目录<select id="project-tools-location"></select></label>
+      <section id="project-file-pane" class="project-tool-pane" aria-label="项目文件">
+        <div class="project-file-actions"><button id="project-file-up" type="button" class="quiet" title="返回上级">↑</button><button id="project-file-refresh" type="button" class="quiet" title="刷新文件">↻</button><button id="project-file-copy" type="button" class="quiet">复制路径</button><button id="project-file-open" type="button" class="quiet" hidden>打开</button><button id="project-file-expand" type="button" class="quiet" title="展开文件预览，占满中间工作区" aria-pressed="false">展开</button></div>
+        <div id="project-file-path" class="project-tool-path"></div><div id="project-file-content" class="project-file-content"></div>
+      </section>
+      <section id="project-terminal-pane" class="project-tool-pane" aria-label="项目终端" hidden>
+        <div class="project-terminal-actions">
+          <button id="project-terminal-new" type="button" class="quiet">＋ 新建终端</button>
+          <button id="project-terminal-copy" type="button" class="quiet" title="复制所选文字（Ctrl+C 或 Ctrl+Shift+C）" disabled>复制</button>
+          <button id="project-terminal-paste" type="button" class="quiet" title="粘贴文字（Ctrl+V 或 Ctrl+Shift+V）" disabled>粘贴</button>
+        </div>
+        <div id="project-terminal-tabs" class="project-terminal-tabs" aria-label="项目终端列表"></div>
+        <div id="project-terminal-path" class="project-tool-path"></div><div id="project-terminal-host" class="project-terminal-host"></div>
+      </section>
+    </aside>
+    </div>
+    <section id="activity" class="activity" hidden><div><strong>连接日志</strong><button id="service-logs" class="quiet">打开 MCP 日志</button><button id="close-activity" class="quiet">关闭</button></div><pre id="activity-content"></pre></section>
+    <footer><span id="footer-state">准备就绪</span><button id="project-tools-toggle" type="button" class="quiet" aria-expanded="false" aria-controls="project-tools">项目工具 · 终端与文件</button></footer>
+  </main>
+  <dialog id="project-dialog"><form id="project-form"><h2>添加项目</h2><p>服务器上的文件夹。如果尚不存在，开始对话时会自动创建。</p><label>项目名称<input id="new-project-name" required maxlength="100" placeholder="我的项目"></label><label>远程文件夹<input id="new-project-path" required placeholder="~/projects/my-project"></label><label>本地项目目录 <span class="optional">可选</span><div class="project-folder-row"><input id="new-project-local-path" placeholder="D:\example_project"><button id="new-project-folder-pick" type="button" class="quiet">选择…</button></div></label><p class="settings-note">仅用于打开本地路径，不会上传目录或改变远端工作目录。</p><div class="dialog-actions"><button type="button" class="quiet" data-close="project-dialog">取消</button><button type="submit" class="primary">添加项目</button></div></form></dialog>
+  <dialog id="project-folder-dialog" class="project-directory-dialog"><form id="project-folder-form"><h2>项目目录</h2><p id="project-folder-name"></p><p class="settings-note">第一项是终端和文件浏览器的默认目录。聊天里的相对链接使用第一项 Windows 目录。</p><div id="project-directory-list" class="project-directory-list"></div><div class="project-directory-add"><button id="project-directory-add-local" type="button" class="quiet">＋ Windows 目录</button><button id="project-directory-add-remote" type="button" class="quiet">＋ 服务器目录</button></div><div id="project-folder-error" class="dialog-error" role="alert" hidden></div><div class="dialog-actions"><button type="button" class="quiet" data-close="project-folder-dialog">取消</button><button id="project-folder-save" type="submit" class="primary">保存</button></div></form></dialog>
+  <dialog id="project-delete-dialog"><form id="project-delete-form"><h2>删除项目</h2><p id="project-delete-summary"></p><p class="settings-note">项目及其对话会从本机列表移除。服务器上的项目文件、历史记录保留；本机保留项目元数据备份。</p><label id="project-delete-stop-row" class="project-delete-stop" hidden><input id="project-delete-stop" type="checkbox"><span id="project-delete-stop-label"></span></label><p id="project-delete-remote-note" class="settings-note"></p><div id="project-delete-error" class="dialog-error" role="alert" hidden></div><div class="dialog-actions"><button type="button" class="quiet" data-close="project-delete-dialog">取消</button><button id="project-delete-confirm" type="submit" class="danger">从列表删除项目</button></div></form></dialog>
+  <dialog id="rename-dialog"><form id="rename-form"><h2>重命名对话</h2><label>名称<input id="rename-value" required maxlength="100"></label><div class="dialog-actions"><button type="button" class="quiet" data-close="rename-dialog">取消</button><button type="submit" class="primary">保存</button></div></form></dialog>
+  <dialog id="connection-dialog"><form id="connection-form"><h2>连接服务器</h2><p>连接信息和 MCP 密钥从项目的 .env 文件读取。</p><label>SSH 密钥口令 <span class="optional">可选</span><input id="passphrase" type="password" autocomplete="off" placeholder="当前密钥无需口令时留空"></label><p class="subtle">口令仅用于本次连接，不会保存。</p><div class="dialog-actions"><button type="button" class="quiet" data-close="connection-dialog">取消</button><button type="submit" class="primary">连接</button></div></form></dialog>
+  <dialog id="settings-dialog" class="settings-dialog"><form id="settings-form"><h2>连接配置</h2><p>保存后立即应用，无需重开 App。更改 SSH 连接信息会自动重连，远端会话保留。</p><div class="settings-grid"><label class="settings-wide">SSH 地址<input id="settings-target" required autocomplete="off" placeholder="user@host"></label><label>SSH 端口<input id="settings-ssh-port" type="number" min="1" max="65535" required></label><label>同时活跃会话上限<input id="settings-max-sessions" type="number" min="1" max="8" required></label><label class="settings-wide">SSH 私钥文件<div class="settings-key-row"><input id="settings-key" required autocomplete="off"><button id="settings-pick-key" type="button" class="quiet">选择…</button></div></label><label class="settings-wide">私钥口令<span class="optional">可选，仅本次使用</span><input id="settings-passphrase" type="password" autocomplete="off" placeholder="未加密的私钥留空"></label></div><p class="settings-note">会话上限由所有项目、Claude 和 Codex 共用。降低上限不会自动结束已有会话；新会话仍需通过内存检查。</p><div id="settings-mcp-summary" class="settings-note"></div><div id="settings-error" class="dialog-error" role="alert" hidden></div><div class="dialog-actions"><button type="button" class="quiet" data-close="settings-dialog">取消</button><button id="settings-save" type="submit" class="primary">保存并应用</button></div></form></dialog>
+  <dialog id="capacity-dialog" class="capacity-dialog"><h2>释放一个会话名额</h2><p id="capacity-summary"></p><p class="settings-note">结束会中断该会话当前任务，历史记录保留。腾出位置后会自动继续连接目标对话。</p><div id="capacity-list" class="capacity-list"></div><div id="capacity-error" class="dialog-error" role="alert" hidden></div><div class="dialog-actions"><button id="capacity-refresh" type="button" class="quiet">刷新列表</button><button id="capacity-cancel" type="button" class="quiet" data-close="capacity-dialog">暂不连接</button></div></dialog>
+  <dialog id="send-history-dialog" class="send-history-dialog"><h2>本机发送记录</h2><p class="settings-note">提交到远端终端后即清空输入框，文字备份保留。“远端已确认接收”表示另已核对到会话记录；两种状态均不代表任务完成。恢复只填入文字，不会自动发送；附件请核对或重新添加。</p><div id="send-history-list" class="send-history-list"></div><div class="dialog-actions"><button id="send-history-refresh" type="button" class="quiet">核对远端接收状态</button><button type="button" class="quiet" data-close="send-history-dialog">关闭</button></div></dialog>
+  <script src="node_modules/@xterm/xterm/lib/xterm.js"></script>
+  <script src="node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="node_modules/marked/lib/marked.umd.js"></script>
+  <script src="node_modules/dompurify/dist/purify.min.js"></script>
+  <script src="path-links.js"></script><script src="terminal-ui.js"></script><script src="markdown.js"></script>
+  <script src="history-search.js"></script>
+  <script src="mcp-recovery.js"></script>
+  <script src="project-tools.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
