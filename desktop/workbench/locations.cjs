@@ -93,9 +93,28 @@ class Locations {
       return await execOn(client, command, 20000);
     } finally { client.end(); }
   }
-  async runner(id) {
+  async ensureProjectDirectory(id, folder, home) {
+    if (typeof folder !== 'string' || !/^(?:\/|~\/)/.test(folder) || /[\0\r\n]/.test(folder)) {
+      throw new Error('VPS 项目目录必须以 / 或 ~/ 开头。');
+    }
+    const location = this.store.get('locations', id);
+    const useHome = folder.startsWith('~/');
+    if (useHome && (typeof home !== 'string' || !home.startsWith('/') || /[\0\r\n]/.test(home))) {
+      throw new Error(`无法确认 ${location.name} 的 SSH 用户主目录。请检查连接或填写绝对路径。`);
+    }
+    const target = useHome ? home.replace(/\/$/, '') + '/' + folder.slice(2) : folder;
+    const quotedTarget = shellQuote(target);
+    try {
+      await this.exec(id, `umask 077; mkdir -p -- ${quotedTarget} && test -x ${quotedTarget}`);
+    } catch (error) {
+      throw new Error(`无法在 ${location.name} 创建或访问项目目录 ${folder}。请检查路径及 SSH 用户的目录权限。`, { cause: error });
+    }
+    return target;
+  }
+  async runner(id, projectDirectory) {
     const client = await this.connect(id);
     const home = (await this.exec(id, 'printf %s "$HOME"')).trim();
+    const cwd = await this.ensureProjectDirectory(id, projectDirectory, home);
     const directory = home + '/.local/share/relay-desk';
     await this.exec(id, `umask 077; mkdir -p ${shellQuote(directory)}`);
     const sftp = await new Promise((resolve, reject) => client.sftp((e, s) => e ? reject(e) : resolve(s)));
@@ -106,7 +125,7 @@ class Locations {
         await this.exec(id,'mv -f -- '+shellQuote(temporary)+' '+shellQuote(directory+'/'+name));
       }
     } finally { sftp.end(); }
-    return { client, file: directory + '/run-agent.py', home };
+    return { client, file: directory + '/run-agent.py', home, cwd };
   }
   async catalog(id, engine, proxy) {
     if (!['claude', 'codex'].includes(engine)) throw new Error('This managed location supports Claude and Codex model catalogs.');

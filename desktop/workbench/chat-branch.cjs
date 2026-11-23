@@ -5,7 +5,8 @@ const {choices,resolve} = require('./mentions.js');
 const {randomUUID} = require('node:crypto');
 
 function branch(store, source, name) {
-  const roleIds = source.roleIds.filter(id => store.state.roles.some(role=>role.id===id));
+  const roleIds = source.roleIds.filter(id => store.state.roles.some(role => role.id === id && role.enabled !== false));
+  if (!roleIds.length) throw new Error('此对话没有已启用的角色，请先启用一位角色再创建分支。');
   const raw = historyFor({...source,ignoreModeratorMemory:true},{},true);
   const saved = memory(source,raw);
   const inherited = !saved && raw.find(message=>message.branchContext);
@@ -26,7 +27,10 @@ function branch(store, source, name) {
     moderatorRoleId:roleIds.includes(source.moderatorRoleId)?source.moderatorRoleId:'',moderatorCompression:source.moderatorCompression
   },{
     sourceChatId:source.id,messages,relayReplies:source.relayReplies,maxRounds:source.maxRounds,autoStop:source.autoStop,
-    roleSettings:structuredClone(source.roleSettings||{})
+    roleSettings:structuredClone(source.roleSettings||{}),
+    rolePersonas:structuredClone(source.rolePersonas||{}),
+    voice:source.voice ? {...source.voice,enabled:false} : undefined,
+    roleVoices:structuredClone(source.roleVoices||{})
   });
 }
 
@@ -35,12 +39,12 @@ function prepareHandoff(source, target, roles, recipientIds, prompt) {
   if(typeof prompt!=='string'||!prompt.trim()||prompt.length>140000)throw new Error('请输入要转交的任务说明。');
   const roster=target.roleIds.map(id=>roles.find(role=>role.id===id)).filter(Boolean);
   if(!Array.isArray(recipientIds))throw new Error('请选择目标对话中的角色。');
-  const available=new Map(choices(roster).filter(role=>role.id!=='all').map(role=>[role.id,role]));
+  const available=new Map(choices(roster).filter(role=>role.id!=='all'&&role.enabled!==false).map(role=>[role.id,role]));
   const mentions=[...new Set(recipientIds)].map(id=>available.get(id));
   if(!mentions.length||mentions.some(role=>!role))throw new Error('请选择目标对话中的角色。');
   const draft=mentions.map(role=>'@'+role.label).join(' ')+'\n\n【来自 '+source.name+'】\n'+prompt.trim();
-  const routed=resolve(draft,roster).roleIds;
-  if(routed.length!==mentions.length||routed.some((id,index)=>id!==mentions[index].id))throw new Error('任务说明里有额外的 @，请移除或把该角色加入接收名单。');
+  const {roleIds:routed,disabledRoleIds}=resolve(draft,roster);
+  if(disabledRoleIds?.length||routed.length!==mentions.length||routed.some((id,index)=>id!==mentions[index].id))throw new Error('任务说明里有额外的 @，请移除或把该角色加入接收名单。');
   return {draft, recipientIds:mentions.map(role=>role.id), recipientNames:mentions.map(role=>role.name)};
 }
 
@@ -53,7 +57,7 @@ function handoffTargets(store, source, query = '') {
   if(typeof query!=='string'||query.length>100)throw new Error('Enter up to 100 characters to search for a conversation.');
   const search=query.trim().toLowerCase();
   const projects=new Map(store.state.projects.map(project=>[project.id,project.name]));
-  const roles=new Map(store.state.roles.map(role=>[role.id,role.name]));
+  const roles=new Map(store.state.roles.filter(role=>role.enabled!==false).map(role=>[role.id,role.name]));
   return store.state.chats.filter(chat=>chat.id!==source.id&&!chat.disbandedAt)
     .sort((a,b)=>Number(b.projectId===source.projectId)-Number(a.projectId===source.projectId)||b.updatedAt-a.updatedAt)
     .map(chat=>({chatId:chat.id,name:chat.name,project:projects.get(chat.projectId),

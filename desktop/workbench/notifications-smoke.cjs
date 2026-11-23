@@ -58,6 +58,10 @@ async function run({window,store,app,directory,services,fixture,js,errors}){
   assert.equal(counts.at(-1),1);
   assert.equal(flashes.at(-1),false);
   if(process.platform==='win32')assert.equal(overlays.at(-1),true);
+  const overlayUpdates=overlays.length;
+  notifications.refresh();
+  notifications.refresh();
+  assert.equal(overlays.length,overlayUpdates,'Refreshing an unchanged count must not reapply the taskbar badge.');
   await js(`api['chat-delete'](${JSON.stringify(chat.id)})`);
   assert.equal(counts.at(-1),0,'Deleting the last unread chat must clear the taskbar badge.');
   if(process.platform==='win32')assert.equal(overlays.at(-1),false);

@@ -118,7 +118,7 @@ function owner(event) {
   if (!window || url !== require('node:url').pathToFileURL(path.join(__dirname, 'index.html')).href) throw new Error('Untrusted window.');
   return window.id;
 }
-function handle(name, fn) { ipcMain.handle('relay:' + name, async (event, ...args) => { const id = owner(event); if (quitting) throw new Error('Relay Desk is closing.'); return fn(id, ...args); }); }
+function handle(name, fn) { ipcMain.handle('relay:' + name, async (event, ...args) => { const id = owner(event); if (quitting) throw new Error('ai-team is closing.'); return fn(id, ...args); }); }
 handle('snapshot', () => ({ workspace: state, status: backend.snapshot(), unread: Object.fromEntries(unreadSessions), unreadRevisions: Object.fromEntries(unreadRevisions), keepAwake: keepAwake.snapshot() }));
 handle('keep-awake', (_id, enabled) => {
   if (typeof enabled !== 'boolean') throw new Error('Invalid keep-awake setting.');
@@ -400,9 +400,9 @@ function projectLocationContext(session) {
     'project-location-v1', project.id, project.localPathRevision || '', location,
     session.provider, connection.username, connection.host, connection.sshPort,
   ])).digest('hex');
-  const text = '\n\n<relay-desk-project-context>\nProject location context supplied by Relay Desk for this conversation. Use this location for project-relative paths until it is updated.\n'
+  const text = '\n\n<ai-team-project-context>\nProject location context supplied by ai-team for this conversation. Use this location for project-relative paths until it is updated.\n'
     + JSON.stringify(location, null, 2)
-    + '\nThe Windows root is on the user\'s computer, not this Linux server or container. Use Windows-MCP to access it; resolve relative project file paths against that root. The remote host folder is a separate location and does not imply that Windows files were uploaded or synchronized. If windowsProjectRoot is null, the local folder setting has been cleared; ask for the Windows location when needed. Do not change working directories or copy files just because of this context.\n</relay-desk-project-context>';
+    + '\nThe Windows root is on the user\'s computer, not this Linux server or container. Use Windows-MCP to access it; resolve relative project file paths against that root. The remote host folder is a separate location and does not imply that Windows files were uploaded or synchronized. If windowsProjectRoot is null, the local folder setting has been cleared; ask for the Windows location when needed. Do not change working directories or copy files just because of this context.\n</ai-team-project-context>';
   return { key, text };
 }
 function rememberProjectContext(record) {
@@ -621,7 +621,7 @@ handle('show-env', () => shell.showItemInFolder(path.join(root, '.env')));
 handle('show-logs', () => shell.openPath(path.join(root, 'logs')));
 
 function createWindow() {
-  const window = new BrowserWindow({ width: 1320, height: 900, minWidth: 980, minHeight: 700, show: !process.argv.includes('--smoke-test'), title: 'Relay Desk', backgroundColor: '#181b20', autoHideMenuBar: true, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+  const window = new BrowserWindow({ width: 1320, height: 900, minWidth: 980, minHeight: 700, show: !process.argv.includes('--smoke-test'), title: 'AI 小队', backgroundColor: '#181b20', autoHideMenuBar: true, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', (event) => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));

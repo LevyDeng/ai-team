@@ -1,1 +1,12 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'"><title>Agent 登录</title><link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css"><link rel="stylesheet" href="login.css"></head><body><div id="terminal"></div><script src="../node_modules/@xterm/xterm/lib/xterm.js"></script><script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script><script src="login.js"></script></body></html>
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'"><title>Agent 登录</title><link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css"><link rel="stylesheet" href="login.css"></head><body>
+<section id="remote-login" hidden>
+  <p>用本机浏览器登录要在 VPS 使用的 Google 账号，再把 Google 提供的授权码粘贴到这里。如果浏览器按钮不可用，可打开终端输出里的授权网址。</p>
+  <form id="login-code-form">
+    <button id="login-authorize" type="button" disabled>打开 Google 授权</button>
+    <label for="login-code">授权码</label>
+    <input id="login-code" type="password" autocomplete="off" spellcheck="false" required>
+    <button type="submit">提交授权码</button>
+  </form>
+  <p id="login-status" role="status"></p>
+</section>
+<div id="terminal"></div><script src="../node_modules/@xterm/xterm/lib/xterm.js"></script><script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script><script src="login.js"></script></body></html>

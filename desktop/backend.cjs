@@ -105,14 +105,14 @@ class Backend extends EventEmitter {
           });
           channel.on('end', () => finish(new Error(`Remote MCP health check failed (${response.split('\r\n')[0] || 'empty response'}). Check the tunnel and both .env secrets.`)));
           channel.on('error', finish);
-          const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'relay-desk-health', version: '0.1.0' } } });
+          const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'ai-team-health', version: '0.1.0' } } });
           channel.write(`POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nAuthorization: Bearer ${cfg.secret}\r\nAccept: application/json, text/event-stream\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
         });
       });
     }
     return new Promise((resolve, reject) => {
       const agent = new http.Agent({ keepAlive: false });
-      const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'relay-desk-health', version: '0.1.0' } } });
+      const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'ai-team-health', version: '0.1.0' } } });
       const request = http.request({ host: '127.0.0.1', port, path: '/mcp', method: 'POST', agent, headers: { Authorization: `Bearer ${cfg.secret}`, Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, (response) => {
         let text = '';
         response.on('data', (chunk) => { text += chunk; if (text.length > 300000) response.destroy(); });
@@ -160,8 +160,8 @@ class Backend extends EventEmitter {
   async setForceControl(enabled) {
     if (typeof enabled !== 'boolean') throw new Error('Invalid desktop control setting.');
     if (this.controlChanging || this.connecting || this.status.mcp === 'starting') throw new Error('Wait for the current service startup to finish.');
-    if (this.status.mcp === 'ready' && !this.service) throw new Error('The MCP service belongs to another launcher. Close that launcher and reconnect from Relay Desk to change control mode.');
-    if (this.status.tunnel === 'ready' && !this.status.tunnelOwned) throw new Error('The tunnel belongs to another launcher. Close that launcher and reconnect from Relay Desk to change control mode.');
+    if (this.status.mcp === 'ready' && !this.service) throw new Error('The MCP service belongs to another launcher. Close that launcher and reconnect from ai-team to change control mode.');
+    if (this.status.tunnel === 'ready' && !this.status.tunnelOwned) throw new Error('The tunnel belongs to another launcher. Close that launcher and reconnect from ai-team to change control mode.');
     this.forceControl = enabled;
     this.controlError = '';
     if (!this.service) { this.appliedForceControl = null; this.update({}); return this.snapshot(); }
@@ -216,7 +216,7 @@ class Backend extends EventEmitter {
       const applied = await this.readControlMode(port);
       if (generation !== this.generation) throw new Error('Connection canceled.');
       if (applied !== this.forceControl) {
-        if (!this.shareControlMode || this.service) throw new Error('The existing MCP control mode differs from your selection. Close its launcher and reconnect from Relay Desk.');
+        if (!this.shareControlMode || this.service) throw new Error('The existing MCP control mode differs from your selection. Close its launcher and reconnect from ai-team.');
         this.forceControl = applied;
         this.log('Following the existing MCP service desktop control mode so both interfaces can share it.');
       }
@@ -271,7 +271,7 @@ class Backend extends EventEmitter {
       if (this.service !== proc || proc.exitCode !== null) {
         let details = '';
         try { details = fs.readFileSync(path.join(this.root, 'logs', `mcp-${this.localPort || cfg.localPort}.err.log`), 'utf8').slice(-6000); } catch {}
-        if (details.includes('No active interactive desktop')) throw new Error('Windows MCP needs an unlocked interactive desktop. Unlock Windows and launch Relay Desk from your desktop.');
+        if (details.includes('No active interactive desktop')) throw new Error('Windows MCP needs an unlocked interactive desktop. Unlock Windows and launch ai-team from your desktop.');
         throw new Error(failure || 'MCP launcher stopped. Open the MCP logs for details.');
       }
       if (this.localPort) {

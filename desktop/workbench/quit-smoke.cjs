@@ -1,5 +1,4 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
 const { setTimeout: delay } = require('node:timers/promises');
 const { configure } = require('./workflow.cjs');
 
@@ -74,7 +73,7 @@ async function run({window, store, app, services, fixture, js, mode}) {
       assert.equal(relaunched, restart);
       assert.equal(stopRequested, active);
       assert.equal(stopFinished, mode === 'active');
-      const saved = JSON.parse(fs.readFileSync(store.file, 'utf8'));
+      const saved = store.persisted();
       const savedChat = saved.chats.find(item => item.id === chat.id);
       assert.equal(savedChat.draft, draft);
       if (active) {
@@ -96,14 +95,25 @@ async function run({window, store, app, services, fixture, js, mode}) {
   } else if (restart) {
     assert.deepEqual(await js(`$('workbench-menu').click();const first=document.activeElement.id;document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));[first,$('workbench-menu-panel').hidden,document.activeElement.id]`),['awake-toggle',true,'workbench-menu']);
     const { supportUrl } = require('../package.json');
-    assert.match(supportUrl, /^https:\/\/github\.com\/.+#support-the-project$/);
+    assert.match(supportUrl, /^https:\/\/github\.com\/.+/);
     const openExternal = services.shell.openExternal;
     let opened;
     try {
       services.shell.openExternal = async url => { opened = url; };
-      await fromFooter('support');
+      await js(`document.querySelector('[data-page="settings"]').click()`);
+      assert.equal(await js(`$('sidebar-list').firstElementChild.nextElementSibling.dataset.settingsSection`), 'about');
+      await js(`document.querySelector('[data-settings-section="about"]').click()`);
+      assert.equal(await js(`$('about-title').textContent`), '关于');
+      assert.equal(await js(`document.querySelector('.about-intro .pill').textContent`), 'v' + require('../package.json').version);
+      assert.deepEqual(await js(`Promise.all([...document.querySelectorAll('.support-code img')].map(img => img.complete ? Promise.resolve() : new Promise(resolve => { img.onload = resolve; img.onerror = resolve; }))).then(() => [...document.querySelectorAll('.support-code img')].map(img => img.naturalWidth > 0))`), [true, true]);
+      await js(`$('about-github').click()`);
       await until(() => Boolean(opened));
       assert.equal(opened, supportUrl);
+      opened = undefined;
+      await js(`$('about-repo-link').click()`);
+      await until(() => Boolean(opened));
+      assert.equal(opened, supportUrl);
+      await js(`document.querySelector('[data-page="projects"]').click()`);
     } finally {
       services.shell.openExternal = openExternal;
     }

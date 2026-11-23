@@ -36,6 +36,42 @@ def proxy_environment(source, policy):
     return env
 
 
+def forward_acp(process, stop, stopping):
+    source = sys.stdin.fileno()
+    target = process.stdin.fileno()
+    os.set_blocking(target, False)
+    pending = bytearray()
+    outgoing = bytearray()
+    limit = 8 * 1024 * 1024
+    while not stopping() and process.poll() is None:
+        readable, writable, _ = select.select([source], [target] if outgoing else [], [], 0.25)
+        if readable:
+            data = os.read(source, 65536)
+            if not data:
+                stop()
+                return
+            pending.extend(data)
+            end = pending.find(b'\n')
+            while end != -1:
+                frame = pending[:end]
+                del pending[:end + 1]
+                if frame in (b'cancel', b'force'):
+                    stop(force=frame == b'force')
+                    return
+                outgoing.extend(frame + b'\n')
+                end = pending.find(b'\n')
+            if len(outgoing) + len(pending) > limit:
+                raise ValueError('ACP input exceeds its size limit.')
+        if writable:
+            try:
+                length = os.write(target, outgoing)
+                del outgoing[:length]
+            except BlockingIOError:
+                pass
+            except BrokenPipeError:
+                return
+
+
 def main():
     # Read the first frame without buffering later keyboard frames ahead of select().
     line = sys.stdin.buffer.raw.readline(2 * 1024 * 1024 + 1)
@@ -56,6 +92,9 @@ def main():
     atexit.register(shutil.rmtree, job_directory, ignore_errors=True)
     env = proxy_environment(os.environ, request.get('proxy', {}))
     interactive = request.get('interactive') is True
+    acp = request.get('acp') is True
+    if acp and (interactive or request.get('managed') or request['engine'] != 'antigravity'):
+        raise ValueError('Unsupported remote ACP engine.')
     if interactive:
         if request['engine'] not in ('claude', 'codex'):
             raise ValueError('Unsupported interactive engine.')
@@ -65,9 +104,13 @@ def main():
         os.chmod(context_file, 0o600)
         command = [arg.replace('__RELAY_CONTEXT__', context_file) for arg in command]
         env['TERM'] = 'xterm-256color'
-    for key in list(env):
-        if key.startswith(('OPENAI_', 'ANTHROPIC_', 'GEMINI_', 'DEEPSEEK_', 'CODEX_', 'CLAUDECODE')):
-            del env[key]
+    if acp:
+        for key in ('AGY_ADC_AUTH', 'GOOGLE_APPLICATION_CREDENTIALS', 'GEMINI_API_KEY', 'GOOGLE_API_KEY'):
+            env.pop(key, None)
+    else:
+        for key in list(env):
+            if key.startswith(('OPENAI_', 'ANTHROPIC_', 'GEMINI_', 'DEEPSEEK_', 'CODEX_', 'CLAUDECODE')):
+                del env[key]
     if interactive and request['engine'] == 'codex':
         env['CODEX_INTERNAL_ORIGINATOR_OVERRIDE'] = 'relay_desk_' + job.replace('-', '')
     mcp = {}
@@ -111,7 +154,7 @@ def main():
                             'bash', '/opt/windows-mcp/start-' + engine + '.sh'] + command[1:]
         if interactive:
             command.insert(len(docker) + 1, '-t')
-    if not request.get('managed'):
+    if not request.get('managed') and not acp:
         isolated = os.path.expanduser('~/.local/share/relay-desk/profiles/' + str(uuid.UUID(request['roleId'])))
         os.makedirs(isolated, mode=0o700, exist_ok=True)
         env['CODEX_HOME'] = isolated + '/codex'
@@ -150,6 +193,8 @@ def main():
                                        stdout=slave, stderr=slave, preexec_fn=session)
         finally:
             os.close(slave)
+    elif acp:
+        process = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.PIPE, start_new_session=True)
     else:
         # A slow CLI or Docker startup must not block reading the SSH cancel frame.
         with tempfile.TemporaryFile(dir=job_directory) as job_input:
@@ -158,7 +203,7 @@ def main():
             process = subprocess.Popen(command, cwd=cwd, env=env, stdin=job_input, start_new_session=True)
 
     stop_status = None
-    def stop(*_):
+    def stop(*_, force=False):
         nonlocal stop_status
         if stop_status is not None:
             return
@@ -170,11 +215,12 @@ def main():
             except ProcessLookupError:
                 pass
 
-        signal_group(signal.SIGTERM)
-        try:
-            process.wait(timeout=0.75)
-        except subprocess.TimeoutExpired:
-            pass
+        if not force:
+            signal_group(signal.SIGTERM)
+            try:
+                process.wait(timeout=0.75)
+            except subprocess.TimeoutExpired:
+                pass
         signal_group(signal.SIGKILL)
         try:
             process.wait(timeout=0.75)
@@ -193,6 +239,17 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGHUP, stop)
     try:
+        if acp:
+            forward_acp(process, stop, lambda: stop_status is not None)
+            if stop_status is not None:
+                return stop_status
+            try:
+                exit_code = process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                stop()
+                return 1
+            stop(force=True)
+            return exit_code
         if interactive:
             pending = b''
             while stop_status is None:
@@ -221,8 +278,8 @@ def main():
                     while b'\n' in pending:
                         frame, pending = pending.split(b'\n', 1)
                         control = json.loads(frame)
-                        if control.get('type') == 'close':
-                            stop()
+                        if control.get('type') in ('close', 'force-close'):
+                            stop(force=control['type'] == 'force-close')
                             break
                         if control.get('type') == 'input':
                             value = control.get('data')
@@ -238,16 +295,20 @@ def main():
             if process.poll() is None:
                 stop()
             return stop_status if stop_status is not None else process.wait()
+        pending = b''
         while stop_status is None and process.poll() is None:
             readable, _, _ = select.select([sys.stdin.fileno()], [], [], 0.25)
             if readable:
-                # The only valid control on a non-interactive channel is cancellation.
-                stop()
+                # EOF and legacy control frames both request a graceful stop.
+                data = os.read(sys.stdin.fileno(), 64)
+                pending += data
+                if not data or b'\n' in pending or len(pending) >= 64:
+                    stop(force=pending.split(b'\n', 1)[0] == b'force')
         return stop_status if stop_status is not None else process.wait()
     finally:
         if history:
             history.poll(force=True)
-        if process.poll() is None:
+        if process.poll() is None or acp:
             stop()
         if master is not None:
             os.close(master)

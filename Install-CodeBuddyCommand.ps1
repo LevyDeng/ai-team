@@ -13,7 +13,7 @@ if (-not (Test-Path -LiteralPath $relayEntry -PathType Leaf)) {
 }
 $relayCommandDir = Join-Path $relayRoot 'bin'
 $relayCommand = Join-Path $relayCommandDir 'codebuddy.cmd'
-if (-not (Test-Path -LiteralPath $relayCommand -PathType Leaf)) { throw 'The Relay Desk command wrapper is missing.' }
+if (-not (Test-Path -LiteralPath $relayCommand -PathType Leaf)) { throw 'The ai-team command wrapper is missing.' }
 & $relayCommand --version
 if ($LASTEXITCODE -ne 0) { throw 'CodeBuddy version check failed.' }
 if (-not $NoUserPath) {

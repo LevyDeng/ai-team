@@ -1,16 +1,21 @@
 const { effectiveRole } = require('./chat-settings.js');
+function copyPersona(role) {
+  return { persona: role?.persona || '', examples: role?.examples || '' };
+}
 function initialize(chat, roles) {
   const selected = new Set(Array.isArray(chat.defaultReplyRoleIds) ? chat.defaultReplyRoleIds : []);
   chat.defaultReplyRoleIds = chat.roleIds.filter(id => selected.has(id));
   chat.roleSettings ||= {};
+  chat.rolePersonas ||= {};
   if(!Array.isArray(chat.draftAttachments))chat.draftAttachments=[];
   chat.relayReplies = chat.relayReplies !== false;
   if(!Number.isInteger(chat.maxRounds)||chat.maxRounds<1||chat.maxRounds>50)chat.maxRounds=1;
   chat.autoStop=chat.autoStop!==false;
   Object.assign(chat,require('./moderator.cjs').settings({},chat,chat.roleIds));
-  for (const id of chat.roleIds) if (!chat.roleSettings[id]) {
+  for (const id of chat.roleIds) {
     const role = roles.find(role => role.id === id);
-    chat.roleSettings[id] = { model: role?.model || '', effort: role?.effort || '' };
+    chat.roleSettings[id] ??= { model: role?.model || '', effort: role?.effort || '' };
+    if (role) chat.rolePersonas[id] ??= copyPersona(role);
   }
   return chat;
 }
@@ -28,8 +33,8 @@ function defaultReplies(value, roleIds, previous) {
   const retained = roleIds.filter(id => previous?.includes(id));
   return retained;
 }
-function replyRoleIds(chat) {
-  const selected = defaultReplies(undefined, chat.roleIds, chat.defaultReplyRoleIds);
-  return selected.length ? selected : [...chat.roleIds];
+function replyRoleIds(chat, available = chat.roleIds) {
+  const selected = defaultReplies(undefined, available, chat.defaultReplyRoleIds);
+  return selected.length ? selected : [...available];
 }
-module.exports = { initialize, effectiveRole, historyFor, defaultReplies, replyRoleIds };
+module.exports = { initialize, copyPersona, effectiveRole, historyFor, defaultReplies, replyRoleIds };

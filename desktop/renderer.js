@@ -58,7 +58,7 @@ const translations = new Map([
   ['MCP reconnect requires a connected Claude conversation.', '请先连接一个 Claude 会话。'],
   ['Wait for the current conversation operation to finish.', '请等待当前会话操作完成。'],
   ['Restore Windows MCP and the SSH tunnel before reconnecting Claude MCP.', 'Windows MCP 服务或隧道尚未恢复，请先检查顶部连接状态。'],
-  ['Relay Desk is closing.', 'Relay Desk 正在退出，请稍候。'],
+  ['ai-team is closing.', 'AI 小队正在退出，请稍候。'],
   ['Unable to safely release idle desktop sessions.', '暂时无法安全释放旧会话，未发送消息，请稍后重试。'],
   ['Invalid local project folder.', '本地项目目录无效。'],
   ['Choose an absolute local drive folder.', '请选择本机磁盘上的绝对路径，例如 D:\\example_project。'],
@@ -83,7 +83,7 @@ const translations = new Map([
   ['Invalid clipboard text.', '复制内容为空或过长。'],
   ['The clipboard does not contain a readable image.', '剪贴板中没有可读取的图片，请先复制图片或截图。'],
   ['Clipboard image source exceeds 32 MiB. Copy a smaller region.', '剪贴板原始图片超过 32 MiB，请截取较小的区域后再粘贴。'],
-  ['The clipboard image API is unavailable in this runtime.', '当前运行环境不支持读取剪贴板图片，请更新 Relay Desk 运行环境。'],
+  ['The clipboard image API is unavailable in this runtime.', '当前运行环境不支持读取剪贴板图片，请更新 AI 小队运行环境。'],
   ['The window was closed before the image could be attached.', '窗口已关闭，图片未添加。'],
   ['The session limit must be between 1 and 8.', '同时活跃会话上限必须为 1 到 8。'],
   ['Enter an SSH address in user@host format.', '请输入 user@host 格式的 SSH 地址。'],
@@ -109,9 +109,9 @@ const translations = new Map([
   ['Invalid desktop control setting.', '桌面控制设置无效。'],
   ['Wait for the current service startup to finish.', '请等待当前服务启动完成。'],
   ['Wait for the desktop control mode change to finish.', '请等待桌面控制模式切换完成。'],
-  ['The MCP service belongs to another launcher. Close that launcher and reconnect from Relay Desk to change control mode.', 'MCP 服务由其他启动器管理。请关闭原启动器，再通过 Relay Desk 连接后切换。'],
-  ['The tunnel belongs to another launcher. Close that launcher and reconnect from Relay Desk to change control mode.', '反向隧道由其他启动器管理。请关闭原启动器，再通过 Relay Desk 连接后切换。'],
-  ['The existing MCP control mode differs from your selection. Close its launcher and reconnect from Relay Desk.', '现有 MCP 的控制模式与所选设置不同。请关闭原启动器后重新连接。'],
+  ['The MCP service belongs to another launcher. Close that launcher and reconnect from ai-team to change control mode.', 'MCP 服务由其他启动器管理。请关闭原启动器，再通过 AI 小队连接后切换。'],
+  ['The tunnel belongs to another launcher. Close that launcher and reconnect from ai-team to change control mode.', '反向隧道由其他启动器管理。请关闭原启动器，再通过 AI 小队连接后切换。'],
+  ['The existing MCP control mode differs from your selection. Close its launcher and reconnect from ai-team.', '现有 MCP 的控制模式与所选设置不同。请关闭原启动器后重新连接。'],
   ['MCP did not apply the selected desktop control mode.', 'MCP 未能应用所选控制方式，请查看运行日志。'],
   ['Desktop input no longer waits for user inactivity. Physical and AI input can overlap.', '强制接管已开启：AI 不再等待用户空闲，双方鼠标键盘输入可能互相干扰。'],
   ['Cooperative desktop input protection restored.', '已恢复协作控制和用户输入保护。'],
@@ -125,7 +125,7 @@ const translations = new Map([
   ['Start the connection first, then reopen this conversation.', '请先连接服务器，再重新连接此对话。'],
   ['The local MCP service is still starting.', 'Windows MCP 服务仍在启动，请稍候。'],
   ['MCP startup timed out. See the service log.', 'MCP 启动超时，请检查服务日志。'],
-  ['Windows MCP needs an unlocked interactive desktop. Unlock Windows and launch Relay Desk from your desktop.', 'Windows MCP 需要访问已解锁的桌面。请解锁 Windows，然后从桌面启动 Relay Desk。'],
+  ['Windows MCP needs an unlocked interactive desktop. Unlock Windows and launch ai-team from your desktop.', 'Windows MCP 需要访问已解锁的桌面。请解锁 Windows，然后从桌面启动 AI 小队。'],
   ['Remote launchers and MCP settings synchronized. Secret contents are hidden.', '服务器启动配置已同步，密钥内容已隐藏。'],
   ['Using the existing local MCP service. Its original launcher remains in control.', '已复用现有的 Windows MCP 服务；原启动器仍负责管理它。'],
   ['Using the existing reverse tunnel. Keep its original launcher open.', '已复用现有的 SSH 反向隧道，请保持原启动窗口打开。'],
@@ -377,7 +377,7 @@ function renderForceControl(value) {
   $('force-control').disabled = Boolean(control.changing || value.mcp === 'starting' || value.ssh === 'connecting' || external);
   const label = $('force-control').closest('label');
   label.classList.toggle('force-control-active', control.applied === true);
-  label.title = external ? '当前复用了其他启动器的服务或隧道。请关闭原启动器，再由 Relay Desk 连接，才能切换控制方式。' : control.error ? `切换失败：${errorMessage(control.error)}` : control.changing ? '正在重启本机 MCP 以切换控制方式；远端对话保留。' : control.applied === true ? '已开启：AI 不等待你停止操作，双方输入可能互相干扰。原 MCP 接管快捷键不再生效；可关闭本选项恢复协作模式。' : value.mcp === 'ready' ? '已关闭：保留用户优先和空闲等待保护。开启会短暂重启本机 MCP，不结束远端对话。' : '选择将在 MCP 启动时应用。开启后 AI 与你的鼠标键盘操作可能互相干扰。';
+  label.title = external ? '当前复用了其他启动器的服务或隧道。请关闭原启动器，再由 AI 小队连接，才能切换控制方式。' : control.error ? `切换失败：${errorMessage(control.error)}` : control.changing ? '正在重启本机 MCP 以切换控制方式；远端对话保留。' : control.applied === true ? '已开启：AI 不等待你停止操作，双方输入可能互相干扰。原 MCP 接管快捷键不再生效；可关闭本选项恢复协作模式。' : value.mcp === 'ready' ? '已关闭：保留用户优先和空闲等待保护。开启会短暂重启本机 MCP，不结束远端对话。' : '选择将在 MCP 启动时应用。开启后 AI 与你的鼠标键盘操作可能互相干扰。';
   $('force-control').setAttribute('aria-label', control.changing ? '正在切换桌面控制方式' : '允许强制接管');
 }
 function renderWorkspace() {

@@ -4,6 +4,24 @@ const {EventEmitter}=require('node:events');
 const {PassThrough}=require('node:stream');
 const {waitForCliExit,shutdownGraceMs}=require('../workbench/cli-exit.cjs');
 function child(){const value=new EventEmitter();value.stdout=new PassThrough();value.stderr=new PassThrough();return value;}
+
+test('Cancelling an unresponsive CLI yields an explicit unconfirmed stop', async () => {
+  const cli = child();
+  const controller = new AbortController();
+  const exit = waitForCliExit(cli, code => new Error(String(code)), 5, {signal:controller.signal, cancelMs:15});
+  controller.abort();
+  await assert.rejects(exit, {code:'CLI_STOP_UNCONFIRMED'});
+});
+
+test('A CLI that exits after cancellation releases the wait as soon as its streams close', async () => {
+  const cli = child();
+  const controller = new AbortController();
+  const exit = waitForCliExit(cli, code => new Error(String(code)), 5, {signal:controller.signal, cancelMs:1000});
+  controller.abort();
+  cli.emit('exit', 1);
+  cli.emit('close', 1);
+  await assert.rejects(exit, {message:'1'});
+});
 const failure=code=>new Error('CLI exit '+code);
 test('An exited CLI does not wait forever for inherited pipes; trailing events drain first',async()=>{
   const process=child();let tail='';process.stdout.on('data',data=>tail+=data.toString());

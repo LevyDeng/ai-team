@@ -6,6 +6,37 @@ const path=require('node:path');
 const {Store}=require('../workbench/store.cjs');
 const {buildPrompt,parseEvent,argumentsFor,cleanEnv}=require('../workbench/agents.cjs');
 function fixture(t) { const directory=fs.mkdtempSync(path.join(os.tmpdir(),'relay-workbench-'));t.after(()=>fs.rmSync(directory,{recursive:true,force:true}));const store=new Store(directory,directory);return {store,directory,project:store.state.projects[0],role:store.state.roles[0]}; }
+test('Workflow priority rules migrate once and survive editing or removal across restarts', t => {
+  const {store,directory,role}=fixture(t);
+  store.saveRole({...role,workflowRatings:[{domain:'Code',duty:'Review',score:9}]});
+  delete store.state.workflowPriorities;
+  store.save();
+  const migrated = new Store(directory,directory);
+  const [rule] = migrated.state.workflowPriorities;
+  assert.deepEqual(rule.candidates,[{roleId:role.id,tier:1,weight:1}]);
+  assert.throws(()=>migrated.updateWorkflowPriority(undefined,{...rule,domain:'code'}));
+  migrated.updateWorkflowPriority(rule.id,{...rule,candidates:[{roleId:role.id,tier:1,weight:3}]});
+  const reopened = new Store(directory,directory);
+  assert.equal(reopened.state.workflowPriorities[0].candidates[0].weight,3);
+  reopened.updateWorkflowPriority(rule.id,null);
+  assert.deepEqual(new Store(directory,directory).state.workflowPriorities,[]);
+});
+test('Disabling a role persists without dropping its settings or chat memberships', t => {
+  const {store,directory,project,role}=fixture(t);
+  const chat=store.createChat({projectId:project.id,roleIds:[role.id]});
+  store.message(chat.id,{kind:'assistant',roleId:role.id,text:'Previous answer',status:'complete'});
+  store.setRoleEnabled(role.id,false);
+  store.saveRole({...role,description:'Updated while disabled'});
+  const loaded=new Store(directory,directory);
+  assert.equal(loaded.get('roles',role.id).enabled,false);
+  assert.equal(loaded.get('roles',role.id).description,'Updated while disabled');
+  assert.deepEqual(loaded.get('chats',chat.id).roleIds,[role.id]);
+  assert.equal(loaded.get('chats',chat.id).messages[0].text,'Previous answer');
+  loaded.saveChat({id:chat.id,name:'Renamed',roleIds:[role.id]});
+  assert.throws(()=>loaded.createChat({projectId:project.id,roleIds:[role.id]}),/启用/);
+  loaded.setRoleEnabled(role.id,true);
+  assert.deepEqual(loaded.createChat({projectId:project.id,roleIds:[role.id]}).roleIds,[role.id]);
+});
 test('Role credentials never enter the public workspace; native and API compatibility is validated',t=>{
   const {store,role}=fixture(t);store.saveRole({...role,apiKey:'fixture-secret',persona:'Review carefully.'});assert(!JSON.stringify(store.snapshot()).includes('fixture-secret'));
   assert.throws(()=>store.saveRole({...role,engine:'claude',provider:'gemini'}),/Codex adapter/);

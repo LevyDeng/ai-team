@@ -1,4 +1,4 @@
-Relay Desk 安装程序
+AI 小队 安装程序
 接下来需要输入服务器地址和账号信息。详细说明请查看 docs\SETUP.md。
 PowerShell 安装步骤使用简明英文提示。
 

@@ -10,20 +10,45 @@ const { usesDesktopLogin, sharedProcessArgs } = require('./desktop-login.cjs');
 const vendors = require('./vendor-agents.cjs');
 const { AcpClient } = require('./acp-client.cjs');
 const { spawn: spawnAgent } = require('node:child_process');
+const remoteAntigravity = require('./remote-antigravity.cjs');
 const bases = { openai: 'https://api.openai.com/v1', gemini: 'https://generativelanguage.googleapis.com/v1beta/openai', deepseek: 'https://api.deepseek.com', moonshot:'https://api.moonshot.cn/v1' };
 async function queryVendor(role,home,cwd,env) {
   const entry=findExecutable(role),launch=vendors.launch(entry,vendors.args({...role,model:'',effort:''}),env);
   const child=spawnAgent(launch.command,launch.args,{cwd,env:launch.env,windowsHide:true,stdio:['pipe','pipe','ignore']});
   const client=new AcpClient(child,{text:''},()=>{},role);
   try {
-    await client.initialize();const session=await client.session(cwd,{});
-    const direct=session.models?.availableModels;
-    if(Array.isArray(direct)&&role.engine!=='antigravity')return direct.map(model=>({id:model.modelId,label:model.name,description:model.description}));
-    const selection=(session.configOptions || []).find(option=>option.category==='model'||option.id==='model');
-    if(!selection&&Array.isArray(direct))return direct.map(model=>({id:model.modelId,label:model.name,description:model.description}));
-    const options=(selection?.options || []).flatMap(option=>option.options || [option]);
-    return options.map(model=>({id:model.value,label:model.name}));
+    await client.initialize();
+    const session = await client.session(cwd, {});
+    if (role.engine === 'cursor') {
+      try {
+        const { models } = await client.call('cursor/list_available_models', {});
+        if (Array.isArray(models) && models.length) return models.map(model => ({
+          id: model.value, label: model.name, isDefault: model.value === 'default',
+          parameters: cursorParameters(model.configOptions),
+        }));
+      } catch (error) {
+        if (error.rpcCode !== -32601) throw error;
+      }
+    }
+    return vendorModels(session, role.engine);
   } finally {client.close();await vendors.stop(child);}
+}
+function cursorParameters(options) {
+  return (Array.isArray(options) ? options : []).filter(option =>
+    option?.type === 'select' && ['thought_level', 'model_config'].includes(option.category) &&
+    /^[\w-]+$/.test(option.id) && Array.isArray(option.options)
+  ).map(option => ({
+    id: option.id, category: option.category, defaultValue: option.currentValue,
+    values: option.options.map(choice => choice.value).filter(value => typeof value === 'string' && /^[\w.-]+$/.test(value)),
+  }));
+}
+function vendorModels(session, engine) {
+  const direct = session.models?.availableModels;
+  const selection = (session.configOptions || []).find(option => option.category === 'model' || option.id === 'model');
+  if (Array.isArray(direct) && (engine !== 'antigravity' || !selection)) {
+    return direct.map(model => ({ id: model.modelId, label: model.name, description: model.description }));
+  }
+  return (selection?.options || []).flatMap(item => item.options || [item]).map(model => ({ id: model.value, label: model.name }));
 }
 function normalize(entries) {
   const seen = new Set();
@@ -36,7 +61,8 @@ function normalize(entries) {
       id, label:String(entry.label || entry.displayName || id).slice(0,200), description:String(entry.description || '').slice(0,600),
       ...(entry.resolvedModel ? {resolvedModel:String(entry.resolvedModel).slice(0,200)} : {}),
       ...(entry.isDefault || entry.value==='default' ? {isDefault:true} : {}),
-      ...(efforts ? {efforts,defaultEffort:efforts.includes(defaultEffort)?defaultEffort:''} : {})
+      ...(efforts ? {efforts,defaultEffort:efforts.includes(defaultEffort)?defaultEffort:''} : {}),
+      ...(Array.isArray(entry.parameters) ? { parameters: entry.parameters } : {}),
     };
   }).filter(entry => entry.id && entry.id.length <= 200 && !/[\s\x00-\x1f]/.test(entry.id) && !seen.has(entry.id) && seen.add(entry.id)).slice(0, 500);
 }
@@ -108,10 +134,16 @@ class ModelCatalogs {
     if (draft.provider !== 'native' && !key) throw new Error('Enter an API key to load models. The role does not need to be saved first.');
     const proxy = this.network?.policy(draft);
     const connection=[location.type,location.host,location.port,location.username,location.keyPath];
-    const digest = crypto.createHash('sha256').update(JSON.stringify([draft.id || 'new', draft.engine, draft.provider, location.id, base, draft.executable || '', key, proxy, draft.codexLoginSource || 'isolated', usesDesktopLogin(draft) ? this.agents.desktopHome() : '',connection])).digest('hex');
+    const loginScope = vendors.supportsRemote(draft.engine, location) ? require('./native-sessions.cjs').loginScope(draft, location) : '';
+    const loginEpoch = loginScope ? this.store.state.nativeLoginEpochs?.[loginScope] || 0 : undefined;
+    const cacheKey = [draft.id || 'new', draft.engine, draft.provider, location.id, base, draft.executable || '', key, proxy, draft.codexLoginSource || 'isolated', usesDesktopLogin(draft) ? this.agents.desktopHome() : '', connection];
+    if (loginScope) cacheKey.push(loginEpoch);
+    const digest = crypto.createHash('sha256').update(JSON.stringify(cacheKey)).digest('hex');
     const cached = this.cache[digest];
     if (cacheOnly) return {models:cached?.models || [], cached:true};
-    if (!force && cached?.models?.length) return { ...cached, cached: true };
+    if (!force && cached?.models?.length && (draft.engine !== 'cursor' || cached.cursorParameters === 1)) {
+      return { ...cached, cached: true };
+    }
     if (this.pending.has(digest)) return this.pending.get(digest);
     const work = (async () => {
       try {
@@ -122,6 +154,13 @@ class ModelCatalogs {
           if (!response.ok) throw new Error('Model list request failed (HTTP ' + response.status + '). Check the key and provider URL.');
           const body = await response.text(); if (body.length > 2 * 1024 * 1024) throw new Error('Model catalog exceeded its size limit.');
           entries = JSON.parse(body).data;
+        } else if (vendors.supportsRemote(draft.engine, location)) {
+          try {
+            entries = vendorModels(await remoteAntigravity.probe(this.locations, location, draft, proxy), draft.engine);
+          } catch (error) {
+            if (error.code === 'VENDOR_LOGIN_REQUIRED') throw new Error('请先点击「配置并登录 VPS」完成 Google 授权，再读取模型。');
+            throw error;
+          }
         } else if (location.managed) {
           if (this.network) entries = (await this.locations.catalog(location.id, draft.engine, proxy)).models;
           else { await this.locations.connect(location.id); await this.backend.refreshModels(); entries = this.backend.catalog[draft.engine]?.models; }
@@ -134,7 +173,8 @@ class ModelCatalogs {
         } else throw new Error('This SSH location has no model-catalog adapter. Enter a model ID manually.');
         const models = normalize(entries);
         if (!models.length) throw new Error('The provider returned no selectable models. A model ID can still be entered manually.');
-        const result = { models, updatedAt: Date.now(), source: draft.provider === 'native' ? 'cli' : 'api' };
+        const result = { models, updatedAt: Date.now(), source: draft.provider === 'native' ? 'cli' : 'api',
+          ...(draft.engine === 'cursor' ? { cursorParameters: 1 } : {}) };
         this.cache[digest] = result;
         const retained = Object.entries(this.cache).sort((a,b) => b[1].updatedAt - a[1].updatedAt).slice(0, 64);
         this.cache = Object.fromEntries(retained); atomic(this.file, this.cache);

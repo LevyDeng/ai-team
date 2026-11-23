@@ -49,7 +49,7 @@
       description.textContent = [engines[role.engine] || role.engine, role.provider === 'native' ? '原生账号' : role.provider, locationName?.(role.locationId), role.model || '默认模型'].filter(Boolean).join(' · ');
       description.title = description.textContent;
       info.append(name, description);
-      const membership = document.createElement('span'); membership.className = 'role-option-membership'; membership.textContent = members.has(role.id) ? '项目成员' : '可添加';
+      const membership = document.createElement('span'); membership.className = 'role-option-membership'; membership.textContent = role.enabled === false ? '已禁用' : members.has(role.id) ? '项目成员' : '可添加';
       element.append(input, portrait(role), info, membership); list.append(element); rows.push({ element, input, role });
     }
     container.querySelector('input[type=search]').oninput = event => {

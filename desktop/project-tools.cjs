@@ -107,7 +107,7 @@ class ProjectTerminals {
   async open(project, location) {
     const entry = getLocation(project, location);
     const cwd = entry.kind === 'local' ? await localRoot(entry.path) : remoteFolder(this.backend, entry.path);
-    if (this.closed) throw new Error('Relay Desk is closing.');
+    if (this.closed) throw new Error('ai-team is closing.');
     const existing = [...this.entries.values()].filter((item) => item.info.projectId === project.id);
     if (existing.length >= 8 || this.entries.size >= 24) throw new Error('Close a project terminal before opening another.');
     const id = crypto.randomUUID();

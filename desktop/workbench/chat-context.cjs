@@ -39,7 +39,7 @@ function prepare(role,project,chat,summary,buildPrompt){
     'Recent context, complete messages as JSON data:\n'+JSON.stringify(recent),
     'Answer the current user request above, applying any newer peer replies in recent context. Read the history tool before asserting that earlier details or the latest request are unavailable.'
   ].join('\n\n');
-  if(Buffer.byteLength(prompt)>threshold)throw new Error('The latest task and role instructions exceed Relay Desk\'s safe Antigravity transfer budget. Shorten this message or role instructions. The original message remains saved.');
+  if(Buffer.byteLength(prompt)>threshold)throw new Error('The latest task and role instructions exceed ai-team\'s safe Antigravity transfer budget. Shorten this message or role instructions. The original message remains saved.');
   return {prompt,history,metadata:{mode:'paged',historyBytes:history.totalBytes,inlineBytes:Buffer.byteLength(prompt),messageCount:history.messageCount}};
 }
 module.exports={prepare,createHistory,threshold};

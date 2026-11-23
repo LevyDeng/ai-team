@@ -1,7 +1,8 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const {configure,run,recover}=require('../workbench/workflow.cjs');
-const roles=[...['developer','backup','reviewer','alternate'].map(id=>({id})),{id:'host',engine:'claude'}];
+const roles=[...['developer','backup','reviewer','alternate'].map(id=>({id,engine:'opencode'})),{id:'host',engine:'antigravity'},
+  {id:'manual',engine:'gemini-web'}, {id:'disabled',engine:'codex',enabled:false}];
 function fixture(settings={}){
   return {messages:[],workflow:configure({goal:'Repair the viewer',criteria:'Viewer tests pass',
     teams:{implement:['developer','backup'],review:['reviewer','alternate']},limit:2,...settings},roles)};
@@ -73,7 +74,7 @@ test('A moderator chooses one candidate per stage and fallback keeps the origina
 });
 
 test('Invalid routing output or an invalid workflow stops before running a participant',async()=>{
-  assert.throws(()=>fixture({moderatorRoleId:'developer'}),/Choose a Codex or Claude role/);
+  for (const id of ['manual','disabled','unknown']) assert.throws(()=>fixture({moderatorRoleId:id}));
   for(const response of [task=>selection(task,'reviewer'),task=>selection(task,'developer',{action:'restart'})]){
     const chat=fixture({moderatorRoleId:'host'});
     let attempts=0;
@@ -116,7 +117,7 @@ test('Stopping during moderator selection does not dispatch the chosen role',asy
   assert.deepEqual(chat.workflow.attempts,[]);
 });
 
-test('Routing and participant deadlines leave the workflow waiting for inspection',async t=>{
+test('A routing timeout stops selection and participants use the workflow cancellation signal',async t=>{
   const timeouts=[];
   t.mock.method(AbortSignal,'timeout',ms=>{
     const controller=new AbortController();
@@ -131,13 +132,16 @@ test('Routing and participant deadlines leave the workflow waiting for inspectio
   assert.match(waitingForRoute.workflow.reason,/moderator timed out/);
   assert.equal(waitingForRoute.workflow.attempts.length,0);
 
-  const waitingForWorker=fixture({moderatorRoleId:'host'});
-  await run(waitingForWorker,{signal,save(){},route:async task=>task.select(selection(task,'backup')),turn:async(_attempt,_prompt,stepSignal)=>{
+  const manuallyStopped = fixture({moderatorRoleId:'host'});
+  const controller = new AbortController();
+  await run(manuallyStopped,{signal:controller.signal,save(){},route:async task=>task.select(selection(task,'backup')),turn:async(_attempt,_prompt,stepSignal)=>{
     timeouts.at(-1).controller.abort();
-    return stepSignal.aborted?{...rejected,stopConfirmed:true}:complete('Unexpected result');
+    assert.equal(stepSignal,controller.signal);
+    assert.equal(stepSignal.aborted,false);
+    controller.abort();
+    return {status:'cancelled',stopConfirmed:true};
   }});
-  assert.deepEqual(timeouts.map(timeout=>timeout.ms),[90_000,90_000,1_800_000]);
-  assert.equal(waitingForWorker.workflow.status,'needs_check');
-  assert.match(waitingForWorker.workflow.reason,/step timed out/);
-  assert.deepEqual(waitingForWorker.workflow.attempts.map(attempt=>attempt.roleId),['backup']);
+  assert.deepEqual(timeouts.map(timeout=>timeout.ms),[90_000,90_000]);
+  assert.equal(manuallyStopped.workflow.status,'paused');
+  assert.equal(manuallyStopped.workflow.attempts[0].status,'cancelled');
 });

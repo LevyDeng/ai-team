@@ -1,1 +1,10 @@
-html,body,#terminal { height:100%;margin:0;background:#15191e; } #terminal { box-sizing:border-box;padding:16px; }
+html,body { height:100%;margin:0;background:#15191e;color:#e4e9ef;font:15px system-ui,sans-serif; }
+body { display:flex;flex-direction:column; }
+#terminal { flex:1;min-height:0;box-sizing:border-box;padding:16px; }
+#remote-login { padding:16px;border-bottom:1px solid #414b56; }
+#remote-login p { margin:0 0 12px; }
+#remote-login form { display:flex;align-items:center;gap:8px;flex-wrap:wrap; }
+#remote-login input,#remote-login button { font:inherit;border:1px solid #617080;border-radius:6px;padding:6px 10px;background:#222931;color:inherit; }
+#remote-login button:enabled { cursor:pointer; }
+#remote-login button:disabled { opacity:.6; }
+#login-status:not(:empty) { margin:12px 0 0; }

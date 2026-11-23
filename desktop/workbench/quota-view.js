@@ -30,7 +30,7 @@
         try{
         term=new Terminal({fontSize:14,fontFamily:'Cascadia Mono, Consolas, monospace',disableStdin:true,convertEol:true,theme:{background:'#15191e',foreground:'#d7e0e9'}});fit=new FitAddon.FitAddon();term.loadAddon(fit);term.open(host);
         window.relayTerminalUI.installCopy(term,host,{copy:text=>api.copy(text),readOnly:true,error:report});observer=new ResizeObserver(resize);observer.observe(host);resize();action('refresh');
-        }catch(problem){stop();status.textContent='无法初始化额度终端，请完全退出并重新打开 Relay Desk 后重试。';host.textContent='额度终端加载失败。可以返回额度列表，或关闭此窗口。';error(problem);}
+        }catch(problem){stop();status.textContent='无法初始化额度终端，请完全退出并重新打开 AI 小队后重试。';host.textContent='额度终端加载失败。可以返回额度列表，或关闭此窗口。';error(problem);}
       },
       destroy(){disposed=true;stop();unsubscribe();}
     };

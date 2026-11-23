@@ -4,10 +4,13 @@ else if (process.argv.includes('--legacy')) { require('../main.cjs'); } else {
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, nativeImage, safeStorage, nativeTheme, net, session } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
+const { randomUUID } = require('node:crypto');
 const { setTimeout: delay } = require('node:timers/promises');
 const localExecutor = require('./local-executor.cjs');
 const { pathToFileURL } = require('node:url');
-const { Store } = require('./store.cjs');
+const { Store, messagePreview } = require('./store.cjs');
+const { messageData, messageView, readMessageDetail } = require('./workspace-db.cjs');
+const { isDeepStrictEqual } = require('node:util');
 const { Vault, Locations } = require('./locations.cjs');
 const { Agents, findExecutable } = require('./agents.cjs');
 const { ClaudeUpdater } = require('./claude-update.cjs');
@@ -16,16 +19,19 @@ const { ModelCatalogs } = require('./model-catalogs.cjs');
 const { Usage } = require('./usage.cjs');
 const { ProxyRouter, environment: proxyEnvironment } = require('./proxy.cjs');
 const { effectiveRole } = require('./conversations.cjs');
+const { projectGuestIds } = require('./mentions.js');
 const { formatMissingProjectDirectories } = require('./project-directories.cjs');
 const { usesDesktopLogin } = require('./desktop-login.cjs');
 const { requireCodexLogin } = require('./native-auth.cjs');
 const vendors = require('./vendor-agents.cjs');
+const remoteAntigravity = require('./remote-antigravity.cjs');
 const discussion = require('./discussion.cjs');
 const { Backend } = require('../backend.cjs');
 const { KeepAwake } = require('../keep-awake.cjs');
 const { ProjectTerminals, projectFiles } = require('../project-tools.cjs');
 const { ClipboardImages, readClipboardImage } = require('../clipboard-images.cjs');
 const { Attachments }=require('./attachments.cjs');
+const voiceSettings = require('./chat-voice.cjs');
 const {GeminiWeb, engine:geminiWebEngine, home:geminiWebHome}=require('./gemini-web.cjs');
 const root = path.resolve(__dirname, '../..');
 const smoke = process.argv.includes('--workbench-smoke');
@@ -33,7 +39,15 @@ const smokeRun=smoke&&/^[0-9]{1,12}$/.test(process.env.RELAY_SMOKE_RUN||'')?'-'+
 const data = smoke ? path.join(root, '.runtime/workbench-smoke'+smokeRun) : path.join(root, '.runtime/workbench');
 require('../windows-launch.cjs').configureWindowsLaunch(app,{root,disabled:smoke});app.setPath('userData', path.join(data, 'browser'));
 if (!smoke && !app.requestSingleInstanceLock()) app.quit(); else {
-const store = new Store(data, root); const vault = new Vault(data, safeStorage); const backend = new Backend(root, { shareControlMode:true });
+let store;
+try { store = new Store(data, root, { keepOpen: true }); }
+catch (error) {
+  console.error('Could not open the workspace:', error);
+  dialog.showErrorBox('无法打开 AI 小队工作区', '无法读取或迁移本机工作区。请检查目录权限和磁盘空间。\n\n' + data + '\n' + error.message);
+  app.exit(1);
+  return;
+}
+const vault = new Vault(data, safeStorage); const backend = new Backend(root, { shareControlMode:true });
 const locationName = id => store.state.locations.find(location => location.id === id)?.name || id;
 try { backend.forceControl=JSON.parse(fs.readFileSync(path.join(root,'.runtime/desktop/state.json'),'utf8')).forceControl===true; } catch {}
 const avatars = new Avatars(path.join(data, 'avatars'), nativeImage);
@@ -42,15 +56,59 @@ nativeTheme.on('updated', () => {
   for (const window of BrowserWindow.getAllWindows()) window.setBackgroundColor(nativeTheme.shouldUseDarkColors ? '#191d23' : '#ffffff');
 });
 const running = new Map(); const terminalManagers = new Map();
-let confirmingQuit = false, quitting = false, quitReady = false, workbenchWindow;
+const antigravitySetups = new Set();
+let confirmingQuit = false, quitting = false, quitReady = false, workbenchWindow, displayedBadgeCount;
 // Chromium's network stack follows the user's system proxy; Node fetch does not.
 const providerFetch = (input, options) => net.fetch(input, options);
+const chatVoice = new voiceSettings.ChatVoice(providerFetch, vault, path.join(data, 'voice'), publishVoiceModelStatus);
+let voiceModelOperation = null;
+function voiceModelStatus() {
+  return { ...chatVoice.local.status(), operation: voiceModelOperation };
+}
+function publishVoiceModelStatus() {
+  const value = voiceModelStatus();
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (!w.webContents.isDestroyed()) w.webContents.send('desk:voice-model-status', value);
+  }
+}
+const chatById = id => store.state.chats.find(chat => chat.id === id);
+const { PhoneLink, addresses: phoneAddresses } = require('./phone-link.cjs');
+const liveVoice = new (require('./realtime-voice.cjs').RealtimeVoice)({
+  voice: chatVoice, getChat: chatById, busy: inputBusy,
+  submit: (chatId, text) => submitChat({ chatId, text, plain: true }),
+});
+const liveSenders = new WeakSet();
+const phoneLink = new PhoneLink({
+  runtime: path.join(data, 'voice'), getChat: chatById, live: liveVoice,
+  submit: (chatId, text) => submitChat({ chatId, text, plain: true }),
+  changed: () => emit(),
+});
 const network = new ProxyRouter(store, { app, session });
-const emit = () => { for (const w of BrowserWindow.getAllWindows()) w.webContents.send('desk:state', snapshot()); };
+const emit = () => {
+  for (const id of liveVoice.sessions.keys()) liveVoice.sync(id);
+  phoneLink.sync();
+  const windows = BrowserWindow.getAllWindows();
+  if (!windows.length) return;
+  const value = snapshot();
+  for (const w of windows) w.webContents.send('desk:state', value);
+};
+const sendMessage = ({ chatId, message }) => {
+  const chat = chatById(chatId);
+  if (!chat) return;
+  const value = { chatId, message: messageView(message), updatedAt: chat.updatedAt,
+    atEnd: chat.messages.at(-1)?.id === message.id, lastMessage: messagePreview(chat.messages.findLast(item => !item.moderatorTask)) };
+  for (const w of BrowserWindow.getAllWindows()) w.webContents.send('desk:message', value);
+};
+const publishMessage = event => {
+  if (!event) { emit(); return; }
+  liveVoice.message(event.chatId, event.message);
+  phoneLink.message(event.chatId, event.message);
+  sendMessage(event);
+};
 const locations = new Locations(store, vault, backend, async (location, fingerprint) => {
   const result = await dialog.showMessageBox({ type: 'question', buttons: ['取消', '信任并连接'], defaultId: 0, cancelId: 0, title: '验证 SSH 主机', message: `${location.username}@${location.host}:${location.port}`, detail: `首次连接此主机，请核对服务器指纹：\n\n${fingerprint}\n\n仅在确认指纹正确后信任。` }); return result.response === 1;
 }, emit);
-const agents = new Agents(store, vault, locations, event => { if (!event) { emit(); return; } for (const w of BrowserWindow.getAllWindows()) w.webContents.send('desk:message', event); }, { fetch: providerFetch, network });
+const agents = new Agents(store, vault, locations, publishMessage, { fetch: providerFetch, network });
 const geminiWeb = new GeminiWeb({store, emit:agents.emit, open:url=>shell.openExternal(url), copy:writeClipboardText,readClipboard:readClipboardText});
 const attachments=new Attachments(store);
 const images = new ClipboardImages(path.join(data, 'images')); images.prepare(attachments.protectedPaths());
@@ -62,12 +120,28 @@ const modelCatalogs = new ModelCatalogs({ directory: data, store, vault, locatio
 const accountUsage = new Usage({store,vault,agents,locations,backend,network,emit});
 const quotaConsole=new (require('./quota-console.cjs').QuotaConsole)({store,agents,network,spawn:(...args)=>require('node-pty').spawn(...args)});
 const interactiveStates=new Map();
-const interactiveAgents=new (require('./interactive-agent.cjs').InteractiveAgents)({store,vault,agents,locations,network,busy:id=>running.has(id)||inputQueue.dispatching.has(id),count:()=>running.size,spawn:(...args)=>require('node-pty').spawn(...args),message:event=>{for(const w of BrowserWindow.getAllWindows())w.webContents.send('desk:message',event);},completed:chatId=>notifications.complete(chatId),emit:event=>{for(const w of BrowserWindow.getAllWindows())w.webContents.send('desk:agent-terminal',event);if(event.type==='state'){const info=event.info,previous=interactiveStates.get(info.id);interactiveStates.set(info.id,info.taskState);if(['running','waiting'].includes(previous)&&['completed','interrupted','failed'].includes(info.taskState))inputQueue.settled(info.chatId,info.taskState==='completed'?'complete':info.taskState==='interrupted'?'paused':'failed');if(info.state==='ended')inputQueue.pause(info.chatId,'terminal_ended');inputQueue.kick(info.chatId);emit();updateBadges();}}});
-const skills=new (require('./skills.cjs').Skills)({store,vault,network,nativeImage,locations,fetch:providerFetch,emit:event=>{for(const w of BrowserWindow.getAllWindows())w.webContents.send('desk:message',event);}});agents.skills=skills;
-function inputBusy(id){return running.has(id)||[...skills.jobs.values()].some(job=>job.chatId===id)||interactiveAgents.list().some(entry=>entry.chatId===id&&entry.state!=='ended'&&!(entry.state==='ready'&&entry.inputReady&&!['running','waiting'].includes(entry.taskState)));}
+const interactiveAgents=new (require('./interactive-agent.cjs').InteractiveAgents)({store,vault,agents,locations,network,busy:id=>running.has(id)||inputQueue.dispatching.has(id),count:()=>running.size,spawn:(...args)=>require('node-pty').spawn(...args),message:sendMessage,completed:chatId=>notifications.complete(chatId),emit:event=>{for(const w of BrowserWindow.getAllWindows())w.webContents.send('desk:agent-terminal',event);if(event.type==='state'){const info=event.info,previous=interactiveStates.get(info.id);interactiveStates.set(info.id,info.taskState);if(['running','waiting'].includes(previous)&&['completed','interrupted','failed'].includes(info.taskState))inputQueue.settled(info.chatId,info.taskState==='completed'?'complete':info.taskState==='interrupted'?'paused':'failed');if(info.state==='ended')inputQueue.pause(info.chatId,'terminal_ended');inputQueue.kick(info.chatId);emit();updateBadges();}}});
+const skills=new (require('./skills.cjs').Skills)({store,vault,network,nativeImage,locations,fetch:providerFetch,emit:sendMessage});agents.skills=skills;
+function inputBusy(id){return running.has(id)||store.state.chats.some(chat=>chat.id===id&&chat.localTask?.stopUnconfirmed)||[...skills.jobs.values()].some(job=>job.chatId===id)||interactiveAgents.list().some(entry=>entry.chatId===id&&entry.state!=='ended'&&!(entry.state==='ready'&&entry.inputReady&&!['running','waiting'].includes(entry.taskState)));}
+function forceStopTarget(chat, terminals) {
+  const job=running.get(chat.id);
+  if(job?.forceStopId)return {id:job.forceStopId, stopping:Boolean(job.forceStopping)};
+  if(chat.localTask?.stopUnconfirmed)return {id:chat.localTask.id, unconfirmed:true};
+  const terminal=terminals.find(entry=>entry.chatId===chat.id&&entry.state!=='ended'&&
+    (entry.state==='opening'||entry.forceStopping||['running','waiting'].includes(entry.taskState)));
+  if(terminal)return {id:terminal.id, terminal:true, stopping:Boolean(terminal.forceStopping)};
+}
+function interruptChat(id) {
+  const job = running.get(id);
+  if (job) { job.controller.abort(); if (job.taskId) skills.closeTask(job.taskId); return true; }
+  if (interactiveAgents.interrupt(id)) return true;
+  const activeSkills = [...skills.jobs].filter(([, job]) => job.chatId === id);
+  for (const [skillId] of activeSkills) skills.cancel(id, skillId);
+  return activeSkills.length > 0;
+}
 const inputQueue=new (require('./input-queue.cjs').InputQueue)({store,busy:inputBusy,start:startSend,changed:emit,
   accept:(chat,value)=>{if(!value.summary){if(chat.draft===value.text)chat.draft='';attachments.consume(chat.id,value.files);}},
-  interrupt:id=>{const job=running.get(id);if(job){job.controller.abort();if(job.taskId)skills.closeTask(job.taskId);return;}const terminal=interactiveAgents.list().find(entry=>entry.chatId===id&&entry.state==='ready'&&entry.taskState==='running');if(terminal){interactiveAgents.input(terminal.id,'\x03');return;}throw new Error('This agent is not ready to interrupt. The queued message is preserved.');}});
+  interrupt:id=>{if(!interruptChat(id))throw new Error('当前任务暂时无法中断，排队消息已保留。');}});
 const notifications=new (require('./notifications.cjs').CompletionNotifications)({store,
   busy:id=>running.has(id)||[...skills.jobs.values()].some(job=>job.chatId===id)||interactiveAgents.list().some(entry=>entry.chatId===id&&entry.state!=='ended'&&['running','waiting'].includes(entry.taskState)),
   changed:emit,render:renderBadges,
@@ -75,10 +149,14 @@ const notifications=new (require('./notifications.cjs').CompletionNotifications)
 });
 backend.on('status', emit);
 function snapshot() {
-  const value = store.snapshot();
+  const value = store.summary();
+  value.phoneLink = phoneLink.status();
+  for (const chat of value.chats) if (chat.voice) chat.voice.hasKey = vault.has(voiceSettings.credentialKey(chat.id, chat.voice.baseUrl));
   value.roles = value.roles.map(r => ({ ...r, avatarId: r.avatarId || avatars.defaultId(r.engine), avatarUrl: avatars.get(r.avatarId || avatars.defaultId(r.engine)), hasKey: vault.has('api:' + r.id), available: r.engine === geminiWebEngine || r.locationId !== 'local' || (() => { try { findExecutable(r); return true; } catch { return false; } })() }));
   value.connectionStatus = locations.status(); value.running = Object.fromEntries([...running].map(([id, job]) => [id, { roleId: job.roleId, round: job.round, rounds: job.rounds, phase:job.phase||'participant', stopping: job.controller.signal.aborted }]));
   value.inputBusy=Object.fromEntries(value.chats.map(chat=>[chat.id,inputBusy(chat.id)]));
+  const terminals=interactiveAgents.list();
+  value.forceStops=Object.fromEntries(value.chats.map(chat=>[chat.id,forceStopTarget(chat,terminals)]));
   value.mcp = { ssh: backend.status.ssh, mcp: backend.status.mcp, tunnel: backend.status.tunnel, mcpOwned:backend.status.mcpOwned, tunnelOwned:backend.status.tunnelOwned, forceControl:backend.appliedForceControl };
   const accountLocation = value.locations.find(item => item.managed);
   value.claudeUsage = { enabled: Boolean(accountLocation), accountName: accountLocation?.name || '',
@@ -87,13 +165,14 @@ function snapshot() {
   value.accountUsage = accountUsage.snapshot();
   value.skills=skills.list();
   value.skillSources=skills.system.sources();
+  value.appVersion = require('../package.json').version;
   return value;
 }
 const quitBlockedCommands = new Set(['workflow-create', 'workflow-resume', 'workflow-plan', 'terminal-open', 'role-login']);
 function handle(name, fn, withSender=false) {
   ipcMain.handle('desk:' + name, async (event, ...args) => {
     if (event.senderFrame?.url !== pathToFileURL(path.join(__dirname, 'index.html')).href) throw new Error('Untrusted sender.');
-    if (quitting && quitBlockedCommands.has(name)) throw new Error('Relay Desk is closing.');
+    if (quitting && quitBlockedCommands.has(name)) throw new Error('ai-team is closing.');
     const result = await (withSender?fn(event.sender,...args):fn(...args)); return result;
   });
 }
@@ -101,16 +180,36 @@ function busyRole(id) { return [...running.values()].some(job => job.roleIds.inc
 function updateBadges() {
   return notifications.refresh();
 }
+function restoreBadges() {
+  displayedBadgeCount = undefined;
+  updateBadges();
+}
 function renderBadges(count) {
+  if (count === displayedBadgeCount) return;
   if(process.platform==='win32'){
     if(workbenchWindow){
       const icon=count?nativeImage.createFromPath(path.join(__dirname,'../assets/badge-'+Math.min(9,count)+'.png')):null;
-      workbenchWindow.setOverlayIcon(icon,count?count+' unread conversations':'');
+      workbenchWindow.setOverlayIcon(icon,count?'有 '+count+' 个未读会话':'');
     }
   }else app.setBadgeCount(count);
+  displayedBadgeCount = count;
   if(!count)workbenchWindow?.flashFrame(false);
 }
 handle('snapshot', snapshot);
+handle('project-select', id => store.selectProject(id));
+handle('project-order', order => store.sortProjects(order));
+handle('project-search', (id, query) => store.searchProject(id, query));
+handle('chat-messages', (id, cursor) => store.messagePage(id, cursor));
+handle('chat-search', (id, query, offset) => store.searchMessages(id, query, offset));
+handle('message-details', (id, messageId, field) => {
+  const message = store.get('chats', id).messages.find(item => item.id === messageId);
+  if (!message) throw new Error('找不到这条消息。');
+  if (field === 'activities') return readMessageDetail(message, field) || [];
+  if (field === 'terminal') return readMessageDetail(message, field) || [message.thinking && '[Reasoning summary]\r\n' + message.thinking, message.text, message.note].filter(Boolean).join('\r\n\r\n');
+  throw new Error('无法读取此消息详情。');
+});
+handle('chat-runs', id => store.get('chats', id).messages.filter(message => message.kind === 'assistant')
+  .map(({id, roleId, roleName, at, status, errorCode, workflowAttemptId}) => ({id, roleId, roleName, at, status, errorCode, workflowAttemptId, kind:'assistant'})));
 handle('skill-get',id=>skills.read(id));
 handle('skill-sources-save',async value=>{await skills.system.saveSources(value);emit();return skills.system.sources();});
 handle('skill-system-enabled',(id,enabled)=>{skills.system.setEnabled(skills.get(id),enabled);emit();return true;});
@@ -119,7 +218,7 @@ handle('skill-save',value=>{const result=skills.save(value);emit();return result
 handle('skill-delete',id=>{skills.remove(id);emit();});
 handle('skill-cancel',(chatId,id)=>skills.cancel(chatId,id));
 handle('account-usage', async roleId => { await accountUsage.request(roleId); return snapshot(); });
-handle('usage-guide', (sender,roleId) => {const role=store.get('roles',roleId);if(role.engine==='antigravity'&&role.provider==='native')return quotaConsole.open(roleId,sender);const url=accountUsage.guide(roleId);if(url)return shell.openExternal(url); },true);
+handle('usage-guide', (sender,roleId) => {const role=store.get('roles',roleId);if(role.engine==='antigravity'&&role.provider==='native'&&role.locationId==='local')return quotaConsole.open(roleId,sender);const url=accountUsage.guide(roleId);if(url)return shell.openExternal(url); },true);
 for(const method of ['action','screen','resize','stop'])handle('quota-'+method,(sender,...args)=>quotaConsole[method](sender,...args),true);
 handle('usage-refresh', async () => {
   const location = store.state.locations.find(item => item.managed);
@@ -132,7 +231,12 @@ handle('cli-check', () => require('./runtime.cjs').check());
 handle('claude-cli', action => claudeUpdater.request(action));
 handle('cli-update', () => { if (running.size||interactiveAgents.active()) throw new Error('End interactive terminals and pause running discussions before updating the CLI.'); return require('./runtime.cjs').install(); });
 handle('models', (input, options) => modelCatalogs.request(input, options));
-handle('agent-info', value => { if(!vendors.isVendor(value?.engine))throw new Error('Choose an official account agent.');return vendors.info(value); });
+handle('agent-info', async value => {
+  if (!vendors.isVendor(value?.engine)) throw new Error('Choose an official account agent.');
+  const location = store.get('locations', value.locationId || 'local');
+  if (location.type === 'local') return vendors.info(value);
+  return remoteAntigravity.runtime(locations, location, String(value.executable || '').trim());
+});
 handle('agent-guide', engine => { if(!vendors.isVendor(engine))throw new Error('Choose an official account agent.');return shell.openExternal(vendors.catalog[engine].docs); });
 handle('agent-install', async engine => { if(store.state.roles.some(role=>role.engine===engine&&busyRole(role.id)))throw new Error('Wait for active tasks using this agent to finish before updating.');return require('./vendor-install.cjs').install(engine); });
 handle('role-save', value => {
@@ -140,6 +244,19 @@ handle('role-save', value => {
   const role = store.saveRole(value);
   if (value.apiKey && role.engine !== geminiWebEngine) vault.set('api:' + role.id, value.apiKey);
   emit(); return role;
+});
+handle('role-enabled', (id, enabled) => {
+  if (enabled === false && interactiveAgents.list().some(entry => entry.roleId === id && entry.state !== 'ended')) {
+    throw new Error('请先结束此角色的交互终端，再禁用角色。');
+  }
+  const role = store.setRoleEnabled(id, enabled);
+  emit();
+  return role;
+});
+handle('workflow-priority-save', (ruleId, value) => {
+  const rules = store.updateWorkflowPriority(ruleId, value);
+  emit();
+  return rules;
 });
 handle('avatar-list', () => ({ presets: avatars.defaults(), uploads: avatars.list() }));
 handle('avatar-upload', async () => {
@@ -151,7 +268,9 @@ handle('role-delete', id => {
   if (busyRole(id)) throw new Error('请先结束此角色的任务和交互终端。');
   const memberships=store.state.chats.filter(c=>!c.disbandedAt&&c.roleIds.includes(id));
   if (memberships.length) throw new Error('请先从这些对话移除该角色：'+memberships.slice(0,3).map(chat=>chat.name).join('、')+(memberships.length>3?' 等':'')+'。');
-  store.get('roles', id); store.state.roles = store.state.roles.filter(r => r.id !== id); for (const p of store.state.projects) p.roleIds = p.roleIds.filter(r => r !== id); vault.remove('api:' + id); store.save(); emit();
+  store.get('roles', id); store.state.roles = store.state.roles.filter(r => r.id !== id); for (const p of store.state.projects) p.roleIds = p.roleIds.filter(r => r !== id); vault.remove('api:' + id);
+  store.state.workflowPriorities = store.state.workflowPriorities.map(rule => ({...rule,candidates:rule.candidates.filter(candidate => candidate.roleId !== id)})).filter(rule => rule.candidates.length);
+  store.save(); emit();
 });
 handle('location-save', value => {
   const location = store.saveLocation(value); if (value.passphrase) vault.set('ssh:' + location.id, value.passphrase);
@@ -168,25 +287,53 @@ handle('location-test', async id => { await locations.connect(id); const locatio
 handle('project-save', value => { const result = store.saveProject(value); emit(); return result; });
 handle('project-move', (id, offset) => { if (![-1, 1].includes(offset)) return; const p = store.get('projects', id); const index = store.state.projects.indexOf(p); const target = index + offset; if (target >= 0 && target < store.state.projects.length) { store.state.projects.splice(index, 1); store.state.projects.splice(target, 0, p); store.save(); emit(); } });
 handle('project-delete', async id => {
-  const project = store.get('projects', id); const chats = store.state.chats.filter(c => c.projectId === id);
-  if (running.has(planJobKey(id))) throw new Error('请先关闭正在生成工作流的窗口。');
-  if (chats.some(c => inputQueue.dispatching.has(c.id)||running.has(c.id)||interactiveAgents.active(c.id)||[...skills.jobs.values()].some(j=>j.chatId===c.id))) throw new Error('End this project interactive terminals, skills and discussions first.');
-  const answer = await dialog.showMessageBox({ type: 'question', buttons: ['取消', '移除项目'], defaultId: 0, cancelId: 0, message: `移除“${project.name}”？`, detail: '仅从新界面移除。磁盘上的目录和原界面数据保留；聊天会存入本机归档。' });
+  const project = store.get('projects', id);
+  const deletableChats = () => {
+    const chats = store.state.chats.filter(chat => chat.projectId === id);
+    if (running.has(planJobKey(id))) throw new Error('请先结束此项目的工作流生成任务。');
+    if (chats.some(chat => inputQueue.dispatching.has(chat.id) || inputBusy(chat.id) || interactiveAgents.active(chat.id))) {
+      throw new Error('请先结束此项目的运行任务和交互终端。');
+    }
+    return chats;
+  };
+  deletableChats();
+  const answer = await dialog.showMessageBox({
+    type: 'question', buttons: ['取消', '删除项目并归档'], defaultId: 0, cancelId: 0,
+    message: `删除「${project.name}」？`,
+    detail: '项目与聊天会从 AI 小队列表移除，并存入本机归档。磁盘上的工作目录和文件将保留。',
+  });
   if (answer.response !== 1) return false;
-  require('./store.cjs').atomic(path.join(data, 'archive', id + '-' + Date.now() + '.json'), { project, chats });
+  const {projects, chats:allChats}=store.state;
+  if (!projects.some(item=>item.id===id)) return false;
+  const chats=deletableChats();
+  require('./store.cjs').atomic(path.join(data, 'archive', id + '-' + Date.now() + '.json'), { project:store.get('projects',id), chats });
+  store.state.projects=projects.filter(item=>item.id!==id);
+  store.state.chats=allChats.filter(chat=>chat.projectId!==id);
+  try { store.save(); }
+  catch (error) { store.state.projects=projects;store.state.chats=allChats;throw error; }
   for (const manager of terminalManagers.values()) manager.closeProject(id);
-  store.state.projects = store.state.projects.filter(p => p.id !== id); store.state.chats = store.state.chats.filter(c => c.projectId !== id); store.save(); emit(); updateBadges(); return true;
+  emit(); updateBadges(); return true;
 });
 handle('chat-add', value => { const chat = store.createChat(value); emit(); return chat; });
 const workflowEngine=require('./workflow.cjs');
 const generatedWorkflows=require('./generated-workflow.cjs');
 const workflowRatings=require('./workflow-ratings.js');
-const engineForWorkflow = flow => flow.type === 'generated' ? generatedWorkflows : workflowEngine;
+const graphWorkflows=require('./graph-workflow.cjs');
+const engineForWorkflow = flow => flow.type === 'graph' ? graphWorkflows : flow.type === 'generated' ? generatedWorkflows : workflowEngine;
+handle('workflow-template-save', value=>{
+  const template=graphWorkflows.validate(value);
+  const previous=store.state.workflowTemplates || [];
+  const saved={...template,id:randomUUID()};
+  store.state.workflowTemplates=[saved,...previous];
+  try { store.save(); } catch (error) { store.state.workflowTemplates=previous; throw error; }
+  emit();
+  return saved;
+});
 
-function workflowProjectRoles(project) {
-  return project.roleIds.map(id => store.state.roles.find(role => role.id === id))
+function workflowProjectRoles(project, roles = project.roleIds.map(id => store.state.roles.find(role => role.id === id))) {
+  return roles
     .filter(role => {
-      if (!role || role.engine === geminiWebEngine || !project.directories.some(directory => directory.locationId === role.locationId)) return false;
+      if (!workflowEngine.canModerate(role) || !project.directories.some(directory => directory.locationId === role.locationId)) return false;
       const location = store.state.locations.find(item => item.id === role.locationId);
       return location?.type === 'local' || (location?.os === 'linux' && role.provider === 'native');
     })
@@ -194,11 +341,14 @@ function workflowProjectRoles(project) {
 }
 
 function workflowRoleIds(flow) {
-  return [...new Set([...flow.teams.implement, ...flow.teams.review, ...(flow.moderatorRoleId ? [flow.moderatorRoleId] : [])])];
+  if (flow.type==='graph') return [...new Set(flow.nodes.map(node=>node.roleId))];
+  const ids = flow.type === 'generated' ? flow.nodes.flatMap(node => node.roleIds || []) : [...flow.teams.implement, ...flow.teams.review];
+  if (flow.moderatorRoleId) ids.push(flow.moderatorRoleId);
+  return [...new Set(ids)];
 }
 function workflowModerationRole(project, id) {
   const role = store.state.roles.find(item => item.id === id);
-  if (!workflowEngine.canModerate(role)) throw new Error('Choose a Codex or Claude role to moderate the workflow.');
+  if (!workflowEngine.canModerate(role)) throw new Error('请选择已启用且能自动运行的角色担任工作流主持人。');
   if (!project.directories.some(directory => directory.locationId === role.locationId)) {
     throw new Error(formatMissingProjectDirectories(project, [role], locationName));
   }
@@ -207,13 +357,13 @@ function workflowModerationRole(project, id) {
 const planJobKey = projectId => `workflow-plan:${projectId}`;
 handle('workflow-plan',async ({projectId, goal, plannerId, requestId}) => {
   const project = store.get('projects',projectId);
-  const roles = workflowProjectRoles(project), key = planJobKey(project.id);
-  if (!roles.some(role => role.id === plannerId)) throw new Error('Choose a planner invited to this project.');
+  const planner = workflowModerationRole(project, plannerId), key = planJobKey(project.id);
+  const roles = workflowProjectRoles(project, store.state.roles.filter(role => role.id === plannerId || project.roleIds.includes(role.id)));
+  if (!roles.some(role => role.id === plannerId)) throw new Error('此角色无法在当前项目的运行位置生成工作流。');
   if (typeof requestId !== 'string' || requestId.length > 80 || running.has(key) || running.size+interactiveAgents.list().filter(entry=>entry.state!=='ended').length>=store.state.settings.maxJobs) {
     throw new Error('Wait for an available workspace task slot to generate a workflow.');
   }
-  const planner = workflowModerationRole(project, plannerId);
-  const task = generatedWorkflows.planTask(goal, workflowRatings.catalog(roles));
+  const task = generatedWorkflows.planTask(goal, workflowRatings.catalog(store.state.workflowPriorities));
   const controller = new AbortController(), deadline = AbortSignal.timeout(workflowEngine.routingTimeoutMs);
   running.set(key, {phase:'workflow-plan', requestId, controller, roleIds:[plannerId], roleId:plannerId});
   emit();
@@ -238,19 +388,23 @@ function pumpWorkflows(){
     .sort((a,b)=>a.workflow.createdAt-b.workflow.createdAt)[0];
   if(!chat)return;
   const flow=chat.workflow,controller=new AbortController();
-  const generated = flow.type === 'generated';
-  const job={workflow:true,controller,roleIds:chat.roleIds,round:generated?flow.nodeIndex+1:flow.round,rounds:generated?flow.nodes.length:flow.limit};
+  const generated = Array.isArray(flow.nodes);
+  const job={workflow:true,controller,forceStopId:randomUUID(),roleIds:chat.roleIds,round:generated?flow.nodeIndex+1:flow.round,rounds:generated?flow.nodes.length:flow.limit};
   running.set(chat.id,job);
   const save=()=>{store.save();emit();};
   const currentProject = () => store.get('projects',chat.projectId);
   engineForWorkflow(flow).run(chat,{
     signal:controller.signal,save,
+    roleEnabled: id => store.state.roles.some(role => role.id === id && role.enabled !== false),
     roles:() => workflowProjectRoles(currentProject()),
+    priorityRoles:() => workflowProjectRoles(currentProject(), store.state.roles),
+    priorities:() => store.state.workflowPriorities,
     describe(id) {
       const role = store.state.roles.find(item => item.id === id);
       return role && {name:role.name, engine:role.engine, location:locationName(role.locationId), persona:role.persona?.slice(0, 600)};
     },
     route: flow.moderatorRoleId ? async (task, signal) => {
+      if (store.state.roles.find(role => role.id === flow.moderatorRoleId)?.enabled === false) return;
       const project = currentProject();
       if (generated && !project.roleIds.includes(flow.moderatorRoleId)) return;
       const role = effectiveRole(chat, workflowModerationRole(project, flow.moderatorRoleId));
@@ -276,9 +430,15 @@ function pumpWorkflows(){
       job.phase='participant';job.roleId=attempt.roleId;job.round=generated?attempt.nodeIndex+1:attempt.round;job.taskId=attempt.id;
       const role=store.state.roles.find(r=>r.id===attempt.roleId);
       attempt.roleName=role?.name||attempt.roleId;
+      if (role?.enabled === false) return {status:'failed',workflowSubmitted:false,errorCode:'ROLE_UNAVAILABLE',note:'角色「'+role.name+'」已禁用。'};
       if(!role||role.engine===geminiWebEngine)return {status:'failed',workflowSubmitted:false,errorCode:'ROLE_UNAVAILABLE',note:'Role unavailable for unattended execution.'};
       const project=currentProject();
-      if (generated && !workflowProjectRoles(project).some(candidate=>candidate.id===role.id)) return {status:'failed',workflowSubmitted:false,errorCode:'ROLE_UNAVAILABLE',note:'Role unavailable for unattended execution.'};
+      if (flow.type==='graph' && flow.nodes[flow.nodeIndex].localOnly && role.locationId!=='local') {
+        return {status:'failed',note:'本机验证节点需要本机角色。'};
+      }
+      if (generated && !workflowProjectRoles(project, flow.selection?.via === 'priority' ? [role] : undefined).some(candidate=>candidate.id===role.id)) {
+        return {status:'failed',workflowSubmitted:false,errorCode:'ROLE_UNAVAILABLE',note:'Role unavailable for unattended execution.'};
+      }
       if (!project.directories.some(directory => directory.locationId === role.locationId)) {
         return {status:'failed',workflowSubmitted:false,errorCode:'ROLE_UNAVAILABLE',note:formatMissingProjectDirectories(project, [role], locationName)};
       }
@@ -294,52 +454,76 @@ function pumpWorkflows(){
       }
     },
   }).catch(error=>{flow.status='needs_check';flow.reason=error.message;}).finally(()=>{
-    running.delete(chat.id);save();notifications.complete(chat.id);setImmediate(pumpWorkflows);
+    running.delete(chat.id);
+    if (quitting || !notifications.complete(chat.id,{workflow:true})) { emit();updateBadges(); }
+    store.save();
+    setImmediate(pumpWorkflows);
   });
 }
-function generatedConfiguration(value, project) {
-  const roles = workflowProjectRoles(project);
-  if (!roles.length) throw new Error('Invite a role with a configured project directory before running this workflow.');
+function generatedConfiguration(value, project, stepOffset = 0) {
+  const roles = workflowProjectRoles(project, store.state.roles);
+  if (!roles.length) throw new Error('请先为已启用角色的运行位置配置项目目录。');
   if (value.moderatorRoleId) {
-    if (!roles.some(role => role.id === value.moderatorRoleId)) throw new Error('Choose a planner invited to this project.');
     workflowModerationRole(project,value.moderatorRoleId);
+    if (!roles.some(role => role.id === value.moderatorRoleId)) throw new Error('此角色无法在当前项目的运行位置主持工作流。');
   }
-  return generatedWorkflows.configure(value,roles);
+  return generatedWorkflows.configure(value,roles,stepOffset);
 }
 handle('workflow-create',value=>{
   const project = store.get('projects',value.projectId);
   const generated = value.type === 'generated';
-  const workflow = generated ? generatedConfiguration(value,project) : workflowEngine.configure(value,store.state.roles);
+  const workflow = value.type === 'graph' ? graphWorkflows.configure(value,workflowProjectRoles(project,store.state.roles)) :
+    generated ? generatedConfiguration(value,project) : workflowEngine.configure(value,store.state.roles.filter(role => role.enabled !== false));
   if (!generated && workflow.moderatorRoleId) workflowModerationRole(project,workflow.moderatorRoleId);
-  const roleIds = generated ? workflowProjectRoles(project).slice(0,100).map(role=>role.id) : workflowRoleIds(workflow);
+  const roleIds = workflowRoleIds(workflow);
+  if (generated) {
+    const existing = workflowProjectRoles(project).filter(role => !roleIds.includes(role.id));
+    roleIds.push(...existing.slice(0, Math.max(0, 100 - roleIds.length)).map(role => role.id));
+    if (!roleIds.length) {
+      const configured = new Set(workflow.nodes.filter(node => node.mode === 'auto').flatMap(node =>
+        workflowRatings.findRule(store.state.workflowPriorities, node)?.candidates.map(candidate => candidate.roleId) || []));
+      roleIds.push(...workflowProjectRoles(project, store.state.roles).filter(role => configured.has(role.id)).slice(0, 100).map(role => role.id));
+    }
+  }
+  if (!roleIds.length) throw new Error('请选择主持人、指定候选角色，或先为项目添加角色。');
   const chat=store.createChat({projectId:project.id,name:workflow.title||workflow.goal.slice(0,70),roleIds},{workflow});
   emit();setImmediate(pumpWorkflows);return {id:chat.id,projectId:chat.projectId};
 });
 handle('workflow-resume',(id,mode,guidance='')=>{
   const chat=activeChat(id),flow=chat.workflow;
   if(!flow||running.has(id)||!['unavailable','paused','needs_check'].includes(flow.status)||
-      !((flow.type === 'generated'?['retry']:['review','retry']).includes(mode)))throw new Error('Workflow cannot resume from this state.');
+      !((flow.nodes?['retry']:['review','retry']).includes(mode)))throw new Error('Workflow cannot resume from this state.');
   if(typeof guidance!=='string'||guidance.length>16000)throw new Error('Enter up to 16,000 characters of additional guidance.');
   if(guidance.trim())store.message(id,{kind:'user',text:guidance.trim(),status:'accepted'});
   if(mode==='review')flow.stage='review';
   delete flow.candidateOrder;
-  delete flow.selection;
-  flow.pending=null;flow.index=0;flow.status='queued';flow.reason='';store.save();emit();setImmediate(pumpWorkflows);
+  if (flow.selection?.via !== 'priority' || flow.status === 'unavailable' || !flow.selection.items.length) {
+    delete flow.selection;
+    flow.index = 0;
+  }
+  flow.pending=null;flow.status='queued';flow.reason='';
+  chat.unread=false;
+  store.save();emit();updateBadges();setImmediate(pumpWorkflows);
 });
 handle('workflow-generated-update',(id,value)=>{
   const chat=activeChat(id),flow=chat.workflow;
   if(flow?.type!=='generated'||running.has(id)||!['unavailable','needs_check','paused'].includes(flow.status))throw new Error('Teams can be changed while the workflow is stopped.');
   if(!Array.isArray(value.nodes)||value.nodes.length!==flow.nodes.length)throw new Error('The number of steps cannot change after the workflow starts.');
-  const next=generatedConfiguration({...value,goal:flow.goal,nodes:value.nodes.slice(flow.nodeIndex)},store.get('projects',chat.projectId));
+  const project = store.get('projects',chat.projectId);
+  const next=generatedConfiguration({...value,goal:flow.goal,reworkLimit:flow.reworkLimit,nodes:value.nodes.slice(flow.nodeIndex)},project,flow.nodeIndex);
   flow.nodes=[...flow.nodes.slice(0,flow.nodeIndex),...next.nodes];
+  flow.reworkLimit=next.reworkLimit;
   flow.moderatorRoleId=next.moderatorRoleId;flow.index=0;
+  const selected = workflowRoleIds(next);
+  chat.roleIds = [...new Set([...chat.roleIds, ...selected])];
+  project.roleIds = [...new Set([...project.roleIds, ...selected])];
   delete flow.selection;
   store.save();emit();
 });
 handle('workflow-teams',(id,teams,moderatorRoleId)=>{
   const chat=activeChat(id),flow=chat.workflow;
-  if(!flow||flow.type==='generated'||running.has(id)||!['unavailable','needs_check','paused'].includes(flow.status))throw new Error('Teams can be changed while the workflow is stopped.');
-  const updated=workflowEngine.configure({...flow,teams,moderatorRoleId:moderatorRoleId ?? flow.moderatorRoleId},store.state.roles);
+  if(!flow||flow.nodes||running.has(id)||!['unavailable','needs_check','paused'].includes(flow.status))throw new Error('Teams can be changed while the workflow is stopped.');
+  const updated=workflowEngine.configure({...flow,teams,moderatorRoleId:moderatorRoleId ?? flow.moderatorRoleId},store.state.roles.filter(role => role.enabled !== false));
   if (updated.moderatorRoleId) workflowModerationRole(store.get('projects',chat.projectId), updated.moderatorRoleId);
   flow.teams=updated.teams;flow.moderatorRoleId=updated.moderatorRoleId;flow.index=0;
   delete flow.candidateOrder;
@@ -369,13 +553,130 @@ handle('chat-disband', id => {
   if(chat.inputQueue?.length)throw new Error('请先处理待发送消息。');
   if(chat.draft?.trim()||chat.draftAttachments?.length)throw new Error('请先处理输入框中的草稿和附件。');
   chat.disbandedAt=Date.now();chat.unread=false;store.save();emit();updateBadges();
+  chatVoice.cancelChat(id);
 });
-handle('chat-role-settings', (chatId, roleId, value) => { activeChat(chatId);const chat = store.saveChatRole(chatId, roleId, value); emit(); return chat; });
+handle('chat-role-settings', (chatId, roleId, value) => {
+  activeChat(chatId);
+  const chat = store.saveChatRole(chatId, roleId, {
+    ...value, voice: value.voice === undefined ? undefined : voiceSettings.roleSettings(value.voice),
+  });
+  emit(); return chat;
+});
+handle('chat-voice-settings', (chatId, value) => {
+  const chat = activeChat(chatId), next = voiceSettings.settings(value);
+  const previous = chat.voice;
+  const key = voiceSettings.credentialKey(chat.id, next.baseUrl);
+  const previousKey = voiceSettings.credentialKey(chat.id, previous?.baseUrl);
+  const credential = typeof value.apiKey === 'string' ? value.apiKey.trim() : '';
+  if (credential && (!next.baseUrl || credential.length > 2000 || /[\x00-\x1f]/.test(credential))) {
+    throw new Error('请填写有效的远程语音服务地址和密钥。');
+  }
+  if (credential) {
+    try { vault.set(key, credential); }
+    catch { throw new Error('无法加密保存语音服务密钥，请检查系统凭据存储。'); }
+  }
+  saveVoiceSettings(chat, next);
+  if (vault.has(previousKey) && (previousKey !== key || !credential && value.clearKey)) vault.remove(previousKey);
+  refreshVoiceSettings(chatId);
+});
+function saveVoiceSettings(chat, next) {
+  const previous = chat.voice;
+  chat.voice = next;
+  try { store.save(); }
+  catch (error) { chat.voice = previous; throw error; }
+}
+function refreshVoiceSettings(chatId) {
+  chatVoice.cancelChat(chatId);
+  liveVoice.stop(chatId);
+  if (!store.state.chats.some(chat => (chat.voice?.enabled || chat.voice?.inputEnabled) && !chat.disbandedAt)) chatVoice.local.close();
+  emit();
+}
+handle('chat-voice-toggle', (chatId, channel, enabled) => {
+  const chat = activeChat(chatId);
+  if (chat.workflow || !['input', 'output'].includes(channel) || typeof enabled !== 'boolean') {
+    throw new Error('请选择要切换的语音功能。');
+  }
+  const voice = voiceSettings.settings(chat.voice);
+  if (channel === 'input') {
+    voice.inputEnabled = enabled;
+    if (enabled && voice.transcription === 'off') voice.transcription = 'local';
+  } else voice.enabled = enabled;
+  saveVoiceSettings(chat, voice);
+  refreshVoiceSettings(chatId);
+});
+handle('voice-model-status', voiceModelStatus);
+async function changeVoiceModel(operation, run) {
+  if (quitting || voiceModelOperation) throw new Error('本地语音模型正在处理，请稍候。');
+  voiceModelOperation = operation;
+  publishVoiceModelStatus();
+  try {
+    await liveVoice.whenPlaybackIdle();
+    if (quitting) return;
+    await run();
+  } finally {
+    voiceModelOperation = null;
+    publishVoiceModelStatus();
+  }
+}
+handle('voice-model-warmup', chatId => changeVoiceModel('warming', async () => {
+  const chat = activeChat(chatId);
+  const model = chat.voice?.model;
+  if (model?.source !== 'local') throw new Error('请先选择并保存本对话的默认本地合成模型。');
+  const voice = chat.roleIds.map(id => {
+    if (!store.state.roles.some(role => role.id === id && role.enabled !== false)) return;
+    try { return voiceSettings.speechFor(chat, id); }
+    catch { return; }
+  }).find(voice => voice?.model.source === 'local' && voice.model.id === model.id);
+  if (!voice) throw new Error('请先为使用本对话默认本地模型的角色配置音色，再预热。');
+  await chatVoice.local.request(chat.voice, { type: 'warmup', input: 'Ready.', ...voice }, new AbortController().signal);
+}));
+handle('voice-model-release', () => changeVoiceModel('releasing', () => chatVoice.local.release()));
+handle('chat-voice-speak', (sender, chatId, requestId, messageId) => {
+  const chat = activeChat(chatId);
+  return chatVoice.run(chat, sender, requestId, signal => chatVoice.speak(chat, messageId, signal));
+}, true);
+handle('chat-voice-cancel', (sender, requestId) => chatVoice.cancel(sender, requestId), true);
+handle('voice-live-start', (sender, chatId) => {
+  const phone = phoneLink.status();
+  if (phone?.chatId === chatId && phone.connected) throw new Error('这个对话的语音由已连接的手机接收。');
+  liveVoice.start(chatId, sender, (kind, value) => {
+    if (!sender.isDestroyed()) sender.send('desk:voice-live', { kind, chatId, ...value });
+  });
+  if (!liveSenders.has(sender)) {
+    liveSenders.add(sender);
+    const cleanup = () => { for (const id of liveVoice.sessions.keys()) liveVoice.stop(id, sender); };
+    sender.once('destroyed', cleanup);
+    sender.on('did-start-navigation', cleanup);
+    sender.on('render-process-gone', cleanup);
+  }
+  return liveVoice.sessions.get(chatId)?.phase;
+}, true);
+handle('voice-live-stop', (sender, chatId) => liveVoice.stop(chatId, sender), true);
+handle('voice-live-frame', (sender, chatId, chunk) => {
+  if (chunk instanceof ArrayBuffer && chunk.byteLength === 3200) liveVoice.frame(chatId, sender, Buffer.from(chunk));
+}, true);
+handle('voice-live-played', (sender, chatId, messageId, index) => liveVoice.played(chatId, sender, messageId, index), true);
+handle('phone-addresses', () => phoneAddresses());
+handle('phone-open', (chatId, address) => phoneLink.open(chatId, address));
+handle('phone-close', () => phoneLink.close());
 handle('chat-session-reset',(chatId,roleId)=>{const chat=store.get('chats',chatId);if(!chat.roleIds.includes(roleId))throw new Error('Choose a participant in this chat.');if(running.has(chatId)||interactiveAgents.active(chatId))throw new Error('Pause the discussion and end its interactive terminal before resetting a native session.');if(chat.nativeSessions)delete chat.nativeSessions[roleId];store.save();emit();return snapshot();});
 handle('chat-flow', (chatId, value) => { activeChat(chatId);const chat = store.saveChatFlow(chatId, value); emit(); return chat; });
 handle('chat-order', (chatId, ids) => { activeChat(chatId);const chat = store.saveChatOrder(chatId, ids); emit(); return chat; });
-handle('chat-delete', async id => { if (inputQueue.dispatching.has(id)||running.has(id)||interactiveAgents.active(id)||[...skills.jobs.values()].some(j=>j.chatId===id)) throw new Error('End this chat agent tasks, skills and interactive terminals before deleting it.'); const chat = store.get('chats', id); require('./store.cjs').atomic(path.join(data, 'archive', id + '.json'), chat); store.state.chats = store.state.chats.filter(c => c.id !== id); store.save(); emit(); updateBadges(); });
-handle('draft', (id, text) => { const chat = activeChat(id); chat.draft = String(text).slice(0, 150000); store.save(); });
+handle('chat-delete', id => {
+  if (inputQueue.dispatching.has(id)||running.has(id)||interactiveAgents.active(id)||[...skills.jobs.values()].some(j=>j.chatId===id)) throw new Error('请先结束此对话中的任务、技能和交互终端。');
+  const chat = store.get('chats', id);
+  require('./store.cjs').atomic(path.join(data, 'archive', id + '.json'), chat);
+  const previous = store.state.chats;
+  store.state.chats = previous.filter(c => c.id !== id);
+  try { store.save(); }
+  catch (error) { store.state.chats = previous; throw error; }
+  chatVoice.cancelChat(id);
+  const key = voiceSettings.credentialKey(id, chat.voice?.baseUrl);
+  if (vault.has(key)) vault.remove(key);
+  emit();
+  updateBadges();
+});
+handle('draft', (id, text) => store.saveDraft(activeChat(id), String(text).slice(0, 150000)));
 handle('attachment-stage',(id,paths)=>{const files=attachments.add(id,paths);emit();return files;});
 handle('attachment-remove',(id,fileId)=>{const files=attachments.remove(id,fileId);emit();return files;});
 handle('attachment-restore',(id,messageId)=>{const draft=attachments.restore(id,messageId);emit();return draft;});
@@ -386,13 +687,27 @@ handle('gemini-web-link', (chatId,roleId,url) => { const result=geminiWeb.saveLi
 handle('gemini-web-open-turn', (chatId,messageId) => geminiWeb.openTurn(chatId,messageId));
 handle('gemini-web-clipboard-reply', (chatId,messageId) => geminiWeb.clipboardReply(chatId,messageId));
 handle('gemini-web-reply', (chatId,messageId,reply) => geminiWeb.submitReply(chatId,messageId,reply));
+function requireEnabledRoles(ids) {
+  const disabled = ids.map(id => store.get('roles', id)).filter(role => role.enabled === false);
+  if (disabled.length) throw new Error('角色「'+disabled.map(role => role.name).join('、')+'」已禁用，请启用后继续，或改选其他角色。');
+}
 function prepareInput(value, queued=false){
   const chat=activeChat(value.chatId),project=store.get('projects',chat.projectId);
   if(chat.workflow)throw new Error('Use the workflow controls for this run.');
-  const invocation=value.summary?null:require('./skills.cjs').parseCommand(value.text,skills.list());
-  if(value.roleIds!==undefined&&(!Array.isArray(value.roleIds)||!value.roleIds.length||value.roleIds.length>chat.roleIds.length||value.roleIds.some(id=>typeof id!=='string')))throw new Error('Choose participants in this chat.');
-  const roleIds=value.roleIds!==undefined?[...new Set(value.roleIds)]:value.roleId==='all'?[...chat.roleIds]:value.roleId?[value.roleId]:require('./conversations.cjs').replyRoleIds(chat);
-  if(!roleIds.length||roleIds.some(id=>!chat.roleIds.includes(id)))throw new Error('Choose a participant in this chat.');
+  const invocation=value.summary||value.plain?null:require('./skills.cjs').parseCommand(value.text,skills.list());
+  if(value.roleIds!==undefined&&(!Array.isArray(value.roleIds)||!value.roleIds.length||
+    value.roleIds.length>chat.roleIds.length+project.roleIds.length||value.roleIds.some(id=>typeof id!=='string')))throw new Error('请选择发言角色。');
+  const available = chat.roleIds.filter(id => store.state.roles.some(role => role.id === id && role.enabled !== false));
+  const roleIds=value.roleIds!==undefined?[...new Set(value.roleIds)]:value.roleId==='all'?available:value.roleId?[value.roleId]:require('./conversations.cjs').replyRoleIds(chat, available);
+  if (!roleIds.length) throw new Error('此对话没有已启用的角色，请先启用或邀请一位角色。');
+  const guests = roleIds.filter(id=>!chat.roleIds.includes(id));
+  if (guests.length) {
+    const eligible = projectGuestIds(chat,project);
+    if (value.summary || project.allowGuestMentions === false || guests.some(id=>!eligible.includes(id))) {
+      throw new Error('部分点名角色当前无法在此群聊发言，请检查项目角色和点名设置。');
+    }
+  }
+  requireEnabledRoles(roleIds);
   const files=queued?attachments.validate(value.files||[]):attachments.select(chat.id,value.summary?[]:value.attachmentIds||[]);
   const text=String(value.text||'');if(!text.trim()&&!files.length)throw new Error('Enter a message.');
   if(text.length>150000)throw new Error('Message is too long. Attach a path instead.');
@@ -406,19 +721,40 @@ function prepareInput(value, queued=false){
       !project.directories.some(directory => directory.locationId === role.locationId));
     if (missingRoles.length) throw new Error(formatMissingProjectDirectories(project, missingRoles, locationName));
   }
-  if(interactiveAgents.active(chat.id)&&(roleIds.length!==1||value.summary||store.get('roles',roleIds[0]).engine===geminiWebEngine))throw new Error('交互连接期间，请 @ 一位已连接角色发送。群聊接力请先结束交互连接。');
+  if(interactiveAgents.active(chat.id)&&(guests.length||roleIds.length!==1||value.summary||store.get('roles',roleIds[0]).engine===geminiWebEngine))throw new Error('交互连接期间，请 @ 一位已连接角色发送。群聊接力请先结束交互连接。');
   return {chat,project,invocation,roleIds,files,text,requestedRounds,autoStop};
 }
-handle('send', value=>{
+function submitChat(value) {
   const prepared=prepareInput(value),{chat,roleIds,files,text,requestedRounds,autoStop}=prepared;
-  const roleSettings=Object.fromEntries(roleIds.map(id=>{const role=effectiveRole(chat,store.get('roles',id));return [id,{model:role.model||'',effort:role.effort||''}];}));
-  return inputQueue.submit(chat.id,{chatId:chat.id,text,files,roleIds,rounds:requestedRounds,autoStop,summary:Boolean(value.summary),roleSettings},value.mode||'queue');
+  const roleSettings=Object.fromEntries(roleIds.map(id=>{
+    const role=effectiveRole(chat.roleIds.includes(id)?chat:null,store.get('roles',id));
+    return [id,{model:role.model||'',effort:role.effort||'',persona:role.persona||'',examples:role.examples||''}];
+  }));
+  if (value.mode === 'steer') {
+    if(roleIds.length!==1||files.length||value.summary||prepared.invocation)throw new Error('插话只能向一位正在运行的 Codex 角色发送文字。输入内容已保留。');
+    const result = interactiveAgents.submit(chat.id,roleIds[0],{text,settings:roleSettings[roleIds[0]],steer:true});
+    if (chat.draft === text) chat.draft = '';
+    store.save(); emit();
+    return result;
+  }
+  return inputQueue.submit(chat.id,{chatId:chat.id,text,files,roleIds,rounds:requestedRounds,autoStop,summary:Boolean(value.summary),roleSettings,plain:value.plain===true},value.mode||'queue');
+}
+handle('send', value => submitChat({ ...value, plain: false }));
+handle('queue-resume',(id, confirmedTaskId)=>{
+  const chat=store.get('chats',id);
+  if(chat.localTask?.stopUnconfirmed){
+    if(running.has(id)||confirmedTaskId!==chat.localTask.id)throw new Error('请确认上一个后台任务已经结束，再继续队列。');
+    delete chat.localTask;
+  }
+  return inputQueue.resume(id);
 });
-handle('queue-resume',id=>inputQueue.resume(id));
 handle('queue-pause',id=>inputQueue.pause(id));
 handle('queue-remove',(id,entryId)=>inputQueue.remove(id,entryId));
 handle('queue-move',(id,entryId,offset)=>inputQueue.move(id,entryId,offset));
-handle('queue-now',(id,entryId)=>inputQueue.now(id,entryId));
+handle('queue-now',(id,entryId)=>{
+  prepareInput(inputQueue.entry(id,entryId).entry.value,true);
+  return inputQueue.now(id,entryId);
+});
 handle('queue-restore',(id,entryId)=>{
   const {chat,entry}=inputQueue.entry(id,entryId);
   if(chat.draft?.trim()||attachments.files(id).length)throw new Error('Clear the current draft before restoring a queued message.');
@@ -446,7 +782,8 @@ async function startSend(value,inputQueueId) {
   if (running.size + interactiveAgents.list().filter(e=>e.state!=='ended').length >= store.state.settings.maxJobs) throw new Error('The concurrent discussion limit has been reached. End an interactive terminal, pause a running chat or adjust Settings.');
   const relay=chat.relayReplies!==false,group=!value.summary&&roleIds.length>1&&relay;
   const rounds=group?requestedRounds:1;
-  const moderatorId=group&&chat.roleIds.includes(chat.moderatorRoleId)&&store.get('roles',chat.moderatorRoleId).engine!==geminiWebEngine?chat.moderatorRoleId:'';
+  const configuredModerator=group&&chat.roleIds.includes(chat.moderatorRoleId)?store.get('roles',chat.moderatorRoleId):null;
+  const moderatorId=workflowEngine.canModerate(configuredModerator)?configuredModerator.id:'';
   const executionRoleIds=[...new Set([...roleIds,...(moderatorId?[moderatorId]:[])])];
   if (moderatorId) {
     const moderator = store.get('roles', moderatorId);
@@ -464,14 +801,14 @@ async function startSend(value,inputQueueId) {
       canUseLocalExecutor(selectedRole, project)) {
     const task = {id:userMessage.id, roleId:selectedRole.id, createdAt:Date.now()};
     chat.localTask = task;
-    const state = {...store.state, chats:store.state.chats.map(item => item.id === chat.id ? item : {
+    const state = {...store.state, chats:store.state.chats.map(item => item.id === chat.id ? {...item, messages:item.messages.map(messageData)} : {
       id:item.id, projectId:item.projectId, name:item.name, roleIds:item.roleIds, disbandedAt:item.disbandedAt, updatedAt:item.updatedAt,
     })};
     store.save();
     followLocalTask(chat, task, {chatId:chat.id, role:selectedRole, project, state});
     return {accepted:true, messageId:userMessage.id};
   }
-  const job = { controller, roleIds:executionRoleIds, round: 1, rounds, roleId: roleIds[0],phase:'participant',taskId:userMessage.id }; running.set(chat.id, job); emit();updateBadges();
+  const job = { controller, forceStopId:userMessage.id, roleIds:executionRoleIds, round: 1, rounds, roleId: roleIds[0],phase:'participant',taskId:userMessage.id }; running.set(chat.id, job); emit();updateBadges();
   const moderator=moderatorId?require('./moderator.cjs').coordinator({agents,store,chat,role:roles[moderatorId],project,signal:controller.signal,taskId:userMessage.id,onFallback:()=>{context.ignoreModeratorMemory=true;},onPhase:(phase,round,roleId)=>{job.phase=phase;job.round=round;job.roleId=roleId;emit();}}):null;
   (async () => {
     try {
@@ -508,37 +845,52 @@ function canUseLocalExecutor(role, project) {
 }
 function followLocalTask(chat, task, request) {
   const controller = new AbortController();
-  running.set(chat.id, {controller, roleIds:[task.roleId], roleId:task.roleId, round:1, rounds:1, taskId:task.id, localExecutor:true});
+  const job={controller,forceStopId:task.id,roleIds:[task.roleId],roleId:task.roleId,round:1,rounds:1,taskId:task.id,localExecutor:true};
+  running.set(chat.id, job);
+  const received = new Map();
   emit();
   void (async () => {
-    let outcome = 'failed', stopConfirmed, finished = false;
+    let outcome = 'failed', stopConfirmed, finished = false, canRetryStop = false;
     try {
       if (request) await localExecutor.start(data, task, request, app);
+      else {
+        const stop = localExecutor.readRecord(localExecutor.taskDirectory(data, task.id), 'cancel.json');
+        if(stop?.requested){job.forceStopping=Boolean(stop.force);controller.abort();emit();}
+      }
       const progress = await localExecutor.follow(data, task, controller.signal, update => {
         if (update.binding) {
           chat.nativeSessions ||= {};
           chat.nativeSessions[task.roleId] = update.binding;
         }
         for (const message of update.messages) {
+          if (isDeepStrictEqual(received.get(message.id), message)) continue;
+          received.set(message.id, message);
           const existing = chat.messages.find(item => item.id === message.id);
           if (existing) Object.assign(existing, message, {localTaskId:task.id});
           else chat.messages.push({...message, localTaskId:task.id});
           chat.updatedAt = Math.max(chat.updatedAt || 0, message.at);
+          publishMessage({ chatId: chat.id, message });
         }
         store.scheduleSave();
-        emit();
-      });
+      }, {force:()=>job.forceStopping});
       finished = true;
       if (progress.failure) throw new Error(progress.failure);
       outcome = progress.result.status === 'complete' ? 'answered' : progress.result.status === 'cancelled' ? 'paused' : 'failed';
       stopConfirmed = progress.result.stopConfirmed;
+      if (progress.result.forced) {
+        for (const message of chat.messages) if (message.localTaskId === task.id && message.status === 'running') {
+          message.status = 'cancelled'; message.stopConfirmed = true;
+        }
+      }
     } catch (error) {
       for (const message of chat.messages) if (message.localTaskId === task.id && message.status === 'running') message.status = 'interrupted';
       store.message(chat.id, {kind:'system', text:error.message, status:'failed'});
-      if (controller.signal.aborted) stopConfirmed = false;
+      canRetryStop = error.code === 'LOCAL_EXECUTOR_STOP_UNCONFIRMED';
+      if (controller.signal.aborted || canRetryStop) stopConfirmed = false;
     } finally {
       chat.lastDiscussion = {state:outcome, rounds:outcome === 'answered' ? 1 : 0, maxRounds:1, userMessageId:task.id, at:Date.now(), stopConfirmed};
-      delete chat.localTask;
+      if(canRetryStop)chat.localTask={...task,stopUnconfirmed:true};
+      else delete chat.localTask;
       running.delete(chat.id);
       store.save();
       if (finished) localExecutor.clear(data, task.id);
@@ -547,9 +899,57 @@ function followLocalTask(chat, task, request) {
     }
   })();
 }
-handle('pause', id => {inputQueue.pause(id);const job=running.get(id);job?.controller.abort();if(job?.taskId)skills.closeTask(job.taskId);emit(); });
+handle('pause', id => {inputQueue.pause(id);interruptChat(id);emit(); });
+handle('force-stop', async (id, expected) => {
+  const chat=store.get('chats',id),target=forceStopTarget(chat,interactiveAgents.list());
+  if(!target||target.id!==expected)throw new Error('任务已更换或结束，请核对后重试。');
+  if(target.stopping)return;
+  inputQueue.pause(id);
+  if(target.terminal){
+    try{await interactiveAgents.forceStop(target.id);}catch(error){inputQueue.pause(id,'stop_unconfirmed');throw error;}
+    return;
+  }
+  const job=running.get(id);
+  if(target.unconfirmed||job.localExecutor){
+    localExecutor.requestStop(data,target.id,true);
+    if(target.unconfirmed){
+      delete chat.localTask.stopUnconfirmed;
+      store.save();
+      followLocalTask(chat,chat.localTask);
+      return;
+    }
+  }
+  job.forceStopping=true;
+  agents.forceStop(id);
+  interruptChat(id);
+  emit();
+});
 handle('settings', value => { const n = Number(value.maxJobs); if (!Number.isInteger(n) || n < 1 || n > 8) throw new Error('Choose between 1 and 8 concurrent discussions.'); const theme = value.theme ?? store.state.settings.theme; if (!['light', 'dark', 'system'].includes(theme)) throw new Error('Choose a supported appearance.'); store.state.settings.theme = theme; nativeTheme.themeSource = theme; store.state.settings.keepAwake = value.keepAwake === true; store.state.settings.maxJobs = n; store.save(); keepAwake.setEnabled(store.state.settings.keepAwake); emit(); });
-handle('pick', async (kind,initialPath) => { const options={properties:[kind==='folder'?'openDirectory':'openFile',...(kind==='files'?['multiSelections']:[])]};if(kind==='folder'&&typeof initialPath==='string'&&initialPath.length<=4096&&path.isAbsolute(initialPath)&&!/[\x00-\x1f]/.test(initialPath))options.defaultPath=initialPath;const result=await dialog.showOpenDialog(options);return result.canceled?[]:result.filePaths; });
+handle('pick', async (kind, initialPath) => {
+  const options = { properties: [kind === 'folder' ? 'openDirectory' : 'openFile', ...(kind === 'files' ? ['multiSelections'] : [])] };
+  const validPath = value => typeof value === 'string' && value.length <= 4096 && path.isAbsolute(value) && !/[\x00-\x1f]/.test(value);
+  if (kind === 'folder' && validPath(initialPath)) options.defaultPath = initialPath;
+  if (kind === 'voice-reference') {
+    options.title = '选择参考录音';
+    const currentDirectory = validPath(initialPath) ? path.dirname(initialPath) : '';
+    for (const directory of [store.state.settings.voiceReferenceDirectory, currentDirectory]) {
+      if (validPath(directory) && (await fs.promises.stat(directory).catch(() => null))?.isDirectory()) {
+        options.defaultPath = directory;
+        break;
+      }
+    }
+  }
+  const result = await dialog.showOpenDialog(options);
+  if (result.canceled) return [];
+  if (kind === 'voice-reference' && result.filePaths.length) {
+    const directory = path.dirname(result.filePaths[0]);
+    if (store.state.settings.voiceReferenceDirectory !== directory) {
+      store.state.settings.voiceReferenceDirectory = directory;
+      store.save();
+    }
+  }
+  return result.filePaths;
+});
 async function writeClipboardText(text) { if (typeof clipboard.writeText === 'function') clipboard.writeText(String(text)); else await clipboard.write([{ 'text/plain': String(text) }]); }
 handle('copy', writeClipboardText);
 async function readClipboardText() { if (typeof clipboard.readText === 'function') return clipboard.readText(); const items = await clipboard.read(); for (const item of items) if (item.types.includes('text/plain')) return (await item.getType('text/plain')).text(); return ''; }
@@ -564,22 +964,47 @@ handle('open', async (filename, projectId) => {
 async function tools(projectId, directoryIndex) {
   const project = store.get('projects', projectId); const directory = project.directories[directoryIndex]; if (!directory) throw new Error('Choose a project directory.');
   const location = store.get('locations', directory.locationId); let facade = { log: () => {} };
+  let projectPath = directory.path;
   if (location.type !== 'local') {
     if (location.os !== 'linux') throw new Error('Remote file and terminal tools currently require Linux.');
     const client = await locations.connect(location.id); const home = (await locations.exec(location.id, 'printf %s "$HOME"')).trim();
+    projectPath = await locations.ensureProjectDirectory(location.id, directory.path, home);
     facade = { client, status: { ssh: 'ready' }, remoteDir: home + '/windows-mcp', exec: command => locations.exec(location.id, command), log: () => {} };
   }
   let manager = terminalManagers.get(location.id);
   if (!manager) { manager = new ProjectTerminals(facade, value => { for (const w of BrowserWindow.getAllWindows()) w.webContents.send('desk:terminal', value); }); terminalManagers.set(location.id, manager); }
   else manager.backend = facade;
-  const loc = { kind: location.type === 'local' ? 'local' : 'remote', path: directory.path };
+  const loc = { kind: location.type === 'local' ? 'local' : 'remote', path: projectPath };
   return { manager, facade, project: { ...project, locations: [loc] }, loc };
 }
-handle('files', async (projectId, directory, parts, operation) => { const t = await tools(projectId, directory); return projectFiles(t.facade, t.project, t.loc, parts, operation); });
+handle('files', async (projectId, directory, parts, operation) => {
+  if (!['list', 'read', 'open'].includes(operation)) throw new Error('请选择有效的文件操作。');
+  const t = await tools(projectId, directory);
+  return projectFiles(t.facade, t.project, t.loc, parts, operation);
+});
+handle('file-explorer', async (projectId, directoryIndex, parts) => {
+  const project = store.get('projects', projectId);
+  const directory = project.directories[directoryIndex];
+  if (directory?.locationId !== 'local') throw new Error('资源管理器只能打开本机项目目录。');
+  const location = {kind:'local', path:directory.path};
+  let target, isDirectory;
+  try {
+    ({path:target} = await projectFiles(null, {locations:[location]}, location, parts, 'open'));
+    isDirectory = (await fs.promises.stat(target)).isDirectory();
+  } catch {
+    throw new Error('无法访问此文件或文件夹，请刷新列表后重试。');
+  }
+  if (isDirectory) {
+    const error = await shell.openPath(target);
+    if (error) throw new Error('无法在资源管理器中打开此文件夹。');
+  } else {
+    shell.showItemInFolder(target);
+  }
+});
 handle('terminals', () => [...terminalManagers.values()].flatMap(m => m.list()));
 handle('terminal-open', async (projectId, directory) => {
   const t = await tools(projectId, directory);
-  if (quitting) throw new Error('Relay Desk is closing.');
+  if (quitting) throw new Error('ai-team is closing.');
   return t.manager.open(t.project, t.loc);
 });
 handle('terminal-input', (id, data) => { for (const m of terminalManagers.values()) m.input(id, data); });
@@ -591,10 +1016,119 @@ handle('agent-terminal-input',(id,value)=>interactiveAgents.input(id,value));
 handle('agent-terminal-screen',(id,text)=>interactiveAgents.screen(id,text));
 handle('agent-terminal-resize',(id,cols,rows)=>interactiveAgents.resize(id,cols,rows));
 handle('agent-terminal-close',id=>interactiveAgents.close(id));
+
+async function remoteAntigravityLoginWindow(location, executable, proxy) {
+  let stream;
+  try {
+    const client = await locations.connect(location.id);
+    stream = await remoteAntigravity.openLogin(client, executable, proxy, AbortSignal.timeout(20000));
+  } catch (error) {
+    throw new Error('无法启动 VPS 的 Google 登录。请检查 SSH 连接后重试。\n' + error.message, { cause: error });
+  }
+  return new Promise((resolve, reject) => {
+    let ready = false, output = '', url = '', settled = false, exitCode, status = '';
+    const decoder = new (require('node:string_decoder').StringDecoder)('utf8');
+    const window = new BrowserWindow({ width: 900, height: 600, parent: workbenchWindow, modal: Boolean(workbenchWindow),
+      title: location.name + ' · Antigravity 登录', webPreferences: {
+        preload: path.join(__dirname, 'login-preload.cjs'), contextIsolation: true, sandbox: true,
+      } });
+    function input(event, value) {
+      if (event.sender === window.webContents && typeof value === 'string' && value.length <= 8192 && !settled) {
+        try { stream.write(value); } catch { finish(new Error('无法向 VPS 发送授权码。请重新打开登录窗口。')); }
+      }
+    }
+    function authorize(event) {
+      if (event.sender === window.webContents && url && !settled) {
+        shell.openExternal(url).catch(() => {
+          if (!window.isDestroyed()) window.webContents.send('login:status', '打开浏览器失败。请复制终端里的授权网址，在本机浏览器打开。');
+        });
+      }
+    }
+    function finish(error, success = false) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ipcMain.removeListener('login:input', input);
+      ipcMain.removeListener('login:authorize', authorize);
+      if (error) {
+        status = error.message;
+        if (!window.isDestroyed() && ready) window.webContents.send('login:status', status);
+        try { stream.close(); } catch {}
+        reject(error);
+      } else {
+        if (success && !window.isDestroyed()) window.close();
+        resolve(success);
+      }
+    }
+    const timer = setTimeout(() => finish(new Error('VPS 登录已超时。请重新点击「配置并登录 VPS」。')), 600000);
+    ipcMain.on('login:input', input);
+    ipcMain.on('login:authorize', authorize);
+    stream.on('data', chunk => {
+      if (window.isDestroyed()) return;
+      const value = decoder.write(chunk);
+      output = (output + value).slice(-16000);
+      const found = remoteAntigravity.authorizationUrl(output);
+      if (ready) window.webContents.send('login:data', value);
+      if (found && found !== url) {
+        url = found;
+        if (ready) window.webContents.send('login:authorize-ready');
+      }
+    });
+    stream.on('error', () => finish(new Error('VPS 登录连接断开。请检查 SSH 后重试。')));
+    stream.on('exit', code => { exitCode = code; });
+    stream.on('close', code => {
+      if ((code ?? exitCode) === 0) finish(null, true);
+      else {
+        const message = remoteAntigravity.keyringError(output)
+          ? 'VPS 的系统密钥环无法打开。请检查该 SSH 用户的 D-Bus 和密钥环服务后重试。'
+          : 'VPS 上的 Google 登录未完成。请检查登录窗口中的官方 CLI 输出后重试。';
+        finish(new Error(message));
+      }
+    });
+    window.webContents.once('did-finish-load', () => {
+      ready = true;
+      window.webContents.send('login:remote', Boolean(url));
+      window.webContents.send('login:data', output);
+      if (status) window.webContents.send('login:status', status);
+    });
+    window.on('closed', () => {
+      finish();
+      try { stream.close(); } catch {}
+    });
+    window.loadFile(path.join(__dirname, 'login.html')).catch(() => {
+      finish(new Error('无法打开 VPS 登录窗口。'));
+      if (!window.isDestroyed()) window.close();
+    });
+  });
+}
+
+async function configureRemoteAntigravity(role, location) {
+  const sessions = require('./native-sessions.cjs');
+  const scope = sessions.loginScope(role, location);
+  if (antigravitySetups.has(scope)) throw new Error('该 VPS 用户正在配置 Antigravity，请先完成或关闭登录窗口。');
+  antigravitySetups.add(scope);
+  try {
+    const proxy = network.policy(role);
+    const configured = await remoteAntigravity.configure(locations, location, role, proxy, async executable => {
+      if (quitting) return false;
+      if (store.state.roles.some(peer => sessions.loginScope(peer, store.get('locations', peer.locationId)) === scope && busyRole(peer.id))) {
+        throw new Error('请先结束使用该 VPS Antigravity 账号的任务，再登录。');
+      }
+      if (!await remoteAntigravityLoginWindow(location, executable, proxy)) return false;
+      sessions.invalidateLogin(store, role, location);
+      return true;
+    });
+    return { vpsConfigured: configured };
+  } finally {
+    antigravitySetups.delete(scope);
+  }
+}
+
 handle('role-login', async id => {
   const role = store.get('roles', id); if (role.provider !== 'native') throw new Error('API roles use the saved API key.');
   accountUsage.invalidate(id);
   const location = store.get('locations', role.locationId);
+  if (vendors.supportsRemote(role.engine, location)) return configureRemoteAntigravity(role, location);
   if(!usesDesktopLogin(role)){const sessions=require('./native-sessions.cjs'),scope=sessions.loginScope(role,location,agents.desktopHome());if(store.state.roles.some(peer=>sessions.loginScope(peer,store.get('locations',peer.locationId),agents.desktopHome())===scope&&busyRole(peer.id)))throw new Error('Pause tasks and close interactive terminals sharing this account before changing its login.');sessions.invalidateLogin(store,role,location,agents.desktopHome());}
   if (location.type !== 'local') {
     const project = store.state.projects.find(p => p.directories.some(d => d.locationId === location.id));
@@ -639,7 +1173,7 @@ handle('role-login', async id => {
   ipcMain.on('login:input', input); window.on('closed', () => { ipcMain.removeListener('login:input', input); try { pty.kill(); } catch {} });
 });
 function createWindow() {
-  const w = new BrowserWindow({ width: 1488, height: 1000, minWidth: 1000, minHeight: 650, show: !smoke, backgroundColor: nativeTheme.shouldUseDarkColors ? '#191d23' : '#ffffff', title: 'Relay Desk', autoHideMenuBar: true, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: !smoke } });
+  const w = new BrowserWindow({ width: 1488, height: 1000, minWidth: 1000, minHeight: 650, show: !smoke, backgroundColor: nativeTheme.shouldUseDarkColors ? '#191d23' : '#ffffff', title: 'AI 小队', autoHideMenuBar: true, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: !smoke } });
   workbenchWindow = w;
   w.on('close', event => {
     if (quitReady) return;
@@ -647,12 +1181,22 @@ function createWindow() {
     app.quit();
   });
   w.on('closed', () => { if(workbenchWindow===w)workbenchWindow=undefined; });
-  w.on('show', updateBadges);
-  w.on('restore', updateBadges);
-  w.on('focus', () => { w.flashFrame(false); updateBadges(); });
-  w.webContents.setWindowOpenHandler(() => ({ action: 'deny' })); w.webContents.on('will-navigate', e => e.preventDefault()); w.webContents.session.setPermissionRequestHandler((_a, _b, cb) => cb(false));
+  w.on('show', restoreBadges);
+  w.on('restore', restoreBadges);
+  w.on('focus', () => { w.flashFrame(false); restoreBadges(); });
+  w.webContents.setWindowOpenHandler(() => ({ action: 'deny' })); w.webContents.on('will-navigate', e => e.preventDefault());
+  const workbenchUrl = pathToFileURL(path.join(__dirname, 'index.html')).href;
+  const microphoneAllowed = (contents, permission, url, mainFrame) =>
+    permission === 'media' && contents === w.webContents && url === workbenchUrl && mainFrame &&
+    store.state.chats.some(chat => chat.voice?.inputEnabled && !chat.disbandedAt && chat.voice.transcription !== 'off');
+  w.webContents.session.setPermissionRequestHandler((contents, permission, callback, details) => {
+    callback(microphoneAllowed(contents, permission, details.requestingUrl, details.isMainFrame) &&
+      details.mediaTypes?.length === 1 && details.mediaTypes[0] === 'audio');
+  });
+  w.webContents.session.setPermissionCheckHandler((contents, permission, _origin, details) =>
+    microphoneAllowed(contents, permission, details.requestingUrl, details.isMainFrame) && details.mediaType === 'audio');
   w.loadFile(path.join(__dirname, 'index.html'));
-  w.webContents.once('did-finish-load',updateBadges);
+  w.webContents.once('did-finish-load',restoreBadges);
   return w;
 }
 async function requestQuit(restart = false) {
@@ -668,7 +1212,7 @@ async function requestQuit(restart = false) {
     confirmingQuit = true;
     try {
       const options = {
-        type: 'warning', title: '退出 Relay Desk', message: '有任务正在运行，或有终端仍处于连接状态。',
+        type: 'warning', title: '退出 AI 小队', message: '有任务正在运行，或有终端仍处于连接状态。',
         detail: '退出时会尝试停止任务并断开终端。聊天记录和待发送消息会保留。',
         buttons: ['取消', '结束任务并退出'], defaultId: 0, cancelId: 0, noLink: true,
       };
@@ -688,6 +1232,9 @@ async function requestQuit(restart = false) {
     try { inputQueue.close(); } catch (error) { console.error('Could not save the paused queue:', error); }
     for (const job of running.values()) if (!restart || !job.localExecutor) job.controller.abort();
     skills.close();
+    phoneLink.close();
+    liveVoice.close();
+    chatVoice.close();
     agents.close();
     const terminalsClosed = interactiveAgents.closeAll();
     for (const manager of terminalManagers.values()) manager.closeAll();
@@ -713,7 +1260,7 @@ async function requestQuit(restart = false) {
       if (pending) Object.assign(pending, {status:'interrupted', reason:flow.reason});
       flow.pending = null;
     }
-    const cleanup = [() => store.save(), () => quotaConsole.close(), () => accountUsage.close(),
+    const cleanup = [() => store.close(), () => quotaConsole.close(), () => accountUsage.close(),
       () => claudeUpdater.close(), () => locations.close(), () => backend.stop(), () => keepAwake.dispose()];
     for (const close of cleanup) {
       try { close(); } catch (error) { console.error('Workbench exit cleanup failed:', error); }
@@ -729,16 +1276,16 @@ async function requestQuit(restart = false) {
   handle('workbench-quit', () => requestQuit());
   handle('workbench-support', async () => {
     const { supportUrl } = require('../package.json');
-    if (!supportUrl) throw new Error('项目的 GitHub 支持页面尚未配置。');
+    if (!supportUrl) throw new Error('项目的 GitHub 仓库地址尚未配置。');
     try { await shell.openExternal(supportUrl); }
-    catch { throw new Error('无法在浏览器中打开 GitHub 支持页面。'); }
+    catch { throw new Error('无法在浏览器中打开 GitHub 仓库。'); }
   });
   app.on('second-instance', () => { if (quitting) return; const w = workbenchWindow || createWindow(); w.show(); w.focus(); });
   app.whenReady().then(() => {
     keepAwake.start(); Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: '文件', submenu: [{ id:'restart-workbench', label:'重启工作台', click:() => requestQuit(true).catch(error => console.error(error)) }, { role: 'quit', label: '退出' }] }, { label: '编辑', submenu: [{ label: '撤销', role: 'undo' }, { label: '重做', role: 'redo' }, { type: 'separator' }, { label: '剪切', role: 'cut' }, { label: '复制', role: 'copy' }, { label: '粘贴', role: 'paste' }, { label: '全选', role: 'selectAll' }] }, { label: '视图', submenu: [{ label: '重新加载', role: 'reload' }, { label: '开发者工具', role: 'toggleDevTools' }, { label: '重置缩放', role: 'resetZoom' }, { label: '放大', role: 'zoomIn' }, { label: '缩小', role: 'zoomOut' }] }]));
     const w = createWindow();
     for(const chat of store.state.chats)if(chat.workflow)engineForWorkflow(chat.workflow).recover(chat);
-    for (const chat of store.state.chats) if (chat.localTask) followLocalTask(chat, chat.localTask);
+    for (const chat of store.state.chats) if (chat.localTask&&!chat.localTask.stopUnconfirmed) followLocalTask(chat, chat.localTask);
     store.save();
     const workflowTimer=setInterval(pumpWorkflows,3000);workflowTimer.unref();
     setImmediate(pumpWorkflows);

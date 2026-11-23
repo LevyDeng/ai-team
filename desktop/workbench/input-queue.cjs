@@ -20,7 +20,7 @@ class InputQueue {
   save() { this.store.save(); this.changed(); }
   kick(id) { if (!this.closed) queueMicrotask(() => this.pump(id)); }
   submit(id, value, mode = 'queue') {
-    if (this.closed) throw new Error('Relay Desk is closing.');
+    if (this.closed) throw new Error('ai-team is closing.');
     if (!['queue', 'interrupt'].includes(mode)) throw new Error('Choose a valid input queue mode.');
     const chat = this.chat(id); chat.inputQueue ||= [];
     if (chat.inputQueue.length >= maxEntries) throw new Error('The input queue is full (20 messages). Remove an entry before sending.');
@@ -28,7 +28,7 @@ class InputQueue {
     const entry = { id: crypto.randomUUID(), at: Date.now(), state: 'pending', value: structuredClone(value) };
     if (mode === 'interrupt' && this.dispatching.has(id)) throw new Error('Wait for the pending message to finish submitting before interrupting.');
     chat.inputQueue[mode === 'interrupt' ? 'unshift' : 'push'](entry);
-    if (wasEmpty) { chat.queuePaused = false; chat.queueReason = ''; chat.queueError = ''; }
+    if (wasEmpty && !chat.localTask?.stopUnconfirmed) { chat.queuePaused = false; chat.queueReason = ''; chat.queueError = ''; }
     this.accept(chat, entry.value);
     if (mode === 'interrupt') this.requestInterrupt(id);
     this.save(); this.kick(id);
@@ -36,8 +36,7 @@ class InputQueue {
   }
   requestInterrupt(id) {
     const chat = this.chat(id); chat.queuePaused = false; chat.queueReason = ''; chat.queueError = '';
-    if (!this.busy(id)) return;
-    this.clearInterrupt(id);
+    if (!this.busy(id) || this.interrupting.has(id)) return;
     const timer = setTimeout(() => {
       this.interrupting.delete(id);
       if (this.closed || !this.store.state.chats.some(chat => chat.id === id)) return;
@@ -62,7 +61,7 @@ class InputQueue {
     chat.queuePaused = true; chat.queueReason = reason; this.save();
   }
   resume(id) {
-    if (this.closed) throw new Error('Relay Desk is closing.');
+    if (this.closed) throw new Error('ai-team is closing.');
     const chat = this.chat(id); chat.queuePaused = false; chat.queueReason = ''; chat.queueError = '';
     this.save(); this.kick(id);
   }

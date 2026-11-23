@@ -92,13 +92,13 @@ Plan only: no files, keys, accounts, packages, or connections will be changed.
 5. On a fresh VPS, install Docker/Python/tmux and create the non-root app user.
 6. Verify key login and reverse forwarding; install server scripts and the Claude image.
 7. Prepare the local MCP and Electron dependencies. Complete Claude OAuth manually.
-8. Save a secret-free result, create a shortcut, and open Relay Desk.
+8. Save a secret-free result, create a shortcut, and open ai-team.
 ExistingServer skips admin provisioning. SkipLogin leaves authentication pending.
-Relay Desk still requires Connect & start and an explicit conversation connection.
+ai-team still requires Connect & start and an explicit conversation connection.
 '@
         exit 0
     }
-    Write-Host 'Relay Desk setup. Read docs/SETUP.md before continuing. Close Relay Desk while provisioning.'
+    Write-Host 'ai-team setup. Read docs/SETUP.md before continuing. Close ai-team while provisioning.'
     Write-Host 'Account registration, payment, host fingerprint verification, and Claude OAuth are manual steps.'
     $envPath = Join-Path $PSScriptRoot '.env'
     $pendingPath = Join-Path $PSScriptRoot '.runtime\setup-pending.json'
@@ -175,7 +175,7 @@ Relay Desk still requires Connect & start and an explicit conversation connectio
         if (Test-Path -LiteralPath ($KeyPath + '.pub')) { throw 'A public key exists without its private key. Recover the original key or select a new -KeyPath.' }
         New-Item -ItemType Directory -Path (Split-Path $KeyPath) -Force | Out-Null
         Write-Host 'Creating a dedicated key without a passphrase for unattended SSH. Keep this private key private.'
-        Invoke-Checked 'ssh-keygen.exe' @('-t', 'ed25519', '-f', $KeyPath, '-N', '', '-C', 'relay-desk')
+        Invoke-Checked 'ssh-keygen.exe' @('-t', 'ed25519', '-f', $KeyPath, '-N', '', '-C', 'ai-team')
     }
     if (-not (Test-Path -LiteralPath ($KeyPath + '.pub'))) { throw 'The selected key needs a matching .pub file.' }
     $publicKey = [IO.File]::ReadAllText($KeyPath + '.pub').Trim()
@@ -262,7 +262,7 @@ Relay Desk still requires Connect & start and an explicit conversation connectio
     [IO.File]::WriteAllText((Join-Path $PSScriptRoot '.runtime\setup-status.json'), ($result | ConvertTo-Json), $utf8)
     if (Test-Path -LiteralPath $pendingPath) { Remove-Item -LiteralPath $pendingPath -Force }
     Write-Host "Runtime and server are ready. Claude authentication: $authState."
-    Write-Host 'In Relay Desk: Connect & start, set project folders, then Establish connection. Send one small test task to verify actual account access and Windows-MCP.'
+    Write-Host 'In ai-team: Connect & start, set project folders, then Establish connection. Send one small test task to verify actual account access and Windows-MCP.'
     if (-not $NoLaunch) { Invoke-Checked 'node.exe' @((Join-Path $PSScriptRoot 'desktop\start.cjs')) }
 } catch {
     Write-Host "Setup stopped at [$stage]: $($_.Exception.Message)" -ForegroundColor Red

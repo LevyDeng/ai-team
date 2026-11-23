@@ -4,7 +4,7 @@ const { spawnSync, spawn } = require('node:child_process');
 const root = path.resolve(__dirname, '..');
 const binary = path.join(__dirname, 'node_modules', 'electron', 'dist', 'electron.exe');
 if (!fs.existsSync(binary) || ['node-pty', 'yaml', '@langchain/langgraph'].some(name => !fs.existsSync(path.join(__dirname, 'node_modules', name, 'package.json')))) {
-  console.log('Preparing Relay Desk for first use...');
+  console.log('Preparing ai-team for first use...');
   const cache = path.join(root, '.runtime', 'npm-cache');
   const npmCli = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
   const install = spawnSync(process.execPath, [npmCli, 'ci', '--cache', cache, '--no-audit', '--no-fund', '--omit=optional'], { cwd: __dirname, stdio: 'inherit', windowsHide: true });
@@ -21,7 +21,7 @@ if (process.argv.includes('--prepare-only')) {
     console.error(check.error?.message || 'Electron dependency loading failed.');
     process.exit(check.status || 1);
   }
-  console.log('Relay Desk runtime is ready.');
+  console.log('ai-team runtime is ready.');
   process.exit(0);
 }
 const env = { ...process.env };

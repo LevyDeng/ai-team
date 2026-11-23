@@ -1,0 +1,37 @@
+<resources>
+    <string name="scan_qr">扫描二维码</string>
+    <string name="scan_hint">对准电脑端显示的配对二维码。</string>
+    <string name="scan_camera_denied">扫码需要相机权限。也可以粘贴配对码。</string>
+    <string name="scan_camera_failed">后置摄像头不可用。可以粘贴配对码。</string>
+    <string name="app_name">AI 小队</string>
+    <string name="pair_code">粘贴电脑端配对码</string>
+    <string name="connect">连接</string>
+    <string name="disconnect">断开</string>
+    <string name="connecting">正在连接电脑…</string>
+    <string name="disconnected">已断开</string>
+    <string name="connected">已连接电脑</string>
+    <string name="connect_hint">在电脑端开启「手机连接」，手机与电脑连接同一个 Wi-Fi。</string>
+    <string name="connect_error">连接已断开。请检查配对码、Wi-Fi 和电脑端连接状态。</string>
+    <string name="pair_error">请粘贴电脑端显示的完整配对码。</string>
+    <string name="auto_start">开启手机麦克风</string>
+    <string name="auto_stop">关闭手机麦克风</string>
+    <string name="auto_input_confirm">开启后，说完一段话会自动转写并发送。手机麦克风开启期间，文字输入和发送按钮会暂时停用。点「关闭手机麦克风」后，等当前回复结束即可继续发文字。</string>
+    <string name="auto_input_hint">语音输入已开启，文字输入暂时停用。关闭手机麦克风并等当前回复结束后可恢复。</string>
+    <string name="auto_background">自动对话正在运行，锁屏后可继续。</string>
+    <string name="background_error">无法启动锁屏对话。请在 App 界面重试，并检查麦克风权限。</string>
+    <string name="notification_channel">自动对话</string>
+    <string name="notification_stop">结束对话</string>
+    <string name="listening">正在听，说完停顿即可发送。</string>
+    <string name="speaking">正在录音…</string>
+    <string name="thinking">电脑正在处理回复…</string>
+    <string name="transcribing">正在转写…</string>
+    <string name="playing">正在播放回复…</string>
+    <string name="audio_error">无法播放这条语音回复。</string>
+    <string name="mic_error">无法使用麦克风。请检查权限。</string>
+    <string name="phone_error">电脑暂时无法处理请求，请查看电脑端提示。</string>
+    <string name="type_message">输入消息</string>
+    <string name="message_too_long">消息过长，请缩短后再发送。</string>
+    <string name="send">发送</string>
+    <string name="you">你</string>
+    <string name="assistant">助手</string>
+</resources>

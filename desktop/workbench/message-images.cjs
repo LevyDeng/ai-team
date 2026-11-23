@@ -1,5 +1,6 @@
 const fs=require('node:fs/promises'),path=require('node:path'),crypto=require('node:crypto');
 const paths=require('../path-links.js');
+const {readMessageDetail}=require('./workspace-db.cjs');
 const imageExtension=/\.(?:png|jpe?g|webp|gif|bmp)$/i;
 
 function imagePath(value,encoded=false){
@@ -43,7 +44,7 @@ class MessageImages{
     const chat=this.store.get('chats',chatId),message=chat.messages.find(m=>m.id===messageId&&m.kind==='assistant');if(!message)throw new Error('Assistant message not found.');
     const project=this.store.get('projects',chat.projectId),root=project.directories.find(d=>d.locationId==='local')?.path;
     const result=[],digests=new Set(),names=new Set();
-    for(const candidate of candidates(message)){
+    for(const candidate of candidates({text:message.text,imagePaths:message.imagePaths,activities:readMessageDetail(message,'activities')})){
       if(result.length>=8)break;
       if(!path.isAbsolute(candidate)&&!root)continue;
       const filename=path.resolve(root||'',candidate),key=filename.toLowerCase();if(names.has(key))continue;names.add(key);

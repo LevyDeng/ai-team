@@ -64,5 +64,35 @@
     "name": "Qwen",
     "file": "qwen.jpg",
     "source": "originals/qwen.webp"
+  },
+  {
+    "id": "preset-gpt-sol",
+    "name": "GPT Sol",
+    "file": "gpt-sol.jpg",
+    "source": "originals/gpt-sol.webp"
+  },
+  {
+    "id": "preset-gemini-hydrogen",
+    "name": "Gemini 氢",
+    "file": "gemini-hydrogen.jpg",
+    "source": "originals/gemini-hydrogen.webp"
+  },
+  {
+    "id": "preset-gemini-neon",
+    "name": "Gemini 氖",
+    "file": "gemini-neon.jpg",
+    "source": "originals/gemini-neon.webp"
+  },
+  {
+    "id": "preset-gemini-argon",
+    "name": "Gemini 氩",
+    "file": "gemini-argon.jpg",
+    "source": "originals/gemini-argon.webp"
+  },
+  {
+    "id": "preset-gemini-3-8-flash",
+    "name": "Gemini 3.8 Flash",
+    "file": "gemini-3-8-flash.jpg",
+    "source": "originals/gemini-3-8-flash.webp"
   }
 ]

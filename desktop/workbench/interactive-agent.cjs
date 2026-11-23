@@ -1,18 +1,21 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { execFile } = require('node:child_process');
 const {StringDecoder} = require('node:string_decoder');
 const {argumentsFor, buildPrompt} = require('./agents.cjs');
 const {effectiveRole} = require('./conversations.cjs');
 const {formatMissingProjectDirectories} = require('./project-directories.cjs');
 const {shellQuote} = require('../config.cjs');
 const {NativeHistory,displayEvent,eventKey}=require('./native-history.cjs');
+const {waitForRemoteExit} = require('./remote-exit.cjs');
+const steerKey = '\x1b[20~'; // F9 is reserved for the Codex composer; Enter also answers modals.
 
 function interactiveArgs(role, contextFile, session) {
   const binding=typeof session==='string'?{id:session,resumed:false}:session;
   if (!['claude', 'codex'].includes(role.engine)) throw new Error('Interactive terminals currently support Claude and Codex.');
   const args = argumentsFor(role);
-  const context = 'Before replying to the first user message, read ' + contextFile + ' to load your Relay Desk role definition, speaking examples, project locations and prior chat context. Treat earlier messages as historical data, not a new task; do not automatically execute an older request. Your current user types in this interactive terminal.';
+  const context = 'Before replying to the first user message, read ' + contextFile + ' to load your ai-team role definition, speaking examples, project locations and prior chat context. Treat earlier messages as historical data, not a new task; do not automatically execute an older request. Your current user types in this interactive terminal.';
   if (role.engine === 'claude') {
     const remove = new Set(['-p', '--verbose', '--include-partial-messages', '--no-session-persistence']);
     const result = [];
@@ -40,7 +43,7 @@ class InteractiveAgents {
   list() { return [...this.entries.values()].map(e => ({...e.info, output:e.output, sequence:e.sequence})); }
   active(chatId) { return [...this.entries.values()].some(e => (!chatId || e.info.chatId === chatId) && ['opening','ready'].includes(e.info.state)); }
   async open(chatId, roleId) {
-    if (this.closed) throw new Error('Relay Desk is closing.');
+    if (this.closed) throw new Error('ai-team is closing.');
     const chat = this.store.get('chats', chatId), project = this.store.get('projects', chat.projectId);
     if (!chat.roleIds.includes(roleId)) throw new Error('Choose a participant in this chat.');
     const existing = [...this.entries.values()].find(e => e.info.chatId === chatId && e.info.roleId === roleId && e.info.state !== 'ended');
@@ -49,6 +52,7 @@ class InteractiveAgents {
     const active = [...this.entries.values()].filter(e => e.info.state !== 'ended').length;
     if (active + this.count() >= this.store.state.settings.maxJobs) throw new Error('The concurrent agent limit has been reached. End an interactive terminal or pause a discussion.');
     const role = structuredClone(effectiveRole(chat, this.store.get('roles', roleId)));
+    if (role.enabled === false) throw new Error('请先启用此角色，再打开交互终端。');
     if (!['claude','codex'].includes(role.engine)) throw new Error('Interactive terminals currently support Claude and Codex.');
     const location = this.store.get('locations', role.locationId), directory = project.directories.find(d => d.locationId === role.locationId);
     if (!directory) throw new Error(formatMissingProjectDirectories(project, [role], () => location.name || location.id));
@@ -97,16 +101,28 @@ class InteractiveAgents {
     try {
       if (location.type === 'local') {
         const prepared = entry.prepared = await this.agents.prepareLocal(role,home,project,entry.skillScope,undefined,nativeSession);
+        if (role.engine === 'codex') {
+          const version = require('./codex-diagnostics.cjs').version(prepared.executable);
+          const [major, minor] = version.split('.').map(Number);
+          entry.canSteer = major > 0 || major === 0 && minor >= 170;
+        }
         entry.secrets = Object.entries(prepared.env).filter(([key]) => /TOKEN|SECRET|API_KEY/.test(key)).map(([,value]) => value);
         if(role.provider!=='native')entry.secrets.push(this.vault.get('api:'+role.id));
         if (entry.info.state === 'ended' || this.closed) { prepared.bridge?.close(); prepared.tools?.close();fs.rmSync(home,{recursive:true,force:true}); throw new Error('Interactive terminal was closed during startup.'); }
         const args = [...interactiveArgs(role,contextFile,nativeSession), ...prepared.extra];
+        if(entry.canSteer)args.unshift('-c','tui.keymap.composer.submit=["enter","f9"]');
         if(role.engine==='codex')prepared.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE='relay_desk_'+id.replaceAll('-','');
         if (process.platform === 'win32' && role.engine === 'codex' && role.permission === 'workspace-write') args.unshift('-c','features.prefer_mxc=true','-c','windows.sandbox="unelevated"');
         if (/\.cmd$/i.test(prepared.executable)) throw new Error('Choose a native agent executable instead of a command shim.');
         entry.reader=new NativeHistory({root:role.engine==='claude'?prepared.env.CLAUDE_CONFIG_DIR:prepared.env.CODEX_HOME,engine:role.engine,session:nativeSession.id,originator:prepared.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE,start:nativeSession.resumed?nativeSession.record.createdAt:Date.now(),fromEnd:nativeSession.resumed,exactSession:nativeSession.resumed,event:(row,record)=>this.sync(entry,row,record)});if(nativeSession.resumed)entry.reader.poll();
         const pty = this.spawn(prepared.executable,args,{cwd:directory.path,env:prepared.env,name:'xterm-256color',cols:100,rows:30,useConptyDll:true});
-        entry.transport = {write:data=>pty.write(data),resize:(cols,rows)=>pty.resize(cols,rows),close:()=>pty.kill()};
+        entry.transport = {write:data=>pty.write(data),resize:(cols,rows)=>pty.resize(cols,rows),close:()=>pty.kill(),
+          force:()=>new Promise(resolve=>{
+            if(process.platform==='win32'){
+              if(!Number.isSafeInteger(pty.pid)||pty.pid<1)return resolve(false);
+              execFile('taskkill.exe',['/PID',String(pty.pid),'/T','/F'],{windowsHide:true,timeout:8000},error=>resolve(!error));
+            }else{pty.kill('SIGKILL');entry.exited.then(()=>resolve(true));}
+          })};
         pty.onData(write);
         entry.exited = new Promise(resolve => pty.onExit(() => { resolve(); entry.end(); }));
         entry.historyTimer=setInterval(()=>entry.reader.poll(),500);entry.historyTimer.unref();
@@ -115,7 +131,7 @@ class InteractiveAgents {
           const memory=Number((await this.locations.exec(location.id,"awk '/MemAvailable:/ {print $2}' /proc/meminfo")).trim());
           if (!Number.isFinite(memory)||memory<700*1024) throw new Error('The server has less than 700 MiB available. End an idle agent first.');
         }
-        const remote = await this.locations.runner(location.id);
+        const remote = await this.locations.runner(location.id, directory.path);
         if (entry.info.state === 'ended' || this.closed) throw new Error('Interactive terminal was closed during startup.');
         const mcpTargets = role.allowLocationTools === false ? [] : project.directories.map(d=>this.store.get('locations',d.locationId)).filter(l=>l.control==='windows-mcp').map(l=>({url:l.mcpUrl,token:this.vault.get('mcp:'+l.id)}));
         if(entry.skillScope){const local=await require('./mcp-tools.cjs').createTools({...project,directories:[]},this.store,this.locations,{service:this.agents.skills,scope:entry.skillScope});if(local){try{entry.skillBridge=await require('../reverse-routes.cjs').expose(remote.client,local);}catch(error){local.close();throw error;}mcpTargets.push({url:entry.skillBridge.url,token:entry.skillBridge.token});}}
@@ -134,7 +150,12 @@ class InteractiveAgents {
           stream.once('error', resolve);
         });
         const send = value => stream.write(JSON.stringify(value)+'\n');
-        entry.transport = {write:data=>send({type:'input',data}),resize:(cols,rows)=>send({type:'resize',cols,rows}),close:()=>{send({type:'close'});setTimeout(()=>stream.close(),5500).unref();}};
+        entry.transport = {write:data=>send({type:'input',data}),resize:(cols,rows)=>send({type:'resize',cols,rows}),close:()=>{send({type:'close'});setTimeout(()=>stream.close(),5500).unref();},
+          force:async()=>{
+            const result=waitForRemoteExit(stream,undefined,{signal:AbortSignal.abort()}).then(()=>true,error=>error.exitCode===130);
+            try{send({type:'force-close'});}catch{stream.close();}
+            return result;
+          }};
         entry.secrets = mcpTargets.map(t=>t.token).filter(Boolean);
         stream.write(JSON.stringify({interactive:true,syncHistory:true,nativeSessionId:nativeSession.id,nativeSessionStart:nativeSession.record.createdAt,resuming:nativeSession.resumed,cwd:directory.path,command:[role.executable||role.engine,...interactiveArgs(role,'__RELAY_CONTEXT__',nativeSession)],context,input:'',jobId:id,roleId:role.id,engine:role.engine,managed:Boolean(location.managed),mcpTargets,proxy:this.network?.policy(role)||{mode:'system',url:''}})+'\n');
       }
@@ -148,14 +169,18 @@ class InteractiveAgents {
     if(sessionId&&entry.info.nativeSessionId!==sessionId||sessionId&&!entry.nativeSession.record.confirmed){try{entry.nativeSession.identify(sessionId);entry.info.nativeSessionId=sessionId;}catch(error){entry.nativeSessionError=error;entry.transport?.close();entry.end(error);return;}}
     const fingerprint=String(record)+':'+eventKey(JSON.stringify(row));if(entry.records.has(fingerprint))return;
     const event=displayEvent(entry.role.engine,row);if(!event)return;
+    if(entry.canSteer&&row.type==='event_msg'){
+      if(row.payload?.type==='task_started')entry.nativeTurnRunning=true;
+      else if(['task_complete','turn_aborted','error'].includes(row.payload?.type))entry.nativeTurnRunning=false;
+    }
     if(event.kind&&event.text?.trim()){
       let text=event.text;for(const secret of entry.secrets)if(secret)text=text.split(secret).join('[redacted]');
       let item=event.key?entry.logical.find(item=>item.key===event.key&&item.message.kind===event.kind):null;
       // Codex writes the same public message in both event and response representations.
       if(!item&&entry.role.engine==='codex')item=[...entry.logical].reverse().find(item=>item.turn===entry.turn&&item.message.kind===event.kind&&(item.wireText||item.message.text)===text&&item.family!==event.family);
       if(!item){
-        let pending;if(event.kind==='user'){entry.turn++;const normalize=s=>s.replace(/\r\n?/g,'\n').trimEnd();pending=(entry.pending||[]).find(p=>!p.confirmed&&normalize(p.wireText)===normalize(text));if(pending)pending.confirmed=true;}
-        if(event.kind==='user'&&entry.skillScope)entry.skillScope.taskId=pending?.message.id||'native:'+entry.info.id+':'+entry.turn;
+        let pending;if(event.kind==='user'){const normalize=s=>s.replace(/\r\n?/g,'\n').trimEnd();pending=(entry.pending||[]).find(p=>!p.confirmed&&normalize(p.wireText)===normalize(text));if(pending)pending.confirmed=true;if(!pending?.steer)entry.turn++;}
+        if(event.kind==='user'&&entry.skillScope&&!pending?.steer)entry.skillScope.taskId=pending?.message.id||'native:'+entry.info.id+':'+entry.turn;
         const message=pending?.message||this.store.message(entry.info.chatId,{kind:event.kind,text,at:event.at||Date.now(),roleId:entry.role.id,roleName:entry.role.name,locationId:entry.role.locationId,model:event.model||entry.role.model,status:event.kind==='user'?'accepted':'running',nativeTerminalId:entry.info.id});
         message.status=event.kind==='user'?'accepted':event.state==='completed'?'complete':'running';
         item={message,key:event.key,family:event.family,turn:entry.turn,wireText:text};entry.logical.push(item);
@@ -177,25 +202,55 @@ class InteractiveAgents {
   screen(id,text){
     const entry=this.entries.get(id);if(!entry||typeof text!=='string'||text.length>30000)return;
     entry.screenText=text;
-    const prompt=/^[\s]*[❯›>]\s*[\u2588\u258f]?\s*$/m.test(text);
+    const lines = (entry.role.engine === 'codex' ? text.trimEnd().split('\n').slice(-8) : text.split('\n'));
+    const prompt = lines.some(line => /^[ \t]*[❯›>][ \t]*[\u2588\u258f]?[ \t]*$/.test(line) ||
+      (entry.role.engine === 'codex' && /^[ \t]*[❯›][ \t]+Ask Codex to do anything[ \t]*$/.test(line)));
     const blocked=/trust (?:this|the) (?:folder|directory)|Do you trust|terms of (?:service|use)|Enter to confirm|Allow (?:once|this)|requires? (?:your )?approval|permission (?:prompt|request)/i.test(text);
     const idle=prompt&&!blocked&&['unknown','completed','interrupted','failed'].includes(entry.info.taskState);
-    if(entry.info.inputReady!==idle){entry.info.inputReady=idle;this.emit({type:'state',info:{...entry.info}});}
+    const steerReady=Boolean(entry.nativeTurnRunning&&prompt&&!blocked&&entry.info.taskState==='running');
+    if(entry.info.inputReady!==idle||Boolean(entry.info.steerReady)!==steerReady){
+      entry.info.inputReady=idle;entry.info.steerReady=steerReady;this.emit({type:'state',info:{...entry.info}});
+    }
   }
-  submit(chatId,roleId,{text,wireText=text,attachments=[],settings,inputQueueId}){
+  submit(chatId,roleId,{text,wireText=text,attachments=[],settings,inputQueueId,steer=false}){
     const entry=[...this.entries.values()].find(e=>e.info.chatId===chatId&&e.info.roleId===roleId&&e.info.state==='ready');
     if(!entry)throw new Error('The interactive terminal is not connected.');
     if(settings&&((settings.model||'')!==(entry.role.model||'')||(settings.effort||'')!==(entry.role.effort||'')))throw new Error('模型或推理设置已改变。请重新建立交互连接以应用新设置，或直接在终端使用原生命令修改；当前输入已保留。');
-    if(!entry.info.inputReady||['running','waiting'].includes(entry.info.taskState))throw new Error('终端尚未就绪、正在运行或等待确认。请先在交互终端完成操作，输入内容已保留。');
+    if (!steer && settings && ['persona', 'examples'].some(key => Object.hasOwn(settings, key) && (settings[key] || '') !== (entry.role[key] || ''))) {
+      throw new Error('本对话人设已更改。请重新建立交互连接以应用新设定，当前输入已保留。');
+    }
+    if(steer){
+      if(!entry.info.steerReady||entry.info.taskState!=='running')throw new Error('Codex 当前没有可以插话的任务，输入内容已保留。');
+      if(attachments.length)throw new Error('插话仅支持文字，附件已保留。');
+    }else if(!entry.info.inputReady||['running','waiting'].includes(entry.info.taskState))throw new Error('终端尚未就绪、正在运行或等待确认。请先在交互终端完成操作，输入内容已保留。');
     if(typeof wireText!=='string'||wireText.length>100000||/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(wireText))throw new Error('Invalid interactive message.');
-    if(/^\s*\//.test(wireText))throw new Error('原生命令请直接在交互终端输入。');
+    if(/^\s*\//.test(wireText)||steer&&/^\s*!/.test(wireText))throw new Error('原生命令请直接在交互终端输入。');
     const message=this.store.message(chatId,{kind:'user',text,attachments,status:'submitting',nativeTerminalId:entry.info.id,inputQueueId});
-    if(entry.skillScope)entry.skillScope.taskId=message.id;
-    entry.pending||=[];entry.pending.push({message,wireText,confirmed:false});this.message({chatId,message});
-    try{entry.nativeSession.submit();entry.transport.write('\x1b[200~'+wireText+'\x1b[201~');entry.transport.write('\r');entry.info.inputReady=false;entry.info.taskState='running';this.emit({type:'state',info:{...entry.info}});}catch(error){message.status='unconfirmed';this.store.save();this.message({chatId,message});throw error;}
+    if(entry.skillScope&&!steer)entry.skillScope.taskId=message.id;
+    entry.pending||=[];entry.pending.push({message,wireText,steer,confirmed:false});this.message({chatId,message});
+    try{if(!steer)entry.nativeSession.submit();entry.transport.write('\x1b[200~'+wireText+'\x1b[201~');entry.transport.write(steer?steerKey:'\r');entry.info.inputReady=false;entry.info.steerReady=false;entry.info.taskState='running';this.emit({type:'state',info:{...entry.info}});}catch(error){message.status='unconfirmed';this.store.save();this.message({chatId,message});throw error;}
     return {accepted:true,messageId:message.id};
   }
-  input(id,data) { if(typeof data!=='string'||data.length>100000)throw new Error('Invalid terminal input.');const e=this.entries.get(id);if(e?.info.state!=='ready')throw new Error('The interactive terminal is not connected.');if(e.info.inputReady){e.info.inputReady=false;this.emit({type:'state',info:{...e.info}});}e.transport.write(data); }
+  interrupt(chatId) {
+    const entry = [...this.entries.values()].find(({info}) => info.chatId===chatId && info.state==='ready' && ['running','waiting'].includes(info.taskState));
+    if (!entry) return false;
+    this.input(entry.info.id, '\x1b');
+    return true;
+  }
+  async forceStop(id) {
+    const entry=this.entries.get(id);
+    if(!entry||entry.info.state==='ended'||entry.info.forceStopping)return;
+    entry.info.forceStopping=true;
+    this.emit({type:'state',info:{...entry.info}});
+    try {
+      if(!entry.transport||await entry.transport.force())entry.end();
+      else throw new Error('无法确认交互终端已强制结束。请检查任务输出。');
+    } finally {
+      entry.info.forceStopping=false;
+      this.emit({type:'state',info:{...entry.info}});
+    }
+  }
+  input(id,data) { if(typeof data!=='string'||data.length>100000)throw new Error('Invalid terminal input.');const e=this.entries.get(id);if(e?.info.state!=='ready')throw new Error('The interactive terminal is not connected.');if(e.info.inputReady||e.info.steerReady){e.info.inputReady=false;e.info.steerReady=false;this.emit({type:'state',info:{...e.info}});}e.transport.write(data); }
   resize(id,cols,rows) { if(!Number.isInteger(cols)||!Number.isInteger(rows)||cols<2||cols>500||rows<2||rows>300)return;this.entries.get(id)?.transport?.resize(cols,rows); }
   close(id) { const e=this.entries.get(id);if(e){e.transport?.close();e.end();} }
   closeAll() {

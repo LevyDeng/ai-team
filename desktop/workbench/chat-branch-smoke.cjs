@@ -51,7 +51,7 @@ async function run({app, store, fixture, services, js}) {
   const cardId=JSON.stringify('msg-'+proposal.messageId);
   await until(()=>js(`Boolean(document.getElementById(${cardId}))`));
   assert.equal(target.draft,'');
-  await js(`[...document.getElementById(${cardId}).querySelectorAll('button')].find(button=>button.textContent==='Review handoff').click()`);
+  await js(`[...document.getElementById(${cardId}).querySelectorAll('button')].find(button=>button.textContent==='确认转交').click()`);
   assert.equal(await js(`$('handoff-chat').value`),target.id);
   assert.equal(await js(`$('handoff-prompt').value`),prompt);
   assert.deepEqual(await js(`[...document.querySelectorAll('#handoff-roles input:checked')].map(input=>input.value)`),[second.id]);

@@ -1,11 +1,11 @@
 # AI 小队 · ai-team
 
-AI 小队是一个中文优先的 Windows 桌面工作台。你可以在同一个项目里让多个 AI 分工，使用本机或 Linux VPS 上的 Claude Code、Codex CLI 等工具。界面和启动文件当前使用 Relay Desk 这个名称。
+AI 小队是一个中文优先的 Windows 桌面工作台。你可以在同一个项目里让多个 AI 分工，使用本机或 Linux VPS 上的 Claude Code、Codex CLI 等工具。桌面端使用「AI 小队」，仓库与命令行标识使用 `ai-team`。
 
 ## 快速上手
 
 1. 在 Windows 上安装带 npm 的 Node.js 24。先安装一个受支持的 Agent，例如 Claude Code 或 Codex CLI，并准备好账号。
-2. 下载或克隆本仓库，双击项目目录内的 `relay-desk.cmd`。首次打开会下载 Electron 和依赖。
+2. 下载或克隆本仓库，双击项目目录内的 `ai-team.cmd`。首次打开会下载 Electron 和依赖。
 3. 在「角色」中选择 Agent 和运行位置。用原生账号时，可以在角色设置中点「登录原生账号」。
 4. 在「项目」里添加该角色运行位置上的工作目录，并邀请角色。然后新建单聊或群聊，发送一条短消息测试。
 
@@ -34,6 +34,6 @@ npm ci
 npm test
 ```
 
-## Support the project
+## 关于与支持
 
-在左下角「工作台 → 支持项目」可打开此处。收款二维码准备好后会在这里更新。
+在桌面端打开「设置 → 关于」，即可查看项目简介、GitHub 仓库链接，以及微信赞赏码和支付宝收钱码。

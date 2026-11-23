@@ -1,9 +1,10 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { setTimeout: delay } = require('node:timers/promises');
 const electron = require('electron');
 const { app, safeStorage, nativeImage, net } = electron;
-const { Store, atomic } = require('./store.cjs');
-const { readRecord, taskDirectory } = require('./local-executor.cjs');
+const { Store } = require('./store.cjs');
+const { readRecord, taskDirectory, createProgressWriter } = require('./local-executor.cjs');
 const { Vault, Locations } = require('./locations.cjs');
 const { Backend } = require('../backend.cjs');
 const { ProxyRouter } = require('./proxy.cjs');
@@ -22,7 +23,8 @@ function launch(directory) {
   const chat = request.state.chats.find(item => item.id === request.chatId);
   const existingMessages = chat.messages.length;
   let sequence = 0, finished = false, result, failure;
-  const save = () => atomic(path.join(directory, 'progress.json'), {
+  const publish = createProgressWriter(directory);
+  const save = () => publish({
     sequence: ++sequence, at: Date.now(), pid:process.pid, finished, result, failure,
     messages: chat.messages.slice(existingMessages), binding: chat.nativeSessions?.[request.role.id],
   });
@@ -48,17 +50,27 @@ function launch(directory) {
       const message = await agents.run(chat.id, request.role, request.project, controller.signal, false,
         {relayReplies:chat.relayReplies !== false, taskId:id});
       result = { status:message.status, stopConfirmed:message.stopConfirmed };
+      if (controller.signal.aborted && !result.stopConfirmed) {
+        save();
+        // Keep ownership visible while the workbench tries to reclaim the process tree.
+        await delay(20000);
+      }
     } finally {
       skills.close();
       locations.close();
       backend.stop();
     }
-  }).catch(error => { failure = error.message; }).finally(() => {
+  }).catch(error => { failure = error.message; }).finally(async () => {
     clearInterval(monitor);
     clearTimeout(store.saveTimer);
     finished = true;
-    save();
-    app.exit(failure ? 1 : 0);
+    let saved = save();
+    for (const waitMs of [100, 500, 1500]) {
+      if (saved) break;
+      await delay(waitMs);
+      saved = save();
+    }
+    app.exit(saved && !failure ? 0 : 1);
   });
 }
 

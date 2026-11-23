@@ -48,22 +48,27 @@ test('Remote Claude requests keep their exact persistent ID and use incremental 
   const locations={async runner(){return {file:'/tmp/fixture-runner.py',client:{forwardIn(_host,_port,callback){callback(null,38999);},unforwardIn(_host,_port,callback){callback();},exec(_command,callback){const stream=new EventEmitter();stream.stderr=new PassThrough();stream.write=line=>{const request=JSON.parse(line);requests.push(request);const args=request.command,id=args[args.indexOf(args.includes('--resume')?'--resume':'--session-id')+1];queueMicrotask(()=>{for(const row of [{type:'system',subtype:'init',session_id:id},{type:'assistant',session_id:id,message:{content:[{type:'text',text:'REMOTE_NATIVE_REPLY_'+requests.length}]}},{type:'result',session_id:id,is_error:false}])stream.emit('data',Buffer.from(JSON.stringify(row)+'\n'));stream.emit('exit',0);stream.emit('close');});};stream.close=()=>{};callback(null,stream);}}};}};
   const agents=new Agents(f.store,{get:()=>''},locations,()=>{});t.after(()=>agents.close());f.store.message(f.chat.id,{kind:'user',text:'REMOTE_FIRST_MARKER',status:'accepted'});const first=await agents.run(f.chat.id,role,f.project,new AbortController().signal);assert.equal(first.status,'complete',first.note);f.store.message(f.chat.id,{kind:'user',text:'REMOTE_SECOND_MARKER',status:'accepted'});const second=await agents.run(f.chat.id,role,f.project,new AbortController().signal);assert.equal(second.status,'complete',second.note);assert.equal(second.agentSessionId,first.agentSessionId);assert(requests[1].command.includes('--resume'));assert(!requests[1].command.includes('--no-session-persistence'));assert(requests[1].input.includes('REMOTE_SECOND_MARKER'));assert(!requests[1].input.includes('REMOTE_FIRST_MARKER'));
 });
-test('Remote interruption distinguishes a confirmed runner exit from a lost SSH channel',async t=>{
-  for(const mode of ['confirmed','lost-channel','cancel-during-open']){
+test('Remote interruption and force stop require a confirmed runner exit',async t=>{
+  for(const mode of ['confirmed','forced','lost-channel','cancel-during-open']){
     const f=fixture(t),controller=new AbortController(),location={id:'cancel-fixture',type:'ssh',control:'ssh',os:'linux',host:'example.test',port:22,username:'fixture'};
     f.store.state.locations.push(location);f.project.directories.push({locationId:location.id,path:'/tmp/cancel-fixture'});
     const role=f.store.saveRole({...f.roles[1],engine:'claude',provider:'native',locationId:location.id,model:'fixture-model',allowLocationTools:false}),writes=[];
     const locations={async runner(){return {file:'/tmp/fixture-runner.py',client:{exec(_command,callback){
       const stream=new EventEmitter();stream.stderr=new PassThrough();stream.close=()=>{};
-      stream.write=line=>{writes.push(line);if(line==='cancel\n'){queueMicrotask(()=>{if(mode!=='lost-channel')stream.emit('exit',130);stream.emit('close');});return;}
-        JSON.parse(line);if(mode!=='cancel-during-open')queueMicrotask(()=>controller.abort());};
+      stream.write=line=>{writes.push(line);if(line==='cancel\n'||line==='force\n'){queueMicrotask(()=>{if(mode!=='lost-channel')stream.emit('exit',130);stream.emit('close');});return;}
+        JSON.parse(line);
+        if(mode!=='cancel-during-open')queueMicrotask(()=>{
+          if(mode==='forced')agents.forceStop(f.chat.id);
+          controller.abort();
+        });
+      };
       if(mode==='cancel-during-open'){controller.abort();setImmediate(()=>callback(null,stream));}else callback(null,stream);
     }}};}};
     const agents=new Agents(f.store,{get:()=>''},locations,()=>{});t.after(()=>agents.close());f.store.message(f.chat.id,{kind:'user',text:'REMOTE_CANCEL_FIXTURE',status:'accepted'});
     const result=await agents.run(f.chat.id,role,f.project,controller.signal);
     assert.equal(result.status,'cancelled');assert.equal(result.stopConfirmed,mode!=='lost-channel');
     if(mode==='cancel-during-open')assert.deepEqual(writes,[]);
-    else {assert.equal(writes.length,2);assert.equal(writes[1],'cancel\n');}
+    else {assert.equal(writes.length,2);assert.equal(writes[1],mode==='forced'?'force\n':'cancel\n');}
     if(mode==='lost-channel')assert.equal(result.errorCode,'REMOTE_CHANNEL_CLOSED');
   }
 });

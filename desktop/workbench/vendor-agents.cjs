@@ -10,6 +10,9 @@ const catalog = {
   codebuddy: { label:'CodeBuddy Code', docs:'https://www.codebuddy.ai/docs/cli/installation', names:['codebuddy.exe','codebuddy'], folder:'.codebuddy', config:'CODEBUDDY_CONFIG_DIR', effort:true },
 };
 function isVendor(engine) { return Object.hasOwn(catalog,engine); }
+function supportsRemote(engine, location) {
+  return engine === 'antigravity' && location.type === 'ssh' && location.os === 'linux' && location.control === 'ssh';
+}
 const packages={kimi:'@moonshot-ai/kimi-code',codebuddy:'@tencent-ai/codebuddy-code'};
 const managedRoot=path.resolve(__dirname,'../../.runtime/workbench/agents');
 function packageBin(root) {
@@ -85,4 +88,4 @@ async function stop(child,cancel=()=>child.kill()) {
   await new Promise(resolve=>{const done=()=>{clearTimeout(timer);child.removeListener('exit',done);resolve();};const timer=setTimeout(done,1500);child.once('exit',done);cancel();});
 }
 function info(role) { let executable='',error='';try{executable=find(role);}catch(e){error=e.message;}return { ...catalog[role.engine],installed:Boolean(executable),executable,error,installable:Boolean(packages[role.engine])||role.engine==='antigravity',experimental:role.engine==='workbuddy',source:role.engine==='workbuddy'?'desktop-engine':'official-account-cli' }; }
-module.exports={catalog,isVendor,find,validEntry,launch,environment,args,loginArgs,info,packages,managedRoot,packageBin,stop};
+module.exports={catalog,isVendor,supportsRemote,find,validEntry,launch,environment,args,loginArgs,info,packages,managedRoot,packageBin,stop};

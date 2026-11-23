@@ -33,7 +33,16 @@ async function run({window,store,app,directory,services,js,errors}){
   fs.writeFileSync(path.join(directory,'native-quota-route-checks.json'),JSON.stringify({passed:true,checks:['embedded native quota terminal','unchanged native window count','official usage menu only','refresh replaces owned query','back returns to quota list','close and dialog replacement clean up query','usable terminal dimensions','selected text copying','no model call'],consoleErrors:errors},null,2));app.exit(0);
 }
 async function live({window,store,app,directory,services,js,errors}){
-  const saved=JSON.parse(fs.readFileSync(path.resolve(__dirname,'../../.runtime/workbench/workspace.json'),'utf8'));
+  const workspace=path.resolve(__dirname,'../../.runtime/workbench');
+  const database=path.join(workspace,'workspace.sqlite');
+  let saved;
+  if(fs.existsSync(database)){
+    const db=new (require('node:sqlite').DatabaseSync)(database,{readOnly:true});
+    try{
+      const records=db.prepare('SELECT data FROM entities WHERE kind = ? ORDER BY position');
+      saved=Object.fromEntries(['roles','locations'].map(kind=>[kind,records.all(kind).map(row=>JSON.parse(row.data))]));
+    }finally{db.close();}
+  }else saved=JSON.parse(fs.readFileSync(path.join(workspace,'workspace.json'),'utf8'));
   const original=saved.roles.find(r=>r.engine==='antigravity'&&r.provider==='native'&&r.locationId==='local');assert(original);
   const local=store.state.locations.find(l=>l.id==='local');local.proxy=saved.locations.find(l=>l.id==='local').proxy;
   const role=store.saveRole({...original,id:undefined,name:'Native Quota Live Check'});

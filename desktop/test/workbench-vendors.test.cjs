@@ -11,6 +11,7 @@ const vendors=require('../workbench/vendor-agents.cjs');
 const {Store}=require('../workbench/store.cjs');
 const {Agents,cleanEnv}=require('../workbench/agents.cjs');
 const {queryCli}=require('../workbench/model-catalogs.cjs');
+const generatedWorkflow=require('../workbench/generated-workflow.cjs');
 const entry=path.join(__dirname,'fixtures/acp-agent.cjs');
 function fixture(t){const directory=fs.mkdtempSync(path.join(os.tmpdir(),'relay-vendor-'));t.after(()=>fs.promises.rm(directory,{recursive:true,force:true,maxRetries:8,retryDelay:100}));return directory;}
 function client(t,permission='workspace-write'){
@@ -62,8 +63,67 @@ test('Each native adapter completes a fixture job and model metadata uses ACP wi
     const role=store.saveRole({...store.state.roles[0],id:undefined,engine,provider:'native',executable:entry,model:'fixture-model',permission:'read-only',allowLocationTools:false,codexLoginSource:'isolated'});
     const chat=store.createChat({projectId:project.id,roleIds:[role.id]});store.message(chat.id,{kind:'user',text:'Fixture request',status:'accepted'});
     const result=await agents.run(chat.id,role,project,new AbortController().signal);assert.equal(result.status,'complete',result.note);assert(result.text.startsWith('ACP_FIXTURE_COMPLETE'));assert.equal(result.agentSessionId,'fixture-session');
-    const models=await queryCli(role,directory,directory,vendors.environment(role,cleanEnv(directory)));assert.deepEqual(models,engine==='antigravity'?[{id:'fixture-model',label:'Fixture model'}]:[{id:'fixture-model',label:'Fixture model',description:undefined}]);
+    const models=await queryCli(role,directory,directory,vendors.environment(role,cleanEnv(directory)));
+    if(engine==='cursor'){
+      assert.deepEqual(models.find(model=>model.id==='grok-4.7')?.parameters,[
+        {id:'reasoning_effort',category:'thought_level',defaultValue:'high',values:['low','medium','high','xhigh']},
+      ]);
+    }else assert.deepEqual(models,engine==='antigravity'?[{id:'fixture-model',label:'Fixture model'}]:[{id:'fixture-model',label:'Fixture model',description:undefined}]);
   }
+});
+test('Cursor applies the saved model parameter through ACP and reports the confirmed value',async t=>{
+  const {acp,state}=client(t);
+  acp.role={engine:'cursor',model:'grok-4.7[reasoning_effort=low]'};
+  await acp.initialize();
+  const session=await acp.session(process.cwd(),{});
+  await acp.configure(session);
+  assert.equal(state.actualModel,'grok-4.7');
+  assert.match(state.terminal,/Cursor confirmed session model\] grok-4\.7\[reasoning_effort=low\]/);
+  acp.role.model='grok-4.7[reasoning_effort=invalid]';
+  await assert.rejects(acp.configure(session),/invalid/);
+});
+test('Antigravity workflow waits for every finite background command and verifies in the same session', {timeout:10000}, async t=>{
+  const directory=fixture(t);
+  const store=new Store(directory,directory);
+  const project=store.state.projects[0];
+  const role=store.saveRole({...store.state.roles[0],engine:'antigravity',provider:'native',executable:entry,model:'fixture-model',permission:'workspace-write',allowLocationTools:false});
+  const chat=store.createChat({projectId:project.id,roleIds:[role.id]});
+  const activities=[];
+  const agents=new Agents(store,{get:()=>''},{},({message})=>activities.push(message.activity));
+  t.after(()=>agents.close());
+  chat.workflow=generatedWorkflow.configure({title:'Build',goal:'Build the fixture',nodes:[
+    {title:'Build and verify',instruction:'ASYNC_COMMAND_FIXTURE',domain:'Code',duty:'Implementation',mode:'ordered',roleIds:[role.id]},
+  ]},[role]);
+  await generatedWorkflow.run(chat,{signal:new AbortController().signal,save(){},roles:()=>[role],
+    turn(attempt,prompt,signal){
+      store.message(chat.id,{kind:'user',text:prompt,status:'accepted',workflowAttemptId:attempt.id});
+      return agents.run(chat.id,role,project,signal,false,{workflowAttemptId:attempt.id});
+    },
+  });
+  assert.equal(chat.workflow.status,'complete',chat.workflow.reason);
+  assert.equal(chat.workflow.attempts.length,1);
+  const result=chat.messages.find(message=>message.kind==='assistant');
+  assert.equal(result.agentSessionId,'fixture-session');
+  assert.equal(result.text,'Still building\n\nVerified background results\nWORKFLOW: DONE');
+  assert.ok(activities.includes('Waiting for background commands'));
+});
+test('Antigravity workflow can be stopped while waiting for background commands', {timeout:10000}, async t=>{
+  const directory=fixture(t);
+  const store=new Store(directory,directory);
+  const project=store.state.projects[0];
+  const role=store.saveRole({...store.state.roles[0],engine:'antigravity',provider:'native',executable:entry,model:'fixture-model',permission:'workspace-write',allowLocationTools:false});
+  const chat=store.createChat({projectId:project.id,roleIds:[role.id]});
+  const controller=new AbortController();
+  const agents=new Agents(store,{get:()=>''},{},({message})=>{
+    if(message.status==='running' && message.activity==='Waiting for background commands')controller.abort();
+  });
+  t.after(()=>agents.close());
+  store.message(chat.id,{kind:'user',text:'ASYNC_COMMAND_FIXTURE NEVER_EXIT',status:'accepted'});
+  const result=await agents.run(chat.id,role,project,controller.signal,false,{workflowAttemptId:'fixture-attempt'});
+  assert.equal(result.status,'cancelled');
+  assert.equal(result.stopConfirmed,true);
+  assert.equal(result.text,'Still building');
+  assert.equal(agents.jobs.size,0);
 });
 test('Antigravity uses explicit ACP model/effort/mode settings and rejects unavailable selections',async t=>{
   const {acp}=client(t);acp.role={engine:'antigravity',model:'fixture-model',effort:'high',permission:'read-only'};await acp.initialize();const session=await acp.session(process.cwd(),{});const calls=[],call=acp.call.bind(acp);acp.call=(method,params,...rest)=>{calls.push({method,params});return call(method,params,...rest);};await acp.configure(session);assert.deepEqual(calls.map(x=>[x.method,x.params.configId||x.params.modeId,x.params.value]),[['session/set_config_option','model','fixture-model'],['session/set_config_option','thought_level','high'],['session/set_mode','plan',undefined]]);

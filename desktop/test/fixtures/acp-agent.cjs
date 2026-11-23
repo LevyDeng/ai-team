@@ -3,15 +3,61 @@ const send=value=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',...value})+
 const notify=update=>send({method:'session/update',params:{sessionId:'fixture-session',update}});
 const input=readline.createInterface({input:process.stdin});
 let prompt,servers=[];
+let backgroundRemaining=0;
+let cursor;
+const cursorEffort = { id:'reasoning_effort', category:'thought_level', type:'select', currentValue:'high',
+  options:['low','medium','high','xhigh'].map(value => ({value, name:value})) };
+const cursorOptions = [
+  {id:'model',category:'model',currentValue:'fixture-model',options:[{value:'fixture-model',name:'Fixture model'},{value:'grok-4.7',name:'Grok 4.7'}]},
+  cursorEffort,
+];
+function commandUpdate(id, status, extra = {}) {
+  const sessionUpdate = status === 'in_progress' ? 'tool_call' : 'tool_call_update';
+  notify({sessionUpdate, toolCallId:id, name:'run_command', status, kind:'execute', ...extra});
+}
 input.on('line',line=>{
   const message=JSON.parse(line);
-  if(message.method==='initialize')return send({id:message.id,result:{protocolVersion:1,agentCapabilities:{mcpCapabilities:{http:true}}}});
-  if(message.method==='session/new'){servers=message.params.mcpServers;return send({id:message.id,result:{sessionId:'fixture-session',models:{availableModels:[{modelId:'fixture-model',name:'Fixture model'}]},modes:{availableModes:[{id:'plan',name:'Plan'}]},configOptions:[{id:'model',category:'model',options:[{value:'fixture-model',name:'Fixture model'}]},{id:'thought_level',category:'thought_level',options:[{value:'high',name:'High'},{value:'medium',name:'Medium'}]}]}});}
+  if(message.method==='initialize'){
+    cursor=message.params.clientCapabilities?._meta?.parameterizedModelPicker;
+    return send({id:message.id,result:{protocolVersion:1,agentCapabilities:{mcpCapabilities:{http:true}}}});
+  }
+  if(message.method==='session/new'){servers=message.params.mcpServers;return send({id:message.id,result:{sessionId:'fixture-session',models:{availableModels:[{modelId:'fixture-model',name:'Fixture model'}]},modes:{availableModes:[{id:'plan',name:'Plan'}]},configOptions:cursor ? cursorOptions : [{id:'model',category:'model',options:[{value:'fixture-model',name:'Fixture model'}]},{id:'thought_level',category:'thought_level',options:[{value:'high',name:'High'},{value:'medium',name:'Medium'}]}]}});}
+  if(message.method==='cursor/list_available_models')return send({id:message.id,result:{models:[
+    {value:'fixture-model',name:'Fixture model',configOptions:[]},
+    {value:'grok-4.7',name:'Grok 4.7',configOptions:[cursorEffort]},
+  ]}});
+  if(cursor && message.method==='session/set_config_option'){
+    const option=cursorOptions.find(item=>item.id===message.params.configId);
+    if(option?.options.some(choice=>choice.value===message.params.value))option.currentValue=message.params.value;
+    return send({id:message.id,result:{configOptions:cursorOptions}});
+  }
   if(['session/set_config_option','session/set_mode','session/set_model'].includes(message.method))return send({id:message.id,result:{}});
   if(message.method==='session/prompt'){
     prompt=message;
     const text=message.params.prompt[0].text;
-    if(text.includes('Relay Desk moderator control.')){
+    if(text.startsWith('Continue the same workflow step.')){
+      if(backgroundRemaining || message.params.sessionId!=='fixture-session'){
+        return send({id:message.id,error:{code:-32603,message:'Background validation started before exit or in another session'}});
+      }
+      notify({sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Verified background results\nWORKFLOW: DONE'}});
+      return send({id:message.id,result:{stopReason:'end_turn'}});
+    }
+    if(text.includes('ASYNC_COMMAND_FIXTURE')){
+      backgroundRemaining=2;
+      commandUpdate('build','in_progress', {title:'Build',rawInput:{WaitMsBeforeAsync:500}});
+      commandUpdate('tests','in_progress', {title:'Tests'});
+      commandUpdate('server','in_progress', {title:'Development server',rawInput:{RunPersistent:true}});
+      notify({sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Still building'}});
+      send({id:message.id,result:{stopReason:'end_turn'}});
+      if(!text.includes('NEVER_EXIT')){
+        for(const [id, delay] of [['build',30],['tests',300]])setTimeout(()=>{
+          backgroundRemaining--;
+          commandUpdate(id,'completed',{rawOutput:{exit_code:0}});
+        },delay);
+      }
+      return;
+    }
+    if(text.includes('ai-team moderator control.')){
       (async()=>{
         const shape=JSON.parse(text.match(/additional keys: (\{[^\n]+\})/)[1]);
         const server=servers.find(s=>s.env?.some(e=>e.name==='RELAY_TOOLS_URL'));

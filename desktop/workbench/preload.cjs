@@ -1,7 +1,11 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
-const calls = ['snapshot', 'role-save', 'avatar-list', 'avatar-upload', 'role-delete', 'role-login', 'agent-info', 'agent-guide', 'agent-install', 'location-save', 'location-proxy-save', 'location-test', 'location-delete', 'project-save', 'project-move', 'project-delete', 'chat-add', 'chat-save', 'chat-role-settings', 'chat-flow', 'chat-discussion', 'chat-order', 'chat-delete', 'draft', 'attachment-stage', 'attachment-remove', 'attachment-restore', 'read', 'send', 'pause', 'settings', 'pick', 'copy', 'clipboard-text', 'image', 'open', 'files', 'terminals', 'terminal-open', 'terminal-input', 'terminal-resize', 'terminal-close', 'models', 'cli-check', 'cli-update', 'usage-refresh', 'account-usage', 'usage-guide', 'claude-cli'];
+const calls = ['snapshot', 'role-save', 'role-enabled', 'avatar-list', 'avatar-upload', 'role-delete', 'role-login', 'agent-info', 'agent-guide', 'agent-install', 'location-save', 'location-proxy-save', 'location-test', 'location-delete', 'project-save', 'project-move', 'project-delete', 'chat-add', 'chat-save', 'chat-role-settings', 'chat-flow', 'chat-discussion', 'chat-order', 'chat-delete', 'draft', 'attachment-stage', 'attachment-remove', 'attachment-restore', 'read', 'send', 'pause', 'settings', 'pick', 'copy', 'clipboard-text', 'image', 'open', 'files', 'file-explorer', 'terminals', 'terminal-open', 'terminal-input', 'terminal-resize', 'terminal-close', 'models', 'cli-check', 'cli-update', 'usage-refresh', 'account-usage', 'usage-guide', 'claude-cli'];
 const api = Object.fromEntries(calls.map(name => [name, (...args) => ipcRenderer.invoke('desk:' + name, ...args)]));
+for (const name of ['project-select', 'project-order', 'project-search', 'chat-messages', 'chat-search', 'message-details', 'chat-runs']) {
+  api[name] = (...args) => ipcRenderer.invoke('desk:' + name, ...args);
+}
 for(const name of ['queue-resume','queue-pause','queue-remove','queue-move','queue-now','queue-restore'])api[name]=(...args)=>ipcRenderer.invoke('desk:'+name,...args);
+api['force-stop']=(...args)=>ipcRenderer.invoke('desk:force-stop',...args);
 for(const name of ['agent-terminals','agent-terminal-open','agent-terminal-input','agent-terminal-resize','agent-terminal-close','agent-terminal-screen'])api[name]=(...args)=>ipcRenderer.invoke('desk:'+name,...args);
 for(const name of ['skill-get','skill-save','skill-delete','skill-cancel','skill-models','skill-sources-save','skill-system-enabled','message-images'])api[name]=(...args)=>ipcRenderer.invoke('desk:'+name,...args);
 for(const name of ['quota-action','quota-screen','quota-resize','quota-stop'])api[name]=(...args)=>ipcRenderer.invoke('desk:'+name,...args);
@@ -9,9 +13,16 @@ for(const name of ['gemini-web-open','gemini-web-link','gemini-web-open-turn','g
 api['chat-session-reset']=(...args)=>ipcRenderer.invoke('desk:chat-session-reset',...args);
 api['chat-disband']=(...args)=>ipcRenderer.invoke('desk:chat-disband',...args);
 for(const name of ['workflow-create','workflow-resume','workflow-teams','workflow-plan','workflow-plan-cancel','workflow-generated-update'])api[name]=(...args)=>ipcRenderer.invoke('desk:'+name,...args);
+api['workflow-priority-save']=(...args)=>ipcRenderer.invoke('desk:workflow-priority-save',...args);
+api['workflow-template-save']=value=>ipcRenderer.invoke('desk:workflow-template-save',value);
 for(const name of ['chat-branch','chat-handoff'])api[name]=(...args)=>ipcRenderer.invoke('desk:'+name,...args);
+for (const name of ['chat-voice-settings', 'chat-voice-toggle', 'chat-voice-speak', 'chat-voice-cancel', 'voice-live-start', 'voice-live-stop',
+  'voice-live-frame', 'voice-live-played', 'voice-model-status', 'voice-model-warmup', 'voice-model-release',
+  'phone-addresses', 'phone-open', 'phone-close']) {
+  api[name] = (...args) => ipcRenderer.invoke('desk:' + name, ...args);
+}
 for(const name of ['workbench-restart','workbench-quit','workbench-support'])api[name]=()=>ipcRenderer.invoke('desk:'+name);
-api.on = (name, callback) => { if (!['state', 'terminal', 'message','agent-terminal','quota'].includes(name)) throw new Error('Invalid event.'); const listener = (_e, value) => callback(value); ipcRenderer.on('desk:' + name, listener); return () => ipcRenderer.removeListener('desk:' + name, listener); };
+api.on = (name, callback) => { if (!['state', 'terminal', 'message','agent-terminal','quota','voice-live','voice-model-status'].includes(name)) throw new Error('Invalid event.'); const listener = (_e, value) => callback(value); ipcRenderer.on('desk:' + name, listener); return () => ipcRenderer.removeListener('desk:' + name, listener); };
 api.onFiles = (callback, drag = () => {}) => {
   let depth=0;
   const hasFiles=event=>Array.from(event.dataTransfer?.types || []).includes('Files');

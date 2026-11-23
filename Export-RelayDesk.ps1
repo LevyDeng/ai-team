@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param([string]$OutputPath)
 $ErrorActionPreference = 'Stop'
-if (-not $OutputPath) { $OutputPath = Join-Path $PSScriptRoot '.runtime\release\relay-desk-source.zip' }
+if (-not $OutputPath) { $OutputPath = Join-Path $PSScriptRoot '.runtime\release\ai-team-source.zip' }
 $stage = Join-Path $PSScriptRoot ('.runtime\release\source-' + [Guid]::NewGuid().ToString('N'))
 try {
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
@@ -9,7 +9,7 @@ try {
     $rootFiles = @('.env.example', '.gitignore', 'Env.ps1', 'Ports.ps1', 'ProcessLifetime.ps1',
         'New-Secret.ps1', 'Setup-Ssh.ps1', 'Setup-RelayDesk.ps1', 'Export-RelayDesk.ps1',
         'Create-DesktopShortcut.ps1', 'Keep-Awake.ps1', 'Start-WindowsMcp.ps1',
-        'setup-relay-desk.cmd', 'setup-ssh.cmd', 'relay-desk.cmd', 'relay-desk-classic.cmd', 'claude-desk.cmd', 'relay-desk.vbs', 'start-win-mcp-svr.cmd')
+        'setup-relay-desk.cmd', 'setup-ssh.cmd', 'ai-team.cmd', 'claude-desk.cmd', 'relay-desk.vbs', 'start-win-mcp-svr.cmd')
     foreach ($name in $rootFiles) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $stage }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'docs\DISTRIBUTION.md') -Destination (Join-Path $stage 'README.md')
     foreach ($folder in @('desktop', 'server', 'docs')) {
@@ -27,6 +27,11 @@ try {
         ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $assets }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'desktop\assets\role-avatars.png') -Destination $assets
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'desktop\assets\model-avatars') -Destination $assets -Recurse
+    $supportAssets = Join-Path $assets 'support'
+    New-Item -ItemType Directory -Path $supportAssets | Out-Null
+    foreach ($name in @('wechat-appreciation.png', 'alipay-collection.webp')) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot "desktop\assets\support\$name") -Destination $supportAssets
+    }
     $workbenchSource = Join-Path $PSScriptRoot 'desktop\workbench'
     $workbenchTarget = Join-Path $stage 'desktop\workbench'
     Get-ChildItem -LiteralPath $workbenchSource -Recurse -File | Where-Object {
@@ -34,6 +39,15 @@ try {
     } | ForEach-Object {
         $relative = $_.FullName.Substring($workbenchSource.Length).TrimStart('\')
         $destination = Join-Path $workbenchTarget $relative
+        New-Item -ItemType Directory -Path (Split-Path $destination) -Force | Out-Null
+        Copy-Item -LiteralPath $_.FullName -Destination $destination
+    }
+    $androidSource = Join-Path $PSScriptRoot 'android'
+    Get-ChildItem -LiteralPath $androidSource -Recurse -File | Where-Object {
+        $_.Extension -in @('.java', '.xml', '.ps1')
+    } | ForEach-Object {
+        $relative = $_.FullName.Substring($androidSource.Length).TrimStart('\')
+        $destination = Join-Path (Join-Path $stage 'android') $relative
         New-Item -ItemType Directory -Path (Split-Path $destination) -Force | Out-Null
         Copy-Item -LiteralPath $_.FullName -Destination $destination
     }

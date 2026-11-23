@@ -4,20 +4,20 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'none'">
-  <title>Relay Desk</title>
+  <title>AI 小队</title>
   <link rel="stylesheet" href="node_modules/@xterm/xterm/css/xterm.css">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <aside class="sidebar">
-    <div class="brand"><div class="brand-mark">R</div><div>Relay Desk<small>连接远程助手与 Windows</small></div></div>
+    <div class="brand"><div class="brand-mark">A</div><div>AI 小队<small>连接远程助手与 Windows</small></div></div>
     <div class="section-heading"><span>项目</span><button id="add-project" class="icon-button" aria-label="添加项目">+</button></div>
     <div id="projects" class="project-list"></div>
     <label class="provider-picker" for="new-provider">新对话使用<select id="new-provider" aria-label="选择新对话的助手"><option value="claude">Claude</option><option value="codex">Codex（备用）</option></select></label>
     <div class="section-heading conversations-heading"><span>对话</span><button id="new-session" type="button" class="icon-button" aria-label="新建对话" title="在当前项目中新建对话">+</button></div>
     <div id="sessions" class="session-list"></div>
     <section id="usage-panel" class="usage-panel" aria-label="账号额度与服务器资源"><div class="usage-heading"><button id="usage-toggle" class="usage-toggle" type="button" aria-controls="usage-details" aria-expanded="true" title="收起额度与资源"><span id="usage-chevron" aria-hidden="true">▾</span><strong id="usage-provider">Claude · 额度与资源</strong></button><button id="usage-refresh" class="quiet" type="button" aria-label="刷新剩余额度" title="同步远端 CLI 已提供的额度；不会发送模型消息" disabled>↻</button></div><div id="usage-details"><div id="usage-windows" class="usage-windows"></div><small id="usage-state" class="usage-state">连接服务器后读取 · 账号共享</small><div id="server-resources" class="server-resources"></div></div></section>
-    <div class="sidebar-bottom"><label class="keep-awake-control" title="开启后，Relay Desk 在前台、后台或最小化时均防止空闲屏保、自动锁屏和休眠；关闭开关或退出后停止。手动锁屏和系统强制策略仍然有效。"><input id="keep-awake" type="checkbox"><span>保持唤醒<small id="keep-awake-state">前台和后台均生效</small></span></label><button id="new-window">新建窗口 <span>Ctrl+Shift+N</span></button><button id="configuration">连接配置 <span>设置</span></button></div>
+    <div class="sidebar-bottom"><label class="keep-awake-control" title="开启后，AI 小队在前台、后台或最小化时均防止空闲屏保、自动锁屏和休眠；关闭开关或退出后停止。手动锁屏和系统强制策略仍然有效。"><input id="keep-awake" type="checkbox"><span>保持唤醒<small id="keep-awake-state">前台和后台均生效</small></span></label><button id="new-window">新建窗口 <span>Ctrl+Shift+N</span></button><button id="configuration">连接配置 <span>设置</span></button></div>
   </aside>
   <main>
     <header class="toolbar"><div><span id="project-label">个人工作区</span><span id="project-path" class="path">~/claude-workspace</span></div><div class="toolbar-actions"><label class="force-control-option" title="开启后不等待用户空闲，双方鼠标键盘输入可能互相干扰；切换会短暂重启本机 MCP。"><input id="force-control" type="checkbox" disabled aria-label="允许强制接管"><span>允许强制接管</span></label><button id="services-toggle" class="quiet services-toggle" aria-controls="services-panel" aria-expanded="true"><span id="services-summary-dot" class="status-dot"></span><span id="services-toggle-label">收起状态</span></button><button id="log-toggle" class="quiet">运行日志</button><button id="connect" class="primary">连接并启动</button><button id="disconnect" class="quiet" disabled>断开连接</button></div></header>

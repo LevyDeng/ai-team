@@ -1,9 +1,13 @@
 ((root)=>{
   const observer=typeof IntersectionObserver==='function'?new IntersectionObserver(entries=>{for(const entry of entries)if(entry.isIntersecting){observer.unobserve(entry.target);entry.target._load?.();}},{root:document.getElementById('messages'),rootMargin:'400px'}):null;
   function render(host,message,{chatId,load,open,copy,layout,error}){
-    const key=JSON.stringify([message.status,message.text,message.imagePaths,message.activities]);if(host._imageKey===key)return;
+    if(message.status==='running'){
+      if(host._imageKey){observer?.unobserve(host);host._imageKey=host._requestedKey=undefined;host.replaceChildren();}
+      host.hidden=true;
+      return;
+    }
+    const key=JSON.stringify([message.status,message.text,message.imagePaths,message.activityCount]);if(host._imageKey===key)return;
     host._imageKey=key;host.replaceChildren();host.hidden=true;observer?.unobserve(host);
-    if(message.status==='running')return;
     host.hidden=false;
     host._load=async()=>{
       if(host._requestedKey===key)return;host._requestedKey=key;
@@ -26,5 +30,5 @@
     };
     if(observer)observer.observe(host);else host._load();
   }
-  root.deskMessageImages={render,clear:()=>observer?.disconnect()};
+  root.deskMessageImages={render,clear:()=>observer?.disconnect(),remove:host=>{if(host)observer?.unobserve(host);}};
 })(window);

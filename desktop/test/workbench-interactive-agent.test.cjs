@@ -92,6 +92,27 @@ test('Remote managed terminals send framed input and resize without exposing the
   assert.equal(f.manager.active(),false);assert.equal(f.children.length,0);
 });
 
+test('Remote terminal force stop waits for the runner to confirm process-group shutdown', async t => {
+  const f = fixture(t), frames = [];
+  const stream = new EventEmitter();
+  stream.stderr = new PassThrough();
+  stream.write = data => frames.push(JSON.parse(data));
+  stream.close = () => {};
+  f.store.state.locations.push({id:'fixture-ssh', type:'ssh', os:'linux'});
+  f.role.locationId = 'fixture-ssh';
+  f.project.directories = [{locationId:'fixture-ssh', path:'/srv/fixture'}];
+  f.manager.locations.runner = async () => ({file:'/tmp/fixture-runner.py', client:{exec:(_command, callback) => callback(null, stream)}});
+  const id = await f.manager.open(f.chat.id, f.role.id);
+  const stop = f.manager.forceStop(id);
+  assert.deepEqual(frames.at(-1), {type:'force-close'});
+  assert.equal(f.manager.list()[0].forceStopping, true);
+  assert.equal(f.manager.active(f.chat.id), true);
+  stream.emit('exit', 130);
+  stream.emit('close');
+  await stop;
+  assert.equal(f.manager.active(f.chat.id), false);
+});
+
 test('Native Claude transcript tail updates the same chat, handles partial writes and never displays hidden or synthetic records',async t=>{
   const f=fixture(t),updates=[];f.prepared.env.CLAUDE_CONFIG_DIR=path.join(f.directory,'claude');f.manager.message=e=>updates.push(e);
   const id=await f.manager.open(f.chat.id,f.role.id),entry=f.manager.entries.get(id),folder=path.join(f.prepared.env.CLAUDE_CONFIG_DIR,'projects','fixture-project');fs.mkdirSync(folder,{recursive:true});const file=path.join(folder,id+'.jsonl');
@@ -124,4 +145,38 @@ test('Composer cannot approve startup/trust prompts or send into a running turn'
   f.manager.screen(id,'Do you trust this folder?\n> ');assert.throws(()=>f.manager.submit(f.chat.id,f.role.id,{text:'Do not approve'}),/终端/);assert.equal(f.chat.messages.length,1);
   assert.throws(()=>f.manager.submit(f.chat.id,f.role.id,{text:'Do not use a stale model',settings:{model:'changed-model',effort:f.role.effort}}),/设置/);assert.equal(f.chat.messages.length,1);
   f.manager.screen(id,'> ');f.manager.submit(f.chat.id,f.role.id,{text:'First turn'});assert.throws(()=>f.manager.submit(f.chat.id,f.role.id,{text:'Second turn'}),/终端/);assert.equal(entry.info.taskState,'running');
+});
+
+test('Codex steering sends text to the current terminal turn and preserves task ownership', async t => {
+  const f = fixture(t);
+  f.role.engine = 'codex';
+  const id = await f.manager.open(f.chat.id, f.role.id);
+  const entry = f.manager.entries.get(id);
+  entry.canSteer = true;
+  f.manager.agents.skills = {closeTask() {}};
+  entry.skillScope = {};
+  f.manager.screen(id, '› Ask Codex to do anything');
+  f.manager.submit(f.chat.id, f.role.id, {text:'First request'});
+  f.manager.screen(id, '› Ask Codex to do anything');
+  assert.equal(Boolean(entry.info.steerReady), false);
+  f.manager.sync(entry,{type:'event_msg',payload:{type:'task_started'}},'start');
+  f.manager.sync(entry,{type:'event_msg',payload:{type:'user_message',message:'First request'}},'first');
+  const {turn} = entry;
+  const taskId = entry.skillScope.taskId;
+  f.manager.screen(id, 'Working\n› Ask Codex to do anything');
+  assert.equal(entry.info.steerReady, true);
+  assert.throws(() => f.manager.submit(f.chat.id, f.role.id, {text:'!echo',steer:true}), /原生命令/);
+  const {messageId} = f.manager.submit(f.chat.id, f.role.id, {text:'Keep the public API',steer:true});
+  assert.deepEqual(f.children[0].writes.slice(-2), ['\x1b[200~Keep the public API\x1b[201~','\x1b[20~']);
+  f.manager.sync(entry,{type:'event_msg',payload:{type:'user_message',message:'Keep the public API'}},'steer');
+  assert.equal(f.chat.messages.at(-1).id, messageId);
+  assert.equal(f.chat.messages.at(-1).status, 'accepted');
+  assert.equal(entry.info.taskState, 'running');
+  assert.equal(entry.turn, turn);
+  assert.equal(entry.skillScope.taskId, taskId);
+  f.manager.screen(id, 'Requires your approval\n› Ask Codex to do anything');
+  assert.equal(entry.info.steerReady, false);
+  assert.throws(() => f.manager.submit(f.chat.id, f.role.id, {text:'Do not approve',steer:true}), /没有可以插话/);
+  assert.equal(f.manager.interrupt(f.chat.id), true);
+  assert.equal(f.children[0].writes.at(-1), '\x1b');
 });

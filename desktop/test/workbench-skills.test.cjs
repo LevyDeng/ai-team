@@ -164,7 +164,7 @@ test('Local system skill sources honor invocation flags, preserve built-in comma
   assert.match(instructions.instructions,/System review instructions/);
   await assert.rejects(f.service.call(scope,'skill_read',{skill:'cl-manual'}),/unavailable/);
   assert.match((await f.service.call(scope,'skill_read',{skill:'cl-background'})).instructions,/Background instructions/);
-  assert.throws(()=>f.service.save({...review,instructions:'Changed'}),/Only Relay Desk skills/);
+  assert.throws(()=>f.service.save({...review,instructions:'Changed'}),/Only ai-team skills/);
   assert.throws(()=>f.service.remove(review.id),/managed at their source/);
   f.service.system.setEnabled(review,false);
   await f.service.system.saveSources(systemChoices(f.service,{codex:{enabled:false}}));

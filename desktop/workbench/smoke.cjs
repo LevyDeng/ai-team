@@ -6,7 +6,7 @@ async function run(window,store,app,directory,services) {
   const fixture=require('./fixtures.cjs').seed(store,path.resolve(__dirname,'../..'));
   const modelCalls=[];let modelFailure=false;
   services.modelCatalogs.request=async (draft,options={})=>{
-    modelCalls.push({ ...draft, force: options.force === true });
+    if (!options.cacheOnly) modelCalls.push({ ...draft, force: options.force === true });
     if(modelFailure)throw new Error(modelFailure==='network'?'Could not connect to the model provider. Check the system proxy or network connection.':'Fixture catalog failure');
     return {models:[{id:'fixture-standard-model',label:'Standard Model'},{id:'rare-long-tail-model-alpha',label:'Rare Long-tail Model'},{id:'special-preview-model',label:'Special Preview Model'}],updatedAt:Date.now(),cached:!options.force};
   };
@@ -21,13 +21,136 @@ async function run(window,store,app,directory,services) {
   assert.equal(await js('document.querySelector("#messages").scrollHeight-document.querySelector("#messages").scrollTop-document.querySelector("#messages").clientHeight<50'),true);
   const status=await js('(async()=> (await window.desk.snapshot()).connectionStatus)()');
   assert(!Object.entries(status).some(([id,state])=>id!=='local'&&state==='ready'));
+  if(process.argv.includes('--workspace-only')){await require('./workspace-smoke.cjs').run({window,store,app,fixture,js,errors,services});return;}
+  if (process.argv.includes('--cursor-model-only')) {
+    const role = store.saveRole({ ...fixture.roles[0], id:undefined, engine:'cursor', provider:'native', name:'Cursor fixture',
+      model:'grok-4.7[context=256k,reasoning_effort=low,fast=true]' });
+    services.modelCatalogs.request = async () => ({ updatedAt:Date.now(), models:[{
+      id:'grok-4.7', label:'Grok 4.7', parameters:[
+        {id:'context',category:'model_config',defaultValue:'256k',values:['256k','500k']},
+        {id:'reasoning_effort',category:'thought_level',defaultValue:'high',values:['low','medium','high','xhigh']},
+        {id:'fast',category:'model_config',defaultValue:'true',values:['false','true']},
+      ],
+    }] });
+    await js(`(async()=>{state=await api.snapshot();showPage('roles');editRole(state.roles.find(r=>r.id===${JSON.stringify(role.id)}));await roleModelPicker.update();})()`);
+    assert.deepEqual(await js(`[$('r-model').value,$('r-effort').disabled,$('r-effort').value]`), ['grok-4.7',false,'low']);
+    await js(`$('r-effort').value='medium';$('r-effort').dispatchEvent(new Event('change'));$('role-form').requestSubmit();`);
+    for(let i=0;i<30 && !store.get('roles',role.id).model.includes('reasoning_effort=medium');i++)await wait(30);
+    assert.equal(store.get('roles',role.id).model,'grok-4.7[context=256k,reasoning_effort=medium,fast=true]');
+    const chat = store.createChat({ projectId:fixture.chat.projectId, roleIds:[role.id], name:'Cursor model fixture' });
+    store.saveChatRole(chat.id, role.id, {model:'',effort:''});
+    await js(`(async()=>{state=await api.snapshot();chatId=${JSON.stringify(chat.id)};showPage('projects');activateChat();openChatRole(${JSON.stringify(role.id)});await chatModelPicker.update();})()`);
+    assert.deepEqual(await js(`[$('chat-model-picker').querySelector('input').value,$('chat-effort').disabled,$('chat-effort').value]`), ['',false,'']);
+    await js(`$('chat-effort').value='xhigh';$('chat-effort').dispatchEvent(new Event('change'));$('dialog-form').requestSubmit();`);
+    for(let i=0;i<30 && !chat.roleSettings[role.id].model.includes('reasoning_effort=xhigh');i++)await wait(30);
+    assert.equal(chat.roleSettings[role.id].model,'grok-4.7[context=256k,reasoning_effort=xhigh,fast=true]');
+    assert.equal(store.get('roles',role.id).model,'grok-4.7[context=256k,reasoning_effort=medium,fast=true]');
+    assert.deepEqual(errors, []);
+    console.log('Cursor model settings smoke checks passed.');
+    app.exit(0);
+    return;
+  }
+  if (process.argv.includes('--chat-voice-only')) {
+    await require('./chat-voice-smoke.cjs').run(js, store, fixture, services.agents, services.dialog);
+    assert.deepEqual(errors, []);
+    console.log('Conversation voice and persona smoke checks passed.');
+    app.exit(0);
+    return;
+  }
+  if (process.argv.includes('--role-enabled-only')) {
+    const id = fixture.chat.roleIds[0], projectId = fixture.chat.projectId;
+    const direct = store.createChat({ projectId, roleIds:[id], name:'Disabled-role fixture' });
+    await js(`(async()=>{state=await api.snapshot();showPage('roles');editRole(role(${JSON.stringify(id)}));})()`);
+    await js(`$('role-enabled').onclick()`);
+    assert.equal(store.get('roles',id).enabled,false);
+    assert.equal(await js(`$('role-enabled').textContent`),'启用角色');
+    assert.equal(await js(`$('role-try').disabled`),true);
+    await assert.rejects(js(`api.send({chatId:${JSON.stringify(direct.id)},roleIds:[${JSON.stringify(id)}],text:'Fixture message'})`),/已禁用/);
+    assert.equal(direct.messages.length,0);
+    await js(`(async()=>{state=await api.snapshot();chatId=${JSON.stringify(direct.id)};showPage('projects');activateChat();})()`);
+    assert.equal(await js(`$('send').disabled`),true);
+    await js(`openChat(null)`);
+    assert.equal(await js(`[...$('chat-role-picker').querySelectorAll('input[type=checkbox]')].some(input=>input.value===${JSON.stringify(id)})`),false);
+    await js(`$('dialog').close();showPage('roles');editRole(role(${JSON.stringify(id)}));`);
+    await js(`$('role-enabled').onclick()`);
+    assert.equal(store.get('roles',id).enabled,true);
+    assert.deepEqual(direct.roleIds,[id]);
+    assert.deepEqual(errors,[]);
+    app.exit(0);
+    return;
+  }
+  if (process.argv.includes('--remote-antigravity-only')) {
+    const location = store.saveLocation({name:'Fixture VPS',host:'vps.invalid',username:'fixture',port:22,os:'linux',control:'ssh'});
+    const calls = [];
+    require('./remote-antigravity.cjs').configure = async (_locations, target, role) => {
+      calls.push({ locationId: target.id, roleId: role.id });
+      return true;
+    };
+    await js(`(async()=>{
+      state=await api.snapshot();
+      showPage('roles');
+      editRole();
+      $('r-name').value='Remote Antigravity fixture';
+      $('r-engine').value='antigravity';
+      $('r-engine').dispatchEvent(new Event('change'));
+      $('r-location').value=${JSON.stringify(location.id)};
+      $('r-location').dispatchEvent(new Event('change'));
+    })()`);
+    assert.equal(await js(`$('r-location').selectedOptions[0].disabled`), false);
+    assert.equal(await js(`$('role-login').parentElement.className`), 'agent-runtime-actions');
+    assert.equal(await js(`$('exe-pick').hidden`), true);
+    await js(`$('role-login').onclick()`);
+    await js(`$('role-login').onclick()`);
+    const matching = store.state.roles.filter(role => role.name === 'Remote Antigravity fixture');
+    assert.equal(matching.length, 1);
+    assert.deepEqual(calls, Array(2).fill({ locationId: location.id, roleId: matching[0].id }));
+    assert.deepEqual(errors, []);
+    app.exit(0);
+    return;
+  }
+  if (process.argv.includes('--files-only')) {
+    const project = store.get('projects', fixture.chat.projectId);
+    const root = path.join(directory, 'file explorer fixture');
+    const folder = path.join(root, 'nested folder');
+    fs.mkdirSync(folder, {recursive:true});
+    const file = path.join(root, 'notes %23.txt');
+    fs.writeFileSync(file, 'Explorer preview fixture');
+    project.directories = [{locationId:'local', path:root}];
+    const opened = [];
+    services.shell.openPath = async target => { opened.push(['open', target]); return ''; };
+    services.shell.showItemInFolder = target => opened.push(['select', target]);
+    await js('(async()=>{state=await api.snapshot();await openTools("files");})()');
+    assert.deepEqual(await js('Array.from(document.querySelectorAll(".file-row"), row => [row.title,getComputedStyle(row).justifyContent])'),
+      [['nested folder','flex-start'],['notes %23.txt','flex-start']]);
+    await js('document.querySelectorAll("[data-reveal-file]")[0].onclick()');
+    await js('document.querySelectorAll("[data-reveal-file]")[1].onclick()');
+    await js('document.querySelector("#file-explorer").onclick()');
+    assert.deepEqual(opened, [['open',fs.realpathSync(folder)],['select',fs.realpathSync(file)],['open',fs.realpathSync(root)]]);
+    await js('document.querySelectorAll("[data-file]")[1].onclick()');
+    assert.equal(await js('document.querySelector("#file-preview").textContent'), 'Explorer preview fixture');
+    await js('document.querySelector("#file-explorer").onclick()');
+    assert.deepEqual(opened.at(-1), ['select',fs.realpathSync(file)]);
+    await js('document.querySelector("#file-back").onclick()');
+    await js('document.querySelectorAll("[data-file]")[0].onclick()');
+    assert.equal(await js('document.querySelector("#file-path").textContent'), fs.realpathSync(folder));
+    assert.deepEqual(errors, []);
+    app.exit(0);
+    return;
+  }
   if(process.argv.includes('--links-only')){await require('./links-smoke.cjs').run({window,store,app,directory,services,fixture,js,errors});return;}
   if(process.argv.includes('--images-only')){await require('./message-images-smoke.cjs').run({window,store,app,directory,services,fixture,js,errors});return;}
   if(process.argv.includes('--skills-only')){await require('./skills-smoke.cjs').run({window,store,app,directory,services,fixture,js,errors});return;}
   const quitMode = ['idle', 'active', 'timeout', 'restart'].find(mode => process.argv.includes(`--quit-${mode}-only`));
   if (quitMode) { await require('./quit-smoke.cjs').run({window,store,app,services,fixture,js,mode:quitMode}); return; }
+  if(process.argv.includes('--graph-workflow-only')){
+    await require('./graph-workflow-smoke.cjs').run({window,store,directory,services,fixture,js});
+    assert.deepEqual(errors,[]);
+    console.log('Graph workflow smoke checks passed.');
+    app.exit(0);return;
+  }
   if(process.argv.includes('--workflow-only')){
     const [primary,backup]=fixture.roles;
+    const planner=store.saveRole({...primary,id:undefined,name:'Antigravity planner fixture',engine:'antigravity'});
     let releaseFirst;
     const gate=new Promise(resolve=>{releaseFirst=resolve;});
     const calls=[],routingCalls=[];
@@ -35,15 +158,21 @@ async function run(window,store,app,directory,services) {
     services.agents.run=async(chatId,role,_project,_signal,_summary,context)=>{
       if(context.moderatorTask?.kind==='workflow-plan'){
         assert.equal(chatId,null);
+        assert.equal(role.id,planner.id);
         assert.match(context.moderatorTask.prompt,/Preserve the existing behavior/);
         return {status:'complete',text:JSON.stringify({token:context.moderatorTask.token,title:'Generated viewer workflow',nodes:[node,{...node,title:'Verify the viewer'}]})};
       }
       const flow=store.get('chats',chatId).workflow;
       if(context.moderatorTask){
         routingCalls.push([flow.goal,flow.stage,role.id]);
-        return store.message(chatId,{kind:'assistant',roleId:role.id,roleName:role.name,moderatorTask:context.moderatorTask.kind,status:'complete',text:JSON.stringify({token:context.moderatorTask.token,roleId:backup.id})});
+        const choice = {token:context.moderatorTask.token,roleId:backup.id};
+        if (flow.type==='generated') choice.reason='The backup has a matching rating.';
+        return store.message(chatId,{kind:'assistant',roleId:role.id,roleName:role.name,moderatorTask:context.moderatorTask.kind,status:'complete',text:JSON.stringify(choice)});
       }
-      if(flow.type==='generated')return store.message(chatId,{kind:'assistant',roleId:role.id,roleName:role.name,workflowAttemptId:context.workflowAttemptId,status:'complete',text:'Verified result\nWORKFLOW: DONE'});
+      if(flow.type==='generated'){
+        const text = flow.nodeIndex===1 && !flow.reworkCount ? 'Fix the viewer width\nWORKFLOW: REWORK' : 'Verified result\nWORKFLOW: DONE';
+        return store.message(chatId,{kind:'assistant',roleId:role.id,roleName:role.name,workflowAttemptId:context.workflowAttemptId,status:'complete',text});
+      }
       calls.push([flow.goal,flow.stage,role.id]);
       if(calls.length===1)await gate;
       const result=flow.goal==='Blocked'||flow.stage==='implement'&&role.id===primary.id
@@ -79,30 +208,65 @@ async function run(window,store,app,directory,services) {
     assert.deepEqual(routed.attempts.map(attempt=>attempt.roleId),[backup.id,backup.id]);
     assert.match(await js(`document.querySelector('#messages .moderator-message summary')?.textContent`),/\u5df2\u9009\u62e9/);
 
-    await js(`showPage('roles');editRole(role(${JSON.stringify(primary.id)}));$('role-workflow-ratings').open=true;$('rating-add').click();document.querySelector('.rating-domain').value='Frontend';document.querySelector('.rating-duty').value='Implementation';document.querySelector('.rating-score').value='7';$('role-form').requestSubmit()`);
-    for(let i=0;i<80&&!store.get('roles',primary.id).workflowRatings?.length;i++)await wait(50);
-    assert.equal(store.get('roles',primary.id).workflowRatings?.[0].score,7);
+    await js(`showPage('roles');$('role-priorities-open').click();$('priority-new').click();$('priority-domain').value='Frontend';$('priority-duty').value='Implementation';
+      const first=$('priority-candidates').firstElementChild;
+      first.querySelector('select').value=${JSON.stringify(primary.id)};
+      first.querySelector('select').dispatchEvent(new Event('change',{bubbles:true}));
+      first.querySelector('.priority-weight-input').value='3';
+      $('priority-add-candidate').click();
+      const last=$('priority-candidates').lastElementChild;
+      last.querySelector('select').value=${JSON.stringify(backup.id)};
+      last.querySelector('select').dispatchEvent(new Event('change',{bubbles:true}));`);
+    assert.deepEqual(await js(`[...$('priority-candidates').querySelectorAll('output')].map(output=>output.textContent)`),['75%','25%']);
+    await wait(150);
+    fs.writeFileSync(path.join(directory,'workflow-priority-editor.png'),(await window.webContents.capturePage()).toPNG());
+    await js(`$('dialog-form').requestSubmit()`);
+    for(let i=0;i<80&&await js(`$('dialog').open`);i++)await wait(50);
+    const savedRule = store.state.workflowPriorities[0];
+    assert.deepEqual(savedRule.candidates.map(item=>[item.roleId,item.tier,item.weight]),[[primary.id,1,3],[backup.id,1,1]]);
+    assert.equal(await js(`document.querySelectorAll('.priority-table tbody tr').length`),1);
+    assert.match(await js(`document.querySelector('.priority-table tbody').textContent`),/Frontend/);
+    fs.writeFileSync(path.join(directory,'workflow-priority-table.png'),(await window.webContents.capturePage()).toPNG());
+    await js(`$('priority-search').value='no-matching-rule';$('priority-search').dispatchEvent(new Event('input'));`);
+    assert.equal(await js(`$('priority-empty').hidden`),false);
     const beforePlan=store.state.chats.length;
-    await js(`showPage('projects');$('chat-new').click();$('wf-goal').value='Generate a viewer workflow';$('wf-criteria').value='Preserve the existing behavior';$('wf-ai-plan').click();$('dialog-form').requestSubmit()`);
+    await js(`(async()=>{state=await api.snapshot();showPage('projects');$('chat-new').click();$('wf-goal').value='Generate a viewer workflow';$('wf-criteria').value='Preserve the existing behavior';$('wf-ai-plan').click();$('wf-plan-planner').value=${JSON.stringify(planner.id)};$('dialog-form').requestSubmit();})()`);
     for(let i=0;i<100&&await js(`$('wf-plan-preview').hidden`);i++)await wait(50);
     assert.equal(store.state.chats.length,beforePlan);
+    assert.equal(store.get('projects',fixture.chat.projectId).roleIds.includes(planner.id),false);
+    assert.equal(await js(`$('wf-plan-moderator').value`),planner.id);
     assert.deepEqual(await js(`[...document.querySelectorAll('.node-mode')].map(select=>select.value)`),['auto','auto']);
-    assert.match(await js(`document.querySelector('.node-recommendation').textContent`),/7/);
-    await js(`$('wf-plan-moderator').value='';const secondMode=document.querySelectorAll('.node-mode')[1];secondMode.value='ordered';secondMode.dispatchEvent(new Event('change'));`);
-    const worker=store.get('roles',backup.id);
-    store.saveRole({...worker,workflowRatings:[{domain:'Frontend',duty:'Implementation',score:10}]});
+    assert.match(await js(`document.querySelector('.node-recommendation').textContent`),/×3/);
+    await js(`document.querySelector('.node-rework').value='1';$('wf-rework-limit').value='1';`);
+    await js(`const secondMode=document.querySelectorAll('.node-mode')[1];secondMode.value='ordered';secondMode.dispatchEvent(new Event('change'));`);
+    store.updateWorkflowPriority(savedRule.id,{...savedRule,candidates:savedRule.candidates.map(item=>({...item,tier:item.roleId===backup.id?1:2}))});
     await js(`$('dialog-form').requestSubmit()`);
     const generatedWorkflow=()=>store.state.chats.find(chat=>chat.workflow?.type==='generated')?.workflow;
     for(let i=0;i<100&&generatedWorkflow()?.status!=='complete';i++)await wait(50);
     const generated=generatedWorkflow();
     assert.equal(generated?.status,'complete');
-    assert.deepEqual(generated.attempts.map(attempt=>[attempt.roleId,attempt.via]),[[backup.id,'ratings'],[primary.id,'ordered']]);
+    assert.equal(generated.reworkLimit,1);
+    assert.equal(generated.reworkCount,1);
+    assert.deepEqual(generated.attempts.map(attempt=>[attempt.roleId,attempt.via]),[[backup.id,'priority'],[primary.id,'ordered'],[backup.id,'priority'],[primary.id,'ordered']]);
+    assert.deepEqual(generated.attempts[0].priority,{domain:'Frontend',duty:'Implementation',tier:1,weight:1});
+    assert.equal(store.get('projects',fixture.chat.projectId).roleIds.includes(planner.id),true);
     for(let i=0;i<80&&await js(`$('dialog').open || !$('workflow-status')?.textContent.includes('Improve the viewer')`);i++)await wait(50);
+
+    const timedOutChat=store.state.chats.find(chat=>chat.workflow===generated);
+    const savedAttempt=generated.attempts[0];
+    const savedReply=timedOutChat.messages.find(message=>message.kind==='assistant'&&message.workflowAttemptId===savedAttempt.id);
+    const warning='failed to refresh available models: request timed out';
+    Object.assign(savedReply,{status:'cancelled',note:warning,terminal:'[cancelled] '+warning});
+    Object.assign(savedAttempt,{status:'interrupted',reason:'The workflow step timed out. Inspect the workspace and task output before retrying.'});
+    await js(`(async()=>{state=await api.snapshot();chatId=${JSON.stringify(timedOutChat.id)};activateChat();})()`);
+    const replySelector=JSON.stringify('#msg-'+savedReply.id);
+    assert.equal(await js(`document.querySelector(${replySelector}+' .message-state').textContent`),'\u8d85\u65f6\u4e2d\u65ad');
+    assert.match(await js(`document.querySelector(${replySelector}+' .message-note').textContent`),/30/);
 
     require('electron').ipcMain.removeHandler('desk:workflow-create');
     await js(`$('chat-new').click();$('wf-goal').value='Keep this goal';$('wf-criteria').value='Keep these criteria';$('dialog-form').requestSubmit()`);
     for(let i=0;i<80&&await js(`$('wf-error').hidden`);i++)await wait(50);
-    assert.match(await js(`$('wf-error').textContent`),/\u5b8c\u5168\u9000\u51fa Relay Desk/);
+    assert.match(await js(`$('wf-error').textContent`),/\u5b8c\u5168\u9000\u51fa AI \u5c0f\u961f/);
     assert.deepEqual(await js(`[$('dialog').open,$('wf-goal').value,$('wf-criteria').value]`),[true,'Keep this goal','Keep these criteria']);
     assert.equal(errors.length,0,errors.join('\n'));app.exit(0);return;
   }
@@ -180,7 +344,8 @@ async function run(window,store,app,directory,services) {
   fs.writeFileSync(path.join(directory,'role-persona-expanded.png'),(await window.webContents.capturePage()).toPNG());
   await js('document.querySelector("#r-name").value="Smoke Role"; document.querySelector("#r-persona").value="Review code carefully."; document.querySelector("#role-form").requestSubmit()');await wait(220);
   assert.equal(store.state.roles.find(r=>r.id===fixture.roles[0].id).name,'Smoke Role');
-  await js('document.querySelector("#role-connection").open=true;document.querySelector("#r-proxy").value="direct";document.querySelector("#r-proxy").dispatchEvent(new Event("change"));document.querySelector("#role-form").requestSubmit()');await wait(140);
+  await js('document.querySelector("#role-connection").open=true;document.querySelector("#r-proxy").value="direct";document.querySelector("#r-proxy").dispatchEvent(new Event("change"));document.querySelector("#role-form").requestSubmit()');
+  for(let attempt=0;attempt<50&&store.get('roles',fixture.roles[0].id).proxyMode!=='direct';attempt++)await wait(40);
   assert.equal(store.get('roles',fixture.roles[0].id).proxyMode,'direct');
   await js('document.querySelector("#role-connection").open=true;document.querySelector("#r-proxy").scrollIntoView({block:"center"})');await wait(120);
   fs.writeFileSync(path.join(directory,'role-proxy.png'),(await window.webContents.capturePage()).toPNG());
@@ -190,7 +355,7 @@ async function run(window,store,app,directory,services) {
   assert.equal(store.get('roles',fixture.roles[0].id).permission,'danger-full-access');
   await js('document.querySelector("#role-connection").open=true;document.querySelector("#r-permission").scrollIntoView({block:"center"})');await wait(120);
   assert.equal(await js('document.querySelector("#r-permission").value'),'danger-full-access');
-  assert((await js('document.querySelector("#permission-hint").textContent')).includes('当前用户'));
+  assert((await js('document.querySelector("#permission-hint").textContent')).includes('系统权限'));
   fs.writeFileSync(path.join(directory,'role-full-access.png'),(await window.webContents.capturePage()).toPNG());
   await js('document.querySelector("#r-permission").value="workspace-write";document.querySelector("#role-form").requestSubmit()');await wait(150);
   await js('document.querySelector("#role-connection").open=true');await wait(120);
@@ -267,8 +432,10 @@ async function run(window,store,app,directory,services) {
   await js(`editRole(role(${JSON.stringify(fixture.roles[0].id)}))`);await wait(100);
   const originalAvatar = fixture.roles[0].avatarId || '';
   await js('document.querySelector("#avatar-picker button").click()');await wait(120);
-  assert.equal(await js('document.querySelectorAll("[data-avatar-default]").length'),11);
-  for (const item of services.avatars.defaults()) {
+  const avatarPresets = services.avatars.defaults();
+  const visiblePresetIds = await js('Array.from(document.querySelectorAll("[data-avatar-default]"), button => button.dataset.avatarDefault)');
+  assert.deepEqual(visiblePresetIds, avatarPresets.map(item => item.id));
+  for (const item of avatarPresets) {
     assert(item.src.startsWith('data:image/jpeg;base64,'));
     assert.deepEqual(services.avatars.nativeImage.createFromDataURL(item.src).getSize(),{width:256,height:256});
   }
@@ -299,7 +466,7 @@ async function run(window,store,app,directory,services) {
     assert.equal(await js('document.querySelectorAll("#avatar-picker .avatar.custom img").length'),1);
     await js('document.querySelector("#role-form").requestSubmit()');await wait(160);
     assert.equal(store.get('roles',fixture.roles[0].id).avatarId,selected);
-    assert.equal(JSON.parse(fs.readFileSync(store.file,'utf8')).roles.find(role=>role.id===fixture.roles[0].id).avatarId,selected);
+    assert.equal(store.persisted().roles.find(role=>role.id===fixture.roles[0].id).avatarId,selected);
     await js('document.querySelector("#avatar-picker button").click()');await wait(120);
     fs.writeFileSync(path.join(directory,'avatar-picker.png'),(await window.webContents.capturePage()).toPNG());
     await js('document.querySelectorAll("[data-avatar-default]")[1].click();document.querySelector("#dialog-form").requestSubmit();document.querySelector("#role-form").requestSubmit()');await wait(160);
@@ -437,7 +604,7 @@ async function run(window,store,app,directory,services) {
   assert.equal(fixture.chat.messages.length,before+7);
   assert.equal(await js('document.querySelector("#input").value'),'');
   assert.equal(services.running.size,0);
-  await js('document.querySelector("#input").value="Fixture cancelled task";document.querySelector("#send").click()');await wait(40);await js('document.querySelector("#pause").click()');await wait(250);
+  await js('document.querySelector("#input").value="Fixture cancelled task";document.querySelector("#send").click()');await wait(40);await js('document.querySelector("#end-task").click()');await wait(250);
   assert.equal(services.running.size,0);assert.equal(fixture.chat.messages.at(-1).status,'cancelled');
   const runDiscussion=async(decision,autoStop=true)=>{
     fixtureDecision=decision;const start=dispatched.length;
@@ -525,7 +692,7 @@ async function run(window,store,app,directory,services) {
   window.setContentSize(1488,1056);
   await js('document.querySelector("[data-page=settings]").click();document.querySelector("#s-theme").value="dark";document.querySelector("#s-theme").dispatchEvent(new Event("change"))');await wait(200);
   assert.equal(store.state.settings.theme,'dark');
-  assert.equal(JSON.parse(fs.readFileSync(store.file,'utf8')).settings.theme,'dark');
+  assert.equal(store.persisted().settings.theme,'dark');
   assert.equal(await js('document.documentElement.dataset.theme'),'dark');
   assert.equal(await js('getComputedStyle(document.body).backgroundColor'),'rgb(25, 29, 35)');
   await js('document.querySelector("#s-theme").scrollIntoView({block:"center"})');await wait(100);

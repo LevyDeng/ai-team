@@ -48,12 +48,35 @@ test('Whitespace defaults resolve consistently and chat settings cannot override
   const selected=effectiveRole({roleSettings:{fixture:{model:'  ',effort:' ',codexLoginSource:'isolated',permission:'danger-full-access'}}},role);
   assert.equal(selected.model,'role-model');assert.equal(selected.effort,'high');assert.equal(selected.permission,'read-only');assert.equal(selected.codexLoginSource,'desktop');
 });
+test('Personas are copied at join, persist, and can be cleared independently', t => {
+  const { store, project, directory, roles } = fixture(t);
+  const role = store.saveRole({ ...roles[0], persona: 'Original persona', examples: 'Original example' });
+  const chat = store.createChat({ projectId: project.id, roleIds: [role.id, roles[1].id] });
+  const changed = store.saveRole({ ...role, persona: 'Updated template', examples: 'Updated example' });
+  const other = store.createChat({ projectId: project.id, roleIds: [role.id] });
+  assert.equal(effectiveRole(chat, changed).persona, 'Original persona');
+  assert.equal(effectiveRole(other, changed).persona, 'Updated template');
+  store.saveChatRole(chat.id, role.id, { model: '', effort: '', persona: '', examples: 'Chat-only example' });
+  store.saveChatRole(chat.id, role.id, { model: 'model-change-only', effort: '' });
+  const reopened = new Store(directory, directory);
+  const saved = reopened.get('chats', chat.id);
+  const prompt = buildPrompt(effectiveRole(saved, changed), project, saved);
+  assert.match(prompt, /Chat-only example/);
+  assert.doesNotMatch(prompt, /Original persona|Updated template|Updated example/);
+  assert.equal(reopened.get('roles', role.id).examples, 'Updated example');
+  reopened.saveChat({ id: chat.id, roleIds: [roles[1].id] });
+  reopened.saveChat({ id: chat.id, roleIds: [roles[1].id, role.id] });
+  assert.equal(effectiveRole(saved, changed).persona, 'Updated template');
+});
 test('Legacy chats and newly invited participants gain independent defaults without resetting saved selections', t => {
   const { store, project, directory, roles } = fixture(t);
+  roles[0].persona = 'Template at migration';
   const chat = store.createChat({ projectId:project.id, roleIds:[roles[0].id] });
-  delete chat.roleSettings; delete chat.relayReplies; store.save();
+  delete chat.roleSettings; delete chat.rolePersonas; delete chat.relayReplies; store.save();
   const loaded = new Store(directory,directory), old = loaded.get('chats',chat.id);
   assert.equal(old.relayReplies,true); assert.equal(old.roleSettings[roles[0].id].effort,roles[0].effort);
+  const updated = loaded.saveRole({ ...roles[0], persona: 'Later template' });
+  assert.equal(effectiveRole(old, updated).persona, 'Template at migration');
   loaded.saveChatRole(chat.id,roles[0].id,{model:'retained',effort:'high'});
   loaded.saveChat({id:chat.id,roleIds:roles.slice(0,2).map(r=>r.id)});
   assert.equal(old.roleSettings[roles[0].id].model,'retained');

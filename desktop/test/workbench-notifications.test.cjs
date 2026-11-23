@@ -36,3 +36,29 @@ test('An independent completed chat still notifies while another chat is running
   f.notifications.complete('other');assert.equal(f.counts.at(-1),1);
   assert.equal(f.chats[1].unread,true);assert.equal(f.effects.filter(e=>e==='attention').length,1);
 });
+
+test('Workflow notifications come from the workflow runner after completion or a stop that needs attention', () => {
+  const {chats,busy,counts,effects,notifications} = fixture();
+  const chat=chats[0];
+  chat.workflow={status:'queued'};
+  chat.unread=true;
+  assert.equal(notifications.refresh(),0);
+  assert.equal(chat.unread,true);
+
+  chat.unread=false;
+  for (const status of ['queued','running','paused']) {
+    chat.workflow.status=status;
+    assert.equal(notifications.complete(chat.id,{workflow:true}),false);
+  }
+  for (const status of ['complete','needs_check','unavailable','round_limit','unresolved']) {
+    chat.workflow.status=status;
+    assert.equal(notifications.complete(chat.id),false);
+    busy.add(chat.id);
+    assert.equal(notifications.complete(chat.id,{workflow:true}),false);
+    busy.delete(chat.id);
+    assert.equal(notifications.complete(chat.id,{workflow:true}),true);
+    notifications.read(chat.id);
+  }
+  assert.deepEqual(counts,[0,1,0,1,0,1,0,1,0,1,0]);
+  assert.equal(effects.filter(effect=>effect==='attention').length,5);
+});

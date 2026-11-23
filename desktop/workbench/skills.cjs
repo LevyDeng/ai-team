@@ -36,7 +36,7 @@ class Skills{
       const folder=skill.runtimeFolder?skill.runtimeFolder+' inside the managed agent, or '+skill.folder+' on the SSH host':skill.folder;
       return `${skill.sourceLabel} skill from the ${skill.locationName} SSH location. Referenced resources are relative to ${folder}. Use tools that can access that location.\n\n${skill.instructions}`;
     }
-    return `Local ${skill.sourceLabel} skill. Referenced resources are relative to ${skill.folder} on the Relay Desk Windows machine. Use the available tools and permissions to access them.\n\n${skill.instructions}`;
+    return `Local ${skill.sourceLabel} skill. Referenced resources are relative to ${skill.folder} on the ai-team Windows machine. Use the available tools and permissions to access them.\n\n${skill.instructions}`;
   }
   async models(value,{force=false}={}){
     const saved=value.id?this.get(value.id):null,provider=value.provider==='gemini'?'gemini':'openai',base=endpoint(value.baseUrl||(provider==='gemini'?'https://generativelanguage.googleapis.com/v1beta':'https://api.openai.com/v1'));
@@ -45,7 +45,7 @@ class Skills{
     const request=this.network?await this.network.fetchFor(role):this.request;
     return this.modelCatalogs.request({provider,base,key,proxy,request},{force});
   }
-  save(value){const previous=value.id?this.store.state.skills.find(s=>s.id===value.id):null;if(value.id&&!previous)throw new Error('Only Relay Desk skills can be edited here.');const command=String(value.command||'').trim(),name=String(value.name||'').trim(),instructions=String(value.instructions||'').trim();
+  save(value){const previous=value.id?this.store.state.skills.find(s=>s.id===value.id):null;if(value.id&&!previous)throw new Error('Only ai-team skills can be edited here.');const command=String(value.command||'').trim(),name=String(value.name||'').trim(),instructions=String(value.instructions||'').trim();
     if(!slug.test(command)||!name||name.length>60||/[\s/@]/.test(name)||!instructions||instructions.length>30000)throw new Error('Enter a unique command, a short name without spaces, and skill instructions.');
     if(!['prompt','image'].includes(value.kind))throw new Error('Choose a supported skill type.');
     if(this.store.state.skills.some(s=>s.id!==previous?.id&&[s.command,s.name].some(x=>[command,name].includes(x))))throw new Error('Skill name or command is already used.');
@@ -64,8 +64,8 @@ class Skills{
   tools(){
     const list=this.list().filter(s=>s.enabled&&s.modelInvocable!==false);if(!list.length)return [];
     const tools=[
-      {name:'skill_read',description:'Read a global Relay Desk skill before using it. Available skills: '+list.map(s=>s.command+' ('+s.description+')').join('; '),inputSchema:{type:'object',properties:{skill:{type:'string',enum:list.map(s=>s.command)}},required:['skill'],additionalProperties:false}},
-      {name:'skill_run',description:'Execute an enabled Relay Desk skill. Images run on the App machine with encrypted credentials; return paths, never image bytes. The shared user-task budget is 3 calls, including retries. Executors cannot recursively invoke another skill. Use the same requestId to retry an uncertain submission.',inputSchema:{type:'object',properties:{skill:{type:'string',enum:list.map(s=>s.command)},prompt:{type:'string',maxLength:16000},requestId:{type:'string',maxLength:100}},required:['skill','prompt'],additionalProperties:false}}
+      {name:'skill_read',description:'Read a global ai-team skill before using it. Available skills: '+list.map(s=>s.command+' ('+s.description+')').join('; '),inputSchema:{type:'object',properties:{skill:{type:'string',enum:list.map(s=>s.command)}},required:['skill'],additionalProperties:false}},
+      {name:'skill_run',description:'Execute an enabled ai-team skill. Images run on the App machine with encrypted credentials; return paths, never image bytes. The shared user-task budget is 3 calls, including retries. Executors cannot recursively invoke another skill. Use the same requestId to retry an uncertain submission.',inputSchema:{type:'object',properties:{skill:{type:'string',enum:list.map(s=>s.command)},prompt:{type:'string',maxLength:16000},requestId:{type:'string',maxLength:100}},required:['skill','prompt'],additionalProperties:false}}
     ];
     const handoff=this.handoffSkill();
     if(handoff)tools.push(
@@ -98,7 +98,7 @@ class Skills{
     return this.run(scope,skill.id,args.prompt,args.requestId,{targetChatId:args.targetChatId,recipientIds:args.recipientIds});
   }
   validate(id,prompt){const skill=this.get(id);if(!skill.enabled)throw new Error('This skill is disabled.');if(typeof prompt!=='string'||!prompt.trim()||prompt.length>16000)throw new Error('Enter a skill request of at most 16,000 characters.');if(skill.kind==='image'&&!this.vault.has('skill:'+id))throw new Error('请先到“技能”配置生图服务的 API Key；模型可以留空自动选择。');return skill;}
-  run(scope,id,prompt,requestId,destination){if(this.closed)throw new Error('Relay Desk is closing.');const skill=structuredClone(this.validate(id,prompt));const source=this.store.get('chats',scope.chatId);if(scope.depth)throw new Error('Nested skill execution is not allowed.');if(requestId!==undefined&&(typeof requestId!=='string'||!requestId||requestId.length>100))throw new Error('Invalid request ID.');
+  run(scope,id,prompt,requestId,destination){if(this.closed)throw new Error('ai-team is closing.');const skill=structuredClone(this.validate(id,prompt));const source=this.store.get('chats',scope.chatId);if(scope.depth)throw new Error('Nested skill execution is not allowed.');if(requestId!==undefined&&(typeof requestId!=='string'||!requestId||requestId.length>100))throw new Error('Invalid request ID.');
     const retryKey=requestId?scope.taskId+':'+scope.roleId+':'+requestId:null;const signature=JSON.stringify([id,prompt,destination]);if(retryKey&&this.retries.has(retryKey)){const prior=this.retries.get(retryKey);if(prior.signature!==signature)throw new Error('Request ID was already used for a different request.');return prior.promise;}
     let handoff;
     if(destination){
