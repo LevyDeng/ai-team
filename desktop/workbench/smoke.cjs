@@ -416,7 +416,7 @@ async function run(window,store,app,directory,services) {
     assert.equal(await js('document.querySelector("#r-effort").disabled'),['kimi','cursor'].includes(engine));
     assert.equal(await js('document.querySelector("#r-location").value'),'local');
     if(engine==='antigravity'){assert.equal(await js('document.querySelector("#agent-runtime-install").hidden'),false);assert((await js('document.querySelector("#agent-runtime-help").textContent')).includes('Google'));await js('document.querySelector("#agent-runtime-card").scrollIntoView({block:"start"})');await wait(180);fs.writeFileSync(path.join(directory,'antigravity-settings.png'),(await window.webContents.capturePage()).toPNG());}
-    if(engine==='workbuddy')assert((await js('document.querySelector("#agent-runtime-help").textContent')).includes('加密登录态'));
+    if(engine==='workbuddy')assert((await js('document.querySelector("#agent-runtime-help").textContent')).includes('请改用官方 CLI'));
     if(engine==='workbuddy'){
       assert.equal(await js('document.querySelector("#agent-runtime-account").hidden'),false);
       await js('document.querySelector("#r-executable").value="C:/fixture/desktop-worker.mjs";document.querySelector("#r-model").value="fixture-desktop-model";document.querySelector("#agent-runtime-account").click()');await wait(100);
@@ -571,8 +571,8 @@ async function run(window,store,app,directory,services) {
   assert.equal(await js('document.querySelector("#quick-model").hidden'),true);
   await js(`(async()=>{await api['role-save']({...role(${JSON.stringify(fixture.roles[0].id)}),effort:'high'});await api['chat-role-settings'](${JSON.stringify(fixture.chat.id)},${JSON.stringify(fixture.roles[0].id)},{model:'',effort:''});state=await api.snapshot();document.querySelector('#input').value=${JSON.stringify('@'+store.get('roles',fixture.roles[0].id).name+' Check inherited role defaults')};document.querySelector('#input').dispatchEvent(new Event('input'));})()`);await wait(80);
   assert.equal(await js('document.querySelector("#quick-model").value'),savedDefault);
-  assert.equal(await js('document.querySelector("#quick-effort").value'),store.get('roles',fixture.roles[0].id).effort);
-  assert.equal(await js('document.querySelector("#quick-effort").value'),'high');
+  assert.equal(await js('document.querySelector("#quick-effort").value'),'');
+  assert.equal(store.get('roles',fixture.roles[0].id).effort,'high');
   await js('document.querySelector("#participants [data-chat-role]").click()');await wait(80);
   assert.equal(await js('document.querySelector("#chat-model-picker input").value'),'');
   assert((await js('document.querySelector("#chat-model-picker input").placeholder')).includes(savedDefault));
@@ -784,7 +784,9 @@ async function run(window,store,app,directory,services) {
   await js(`(async()=>{state=await api.snapshot();showPage('roles');editRole(role(${JSON.stringify(claudePermissionRole.id)}));document.querySelector('#role-connection').open=true;})()`);await wait(100);
   assert.equal(await js('document.querySelector("#r-permission").disabled'),false);assert.equal(await js('document.querySelector("#r-permission").value'),'workspace-write');
   await js('document.querySelector("#r-permission").value="danger-full-access";document.querySelector("#r-permission").dispatchEvent(new Event("change"));document.querySelector("#r-permission").scrollIntoView({block:"center"})');await wait(180);
-  assert((await js('document.querySelector("#permission-hint").textContent')).includes('bypassPermissions'));assert((await js('document.querySelector("#permission-hint").textContent')).includes('VPS'));
+  const permissionHint = await js('document.querySelector("#permission-hint").textContent');
+  assert(permissionHint.includes('跳过工具审批'));
+  assert(permissionHint.includes('仍受系统权限'));
   fs.writeFileSync(path.join(directory,'claude-permission-settings.png'),(await window.webContents.capturePage()).toPNG());
   await js('document.querySelector("#role-form").requestSubmit()');await wait(120);assert.equal(store.get('roles',claudePermissionRole.id).permission,'danger-full-access');
   const permissionChat=store.createChat({projectId:fixture.project.id,roleIds:[claudePermissionRole.id],name:'Claude Permission Replies'});
@@ -794,7 +796,7 @@ async function run(window,store,app,directory,services) {
   assert((await js(`document.getElementById(${JSON.stringify('msg-'+oldApproval.id)}).querySelector('.message-note').textContent`)).includes('另一个终端补批'));
   assert((await js(`document.getElementById(${JSON.stringify('msg-'+fullApproval.id)}).querySelector('.message-note').textContent`)).includes('本次已使用 Claude 完全权限'));
   assert(!Object.entries((await js('(async()=>await api.snapshot())()')).connectionStatus).some(([id,status])=>id!=='local'&&status==='ready'));
-  fs.writeFileSync(path.join(directory,'claude-permission-checks.json'),JSON.stringify({passed:true,checks:['remote Claude permission selector enabled','legacy acceptEdits maps to standard selection','full mode shows native VPS parameter','saving persists full permission mode','legacy denied-tool hint translated without cross-process approval claim','full-mode denial points to native/service policies','no automatic SSH connection'],consoleErrors:errors},null,2));
+  fs.writeFileSync(path.join(directory,'claude-permission-checks.json'),JSON.stringify({passed:true,checks:['remote Claude permission selector enabled','legacy acceptEdits maps to standard selection','full mode explains tool approvals and system limits','saving persists full permission mode','legacy denied-tool hint translated without cross-process approval claim','full-mode denial points to native/service policies','no automatic SSH connection'],consoleErrors:errors},null,2));
   assert.deepEqual(errors,[]);
   fs.writeFileSync(path.join(directory,'shared-login-checks.json'),JSON.stringify({passed:true,checks:['desktop reuse selector persists','API roles hide desktop selector','draft model catalog uses selected source','login check does not open authorization window','shared missing-login message targets desktop source'],consoleErrors:errors},null,2));
   fs.writeFileSync(path.join(directory,'conversation-checks.json'),JSON.stringify({passed:true,checks:['per-chat models preserve role defaults and other chats','avatar dialog loads searchable model catalog','model and effort snapshots dispatched on next send','independent and relay context captured','default participant order persists','all-participant mention with explicit final speaker','CLI reasoning details visible','read-only task console follows emitted output','task console expansion and selection','shared project terminal preserved'],consoleErrors:errors},null,2));
