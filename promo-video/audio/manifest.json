@@ -1,0 +1,97 @@
+{
+  "meta": {
+    "title": "AI 小队 · ai-team 产品介绍",
+    "repo": "github.com/LevyDeng/ai-team",
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "voice": "zh-CN-YunxiNeural",
+    "rate": "+5%",
+    "leadIn": 0.45,
+    "tailOut": 0.75,
+    "transitionSec": 0.45
+  },
+  "totalDuration": 148.234,
+  "slides": [
+    {
+      "id": "slide-01",
+      "audioFile": "audio/slide-01.mp3",
+      "start": 0,
+      "duration": 18.944,
+      "voiceStart": 0.65,
+      "voiceDuration": 17.544,
+      "leadIn": 0.65,
+      "tailOut": 0.75
+    },
+    {
+      "id": "slide-02",
+      "audioFile": "audio/slide-02.mp3",
+      "start": 18.944,
+      "duration": 19.176,
+      "voiceStart": 19.394,
+      "voiceDuration": 17.976,
+      "leadIn": 0.45,
+      "tailOut": 0.75
+    },
+    {
+      "id": "slide-03",
+      "audioFile": "audio/slide-03.mp3",
+      "start": 38.12,
+      "duration": 20.976,
+      "voiceStart": 38.57,
+      "voiceDuration": 19.776,
+      "leadIn": 0.45,
+      "tailOut": 0.75
+    },
+    {
+      "id": "slide-04",
+      "audioFile": "audio/slide-04.mp3",
+      "start": 59.096,
+      "duration": 22.992,
+      "voiceStart": 59.546,
+      "voiceDuration": 21.792,
+      "leadIn": 0.45,
+      "tailOut": 0.75
+    },
+    {
+      "id": "slide-05",
+      "audioFile": "audio/slide-05.mp3",
+      "start": 82.088,
+      "duration": 19.488,
+      "voiceStart": 82.538,
+      "voiceDuration": 18.288,
+      "leadIn": 0.45,
+      "tailOut": 0.75
+    },
+    {
+      "id": "slide-06",
+      "audioFile": "audio/slide-06.mp3",
+      "start": 101.576,
+      "duration": 18,
+      "voiceStart": 102.026,
+      "voiceDuration": 16.8,
+      "leadIn": 0.45,
+      "tailOut": 0.75
+    },
+    {
+      "id": "slide-07",
+      "audioFile": "audio/slide-07.mp3",
+      "start": 119.576,
+      "duration": 16.896,
+      "voiceStart": 120.026,
+      "voiceDuration": 15.696,
+      "leadIn": 0.45,
+      "tailOut": 0.75
+    },
+    {
+      "id": "slide-08",
+      "audioFile": "audio/slide-08.mp3",
+      "start": 136.472,
+      "duration": 11.762,
+      "voiceStart": 136.922,
+      "voiceDuration": 9.912,
+      "leadIn": 0.45,
+      "tailOut": 1.4
+    }
+  ]
+}
