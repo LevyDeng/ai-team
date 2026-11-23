@@ -13,7 +13,8 @@ const { spawn: spawnAgent } = require('node:child_process');
 const remoteAntigravity = require('./remote-antigravity.cjs');
 const bases = { openai: 'https://api.openai.com/v1', gemini: 'https://generativelanguage.googleapis.com/v1beta/openai', deepseek: 'https://api.deepseek.com', moonshot:'https://api.moonshot.cn/v1' };
 async function queryVendor(role,home,cwd,env) {
-  const entry=findExecutable(role),launch=vendors.launch(entry,vendors.args({...role,model:'',effort:''}),env);
+  const entry=findExecutable(role), custom=vendors.customEnvironment(role);
+  const launch=vendors.launch(entry,vendors.args({...role,model:'',effort:''}),{...env,...custom.env});
   const child=spawnAgent(launch.command,launch.args,{cwd,env:launch.env,windowsHide:true,stdio:['pipe','pipe','ignore']});
   const client=new AcpClient(child,{text:''},()=>{},role);
   try {
@@ -31,7 +32,14 @@ async function queryVendor(role,home,cwd,env) {
       }
     }
     return vendorModels(session, role.engine);
-  } finally {client.close();await vendors.stop(child);}
+  } catch (error) {
+    if (role.engine !== 'custom-acp') throw error;
+    const detail = custom.secrets.reduce((value, secret) => value.split(secret).join('[redacted]'), error.message);
+    throw new Error('无法读取 ACP 模型。请在 Agent 自身的界面检查登录，也可以手动输入模型 ID。\n' + detail);
+  } finally {
+    client.close();
+    await vendors.stop(child, undefined, {graceful:role.engine==='custom-acp'});
+  }
 }
 function cursorParameters(options) {
   return (Array.isArray(options) ? options : []).filter(option =>
@@ -45,7 +53,8 @@ function cursorParameters(options) {
 function vendorModels(session, engine) {
   const direct = session.models?.availableModels;
   const selection = (session.configOptions || []).find(option => option.category === 'model' || option.id === 'model');
-  if (Array.isArray(direct) && (engine !== 'antigravity' || !selection)) {
+  if (Array.isArray(direct) && (engine !== 'custom-acp' || direct.length) &&
+      (!['antigravity', 'custom-acp'].includes(engine) || !selection)) {
     return direct.map(model => ({ id: model.modelId, label: model.name, description: model.description }));
   }
   return (selection?.options || []).flatMap(item => item.options || [item]).map(model => ({ id: model.value, label: model.name }));
@@ -125,6 +134,9 @@ class ModelCatalogs {
     if (!draft || (!['codex', 'claude', 'opencode'].includes(draft.engine) && !vendors.isVendor(draft.engine)) || !['native', ...Object.keys(bases)].includes(draft.provider)) throw new Error('Choose a supported agent and provider first.');
     const saved = draft.id ? this.store.get('roles', draft.id) : null;
     const location = this.store.get('locations', draft.locationId);
+    if (draft.engine === 'custom-acp' && (location.type !== 'local' || draft.provider !== 'native')) {
+      throw new Error('自定义 ACP 仅支持本机运行，并使用 Agent 自身的服务配置。');
+    }
     if (draft.provider !== 'native' && (draft.engine !== 'codex' || location.type !== 'local')) throw new Error('API model catalogs currently require a local Codex role.');
     const base = String(draft.baseUrl || bases[draft.provider] || '').trim().replace(/\/+$/, '');
     if (draft.provider !== 'native') {
@@ -137,6 +149,10 @@ class ModelCatalogs {
     const loginScope = vendors.supportsRemote(draft.engine, location) ? require('./native-sessions.cjs').loginScope(draft, location) : '';
     const loginEpoch = loginScope ? this.store.state.nativeLoginEpochs?.[loginScope] || 0 : undefined;
     const cacheKey = [draft.id || 'new', draft.engine, draft.provider, location.id, base, draft.executable || '', key, proxy, draft.codexLoginSource || 'isolated', usesDesktopLogin(draft) ? this.agents.desktopHome() : '', connection];
+    if (draft.engine === 'custom-acp') {
+      const custom = vendors.customSettings(draft);
+      cacheKey.push(custom.acpArgs, custom.acpEnv);
+    }
     if (loginScope) cacheKey.push(loginEpoch);
     const digest = crypto.createHash('sha256').update(JSON.stringify(cacheKey)).digest('hex');
     const cached = this.cache[digest];
@@ -172,6 +188,7 @@ class ModelCatalogs {
           entries = await this.native(draft, home, cwd, env);
         } else throw new Error('This SSH location has no model-catalog adapter. Enter a model ID manually.');
         const models = normalize(entries);
+        if (!models.length && draft.engine === 'custom-acp') throw new Error('此 ACP Agent 未提供模型列表。可手动输入模型 ID，或留空使用 Agent 的默认模型。');
         if (!models.length) throw new Error('The provider returned no selectable models. A model ID can still be entered manually.');
         const result = { models, updatedAt: Date.now(), source: draft.provider === 'native' ? 'cli' : 'api',
           ...(draft.engine === 'cursor' ? { cursorParameters: 1 } : {}) };

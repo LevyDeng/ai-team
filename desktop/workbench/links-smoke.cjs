@@ -1,7 +1,11 @@
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
 const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function run({window,store,app,directory,services,fixture,js,errors}){
-  const opened=[],copies=[];services.shell.openPath=async file=>{opened.push(file);return '';};services.clipboard.writeText=text=>copies.push(text);
+  const opened=[],copies=[],revealed=[];services.shell.openPath=async file=>{opened.push(file);return '';};services.clipboard.writeText=text=>copies.push(text);services.shell.showItemInFolder=file=>revealed.push(file);
+  async function until(expression){
+    for(let attempt=0;attempt<75;attempt++){if(await js(expression))return;await wait(50);}
+    throw new Error('Timed out waiting for link fixture: '+expression);
+  }
   const folder=path.join(directory,'link fixture');fs.mkdirSync(folder,{recursive:true});const html=path.join(folder,'index.html'),notes=path.join(folder,'README.md');fs.writeFileSync(html,'<!doctype html><title>Acceptance fixture</title>');fs.writeFileSync(notes,'# Implementation fixture\n');
   const href=file=>'/'+file.replaceAll('\\','/').replaceAll(' ','%20');
   const markdown='[Open \u9a8c\u6536]('+href(html)+') · [Implementation]('+href(notes)+')';
@@ -41,6 +45,46 @@ async function run({window,store,app,directory,services,fixture,js,errors}){
   await js(`Array.from(document.querySelectorAll(${JSON.stringify(selector+' .message-bubble .project-path-link')})).find(a=>a.textContent==='Literal Windows').click()`);await wait(100);assert.equal(opened.at(-1),fs.realpathSync(notes));
   await js(`document.querySelector(${JSON.stringify(selector+' .copy-full')}).click()`);await wait(80);assert.equal(copies.at(-1),source);assert.equal(store.get('chats',fixture.chat.id).messages.find(m=>m.id===fallback.id).text,source);
   await js(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'end'})`);await wait(100);fs.writeFileSync(path.join(directory,'path-fallback.png'),(await window.webContents.capturePage()).toPNG());
+  const roots = ['alpha location','beta location'].map(name=>path.join(directory,name));
+  for(const root of roots){
+    fs.mkdirSync(path.join(root,'nested'),{recursive:true});
+    fs.writeFileSync(path.join(root,'nested','collision.txt'),'Fixture');
+  }
+  const fromBeta = path.join(roots[1],'second-root.txt');
+  const duplicate = path.join(roots[1],'nested','collision.txt');
+  fs.writeFileSync(fromBeta,'Fixture');
+  const remote = {id:'link-remote',name:'Remote Fixture',type:'ssh',os:'linux',control:'ssh'};
+  store.state.locations.push(remote);
+  fixture.project.directories = [
+    ...roots.map(root=>({locationId:'local',path:root})),
+    {locationId:remote.id,path:'/srv/fixture'},
+  ];
+  const contextual = store.message(fixture.chat.id,{kind:'assistant',roleId:fixture.roles[0].id,locationId:'local',
+    text:'Read `./second-root.txt` and `collision.txt`.',status:'complete',
+    activities:[{title:'Files: '+duplicate,status:'complete',paths:[duplicate]}]});
+  const ambiguous = store.message(fixture.chat.id,{kind:'assistant',roleId:fixture.roles[0].id,locationId:'local',
+    text:'Read `collision.txt` or `/srv/fixture/missing.txt`.',status:'complete'});
+  await js('(async()=>{state=await api.snapshot();activateChat();})()');
+  await until(`Boolean($('msg-${ambiguous.id}'))`);
+  const link = (id,index) => `$('msg-${id}').querySelectorAll('.project-path-link')[${index}]`;
+  await js(`${link(contextual.id,0)}.click()`);await wait(100);assert.equal(opened.at(-1),fs.realpathSync(fromBeta));
+  await js(`${link(contextual.id,1)}.click()`);await wait(100);assert.equal(opened.at(-1),fs.realpathSync(duplicate));
+  const count = opened.length;
+  await js(`${link(ambiguous.id,0)}.click()`);
+  await until("$('path-reference-results')?.querySelectorAll('input').length === 2");
+  assert.equal(opened.length,count);
+  assert.equal(await js("$('dialog-submit').disabled"),true);
+  await js("const filterPath=$('path-reference-filter');filterPath.value='beta location';filterPath.dispatchEvent(new Event('input'));$('path-reference-results').querySelector('input').click();$('path-reference-copy').click()");
+  await wait(80);assert.equal(copies.at(-1),fs.realpathSync(duplicate));
+  await js("$('dialog-form').requestSubmit()");
+  await until("!$('dialog').open");assert.equal(opened.at(-1),fs.realpathSync(duplicate));
+  await js(`${link(contextual.id,0)}.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}))`);
+  await until("$('dialog').open && document.querySelector('.path-reference-name')?.textContent.includes('second-root.txt') && Boolean($('path-reference-reveal'))");
+  await js("$('path-reference-reveal').click()");await wait(100);assert.equal(revealed.at(-1),fs.realpathSync(fromBeta));
+  await js("$('dialog-close').click()");
+  await js(`${link(ambiguous.id,1)}.click()`);
+  await until("Boolean($('path-reference-remote'))");
+  await js("$('dialog-close').click()");
   await wait(100);fs.writeFileSync(path.join(directory,'links-terminal.png'),(await window.webContents.capturePage()).toPNG());assert.equal(errors.length,0,errors.join('\n'));
   fs.writeFileSync(path.join(directory,'links-checks.json'),JSON.stringify({passed:true,at:Date.now(),checks:['drive-prefixed Markdown clicks reach native openPath','encoded spaces resolve once','actual xterm soft-wrapped links','wide-character labels','Ctrl+C selection copy','right-click selection copy','copy button retains selection after focus changes','full output excludes ANSI codes','unselected interactive Ctrl+C still interrupts','plain quoted and code-block paths','unsupported image/link syntax remains visible','missing image path remains visible','full copy preserves original source'],consoleErrors:errors},null,2));app.exit(0);
 }

@@ -1,7 +1,7 @@
 ((root) => {
   const text = value => typeof value === 'string' ? value.trim() : '';
   const modelDefault = 'model-default';
-  const supportsEffort = engine => !['kimi','cursor','gemini-web'].includes(engine);
+  const supportsEffort = engine => !['kimi','cursor','gemini-web','custom-acp'].includes(engine);
   function effectiveRole(chat, role) {
     const settings = chat?.roleSettings?.[role.id] || {};
     const persona = chat?.rolePersonas?.[role.id];

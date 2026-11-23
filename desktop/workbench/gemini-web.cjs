@@ -1,5 +1,6 @@
 const {historyFor} = require('./conversations.cjs');
 const discussion = require('./discussion.cjs');
+const { describeProjectDirectories, fileReferenceInstruction } = require('./project-directories.cjs');
 
 const home = 'https://gemini.google.com/app';
 const engine = 'gemini-web';
@@ -14,7 +15,7 @@ function conversationUrl(value) {
   } catch { return ''; }
 }
 
-function promptFor(chat, role, context, summary) {
+function promptFor(chat, role, project, context, summary) {
   const original = historyFor({...chat, relayReplies:context.relayReplies, ignoreModeratorMemory:context.ignoreModeratorMemory}, role, summary);
   const latest = original.findLast(message => message.kind === 'user');
   const recent = [];
@@ -31,6 +32,8 @@ function promptFor(chat, role, context, summary) {
     role.persona && `Role instructions:\n${role.persona}`,
     role.examples && `Style examples:\n${role.examples}`,
     context.skillInstructions && `Requested skill instructions:\n${context.skillInstructions}`,
+    describeProjectDirectories(project),
+    fileReferenceInstruction,
     recent.length && `Recent chat context for reference:\n${recent.join('\n\n')}`,
     `Current user request:\n${latest?.text || ''}`,
     discussion.instruction(context.discussion)
@@ -101,7 +104,7 @@ class GeminiWeb {
 
   async run(chat, role, signal, context, summary) {
     if (signal.aborted) return {status:'cancelled'};
-    const prompt = promptFor(chat, role, context, summary);
+    const prompt = promptFor(chat, role, this.store.get('projects', chat.projectId), context, summary);
     const message = this.store.message(chat.id, {
       kind:'assistant', roleId:role.id, roleName:role.name, locationId:'local',
       geminiWeb:true, text:'', status:'running'

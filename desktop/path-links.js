@@ -1,4 +1,5 @@
 ((root)=>{
+  const commonFilename = /^(?:Dockerfile|Makefile|LICENSE|COPYING|NOTICE|Gemfile|Rakefile|Procfile|\.gitignore|\.gitattributes|\.editorconfig)$/i;
   function normalize(value,{encoded=false}={}){
     if(typeof value!=='string'||value.length>8192)throw new Error('Invalid local path.');
     let text=value.trim();if(/^file:/i.test(text)){const url=new URL(text);if(url.protocol!=='file:'||url.hostname&&!/^localhost$/i.test(url.hostname))throw new Error('Only local file links can be opened.');text=decodeURIComponent(url.pathname);}
@@ -10,7 +11,7 @@
     if(/^[a-z][\w+.-]*:/i.test(text)&&!/^[a-z]:[\\/]/i.test(text))throw new Error('Unsupported local path scheme.');
     return text;
   }
-  function local(value,encoded=false){try{const text=normalize(value,{encoded});if(/^[a-z]:[\\/]/i.test(text)||/^(?:\.?\.?[\\/])?[^<>|?*:\r\n]+[\\/][^<>|?*:\r\n]+$/.test(text)||/^[^<>|?*:\\/]+\.[a-z\d]{1,12}$/i.test(text))return text;}catch{}return null;}
+  function local(value,encoded=false){try{const text=normalize(value,{encoded});if(/^[a-z]:[\\/]/i.test(text)||/^(?:\.?\.?[\\/])?[^<>|?*:\r\n]+[\\/][^<>|?*:\r\n]+$/.test(text)||/^[^<>|?*:\\/]+\.[a-z\d]{1,12}$/i.test(text)||commonFilename.test(text))return text;}catch{}return null;}
   function target(value,{encoded=true}={}){const file=local(value,encoded);if(file)return {kind:'local',value:file};try{const url=new URL(value);if(['https:','http:'].includes(url.protocol)&&!url.username&&!url.password)return {kind:'web',value:url.href};}catch{}return null;}
   function links(text,{plain=false}={}){
     const result=[],occupied=[];const add=(start,end,href,encoded=false,reserve=false)=>{if(occupied.some(r=>start<r.end&&end>r.start))return;const value=target(href,{encoded});if(value||reserve)occupied.push({start,end});if(value)result.push({start,end,...value,source:href});};
@@ -25,12 +26,16 @@
     const bare=/(?:file:\/\/\/|https?:\/\/|\/?[a-z]:[\\/])[^\s<>"'`]+/gi;
     function trim(value){let href=value.replace(/[.,;!?，。；！？：”’]+$/,'');for(const [open,close]of [['(',')'],['[',']'],['{','}']])while(href.endsWith(close)&&href.split(close).length>href.split(open).length)href=href.slice(0,-1);return href;}
     while((match=bare.exec(text))){const href=trim(match[0]);add(match.index,match.index+href.length,href,false,true);}
+    const posix=/(?:^|(?<=[\s([{，：]))\/[\p{L}\p{N}_@~#$%+().-]+(?:\/[\p{L}\p{N}_@~#$%+().-]+)+\/?(?::\d+(?::\d+)?)?/gu;
+    while((match=posix.exec(text))){const href=trim(match[0]);add(match.index,match.index+href.length,href);}
     const relative=/(?:^|(?<=[\s([{，：]))(?:\.{1,2}[\\/]|~[\\/])?[\p{L}\p{N}_@~#$%+().-]+(?:[\\/][\p{L}\p{N}_@~#$%+().-]+)+[\\/]?(?::\d+(?::\d+)?)?/gu;
     while((match=relative.exec(text))){const href=trim(match[0]);add(match.index,match.index+href.length,href);}
     const dotted=/(?:^|(?<=[\s([{，：]))\.{1,2}[\\/][\p{L}\p{N}_@~#$%+().-]+[\\/]?/gu;
     while((match=dotted.exec(text))){const href=trim(match[0]);add(match.index,match.index+href.length,href);}
     const filename=/(?:^|(?<=[\s([{，：]))[\p{L}\p{N}_.-]+\.(?:md|markdown|txt|html?|jsonl?|ya?ml|toml|ini|cfg|conf|log|csv|tsv|xlsx?|docx?|pptx?|pdf|png|jpe?g|gif|webp|bmp|svg|ico|mp4|webm|mov|mkv|mp3|wav|ogg|flac|zip|7z|gz|exe|dll|bat|cmd|ps1|py|[cm]?js|tsx?|jsx|css|scss|vue|rs|go|cpp|hpp?|cs|java|sql|sqlite|blend|fbx|glb|gltf|obj|uasset|uproject)(?::\d+(?::\d+)?)?(?=[\s,;.!?\)\]}，。；！？：]|$)/giu;
     while((match=filename.exec(text)))add(match.index,filename.lastIndex,match[0]);
+    const words=/(?:^|(?<=[\s([{，：]))\.?[\p{L}][\p{L}.-]*(?=[\s,;.!?\)\]}，。；！？：]|$)/gu;
+    while((match=words.exec(text)))if(commonFilename.test(match[0]))add(match.index,words.lastIndex,match[0]);
     return result.sort((a,b)=>a.start-b.start);
   }
   const api={normalize,local,target,links};if(typeof module==='object'&&module.exports)module.exports=api;else root.relayPaths=api;

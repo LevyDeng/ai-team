@@ -9,10 +9,13 @@ function thinking(state, id, text, append = false, complete = false) {
     terminal(state, '\r\n[Reasoning summary]\r\n' + state.thinkingParts[id] + '\r\n');
   }
 }
-function activity(state, id, title, status) {
+function activity(state, id, title, status, paths) {
   state.activities ||= [];
   const item = state.activities.find(item => item.id === id);
-  if (item) Object.assign(item, { title, status }); else state.activities.push({ id, title, status });
+  const details = { title, status };
+  const files = paths?.filter(value => typeof value === 'string' && value.length <= 4096).slice(0, 32);
+  if (files?.length) details.paths = files;
+  if (item) Object.assign(item, details); else state.activities.push({ id, ...details });
   state.activities = state.activities.slice(-80);
 }
 function textContent(content) {
@@ -37,8 +40,9 @@ function parseActivity(engine, event, state) {
       if (event.type === 'item.completed') terminal(state, '\r\n[Exit ' + (item.exit_code ?? item.status ?? 'complete') + ']\r\n');
       changed = true;
     } else if (['mcp_tool_call', 'file_change', 'web_search'].includes(item.type)) {
-      const title = item.type === 'mcp_tool_call' ? [item.server, item.tool].filter(Boolean).join(' / ') : item.type === 'file_change' ? 'Files: ' + (item.changes || []).map(change => change.path).join(', ') : 'Search: ' + (item.query || '');
-      activity(state, id, title, event.type === 'item.completed' ? (item.status === 'failed' || item.error ? 'failed' : 'complete') : 'running');
+      const paths = item.type === 'file_change' ? (item.changes || []).map(change => change.path) : undefined;
+      const title = item.type === 'mcp_tool_call' ? [item.server, item.tool].filter(Boolean).join(' / ') : paths ? 'Files: ' + paths.join(', ') : 'Search: ' + (item.query || '');
+      activity(state, id, title, event.type === 'item.completed' ? (item.status === 'failed' || item.error ? 'failed' : 'complete') : 'running', paths);
       terminal(state, '\r\n[' + title + ']\r\n' + textContent(item.result?.content) + '\r\n'); changed = true;
     }
   }
@@ -55,7 +59,7 @@ function parseActivity(engine, event, state) {
         if (block.type === 'thinking' && block.thinking) { thinking(state, (event.message.id || 'stream') + ':' + index, block.thinking, false, true); changed = true; }
         if (block.type === 'tool_use') {
           const detail = block.input?.command || block.input?.file_path || block.input?.path || '';
-          activity(state, block.id, block.name, 'running'); terminal(state, '\r\n[' + block.name + '] ' + limit(detail, 4000) + '\r\n'); changed = true;
+          activity(state, block.id, block.name, 'running', [block.input?.file_path, block.input?.path]); terminal(state, '\r\n[' + block.name + '] ' + limit(detail, 4000) + '\r\n'); changed = true;
         }
       }
     }

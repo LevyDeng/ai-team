@@ -17,6 +17,7 @@ async function resolveProjectPath(root, value) {
   if (typeof value !== 'string' || !value || value.length > 4096 || /[\0\r\n]/.test(value) || /^[\\/]{2}/.test(value)) throw new Error('Invalid local project path.');
   const filename = require('./path-links.js').normalize(value);
   const absolute = /^[a-z]:[\\/]/i.test(filename);
+  if (!absolute && /^(?:[\\/]|~[\\/])/.test(filename)) throw new Error('This path requires a local drive letter.');
   if (!absolute && !root) throw new Error('Set a local project folder first.');
   const candidate = absolute ? path.normalize(filename) : path.resolve(await localRoot(root), filename);
   let target;

@@ -16,8 +16,11 @@ function fixture(t){
   const add=(id,extra={})=>{const role={id,engine:'codex',provider:'native',locationId:'local',...extra};roles.push(role);return role;};
   return {service,store,vault,backend,agents,network,add,directory};
 }
-test('All roles are represented without launching CLI or SSH; only shared login configurations group together',t=>{
-  const {service,add}=fixture(t);add('a',{codexLoginSource:'desktop'});add('b',{codexLoginSource:'desktop'});add('c');add('d');add('e',{engine:'antigravity'});add('f',{engine:'cursor'});add('g',{locationId:'other'});
+test('Enabled roles are listed without launching CLI or SSH and shared login profiles group together',t=>{
+  const {service,add,network}=fixture(t);
+  network.policy=role=>({mode:role.proxyMode||'direct'});
+  add('a',{codexLoginSource:'desktop'});add('b',{codexLoginSource:'desktop',executable:'other-codex.exe',proxyMode:'system'});add('c');add('d');add('e',{engine:'antigravity'});add('f',{engine:'cursor'});add('g',{locationId:'other'});
+  add('disabled',{enabled:false,codexLoginSource:'desktop'});
   const entries=service.snapshot();assert.equal(entries.length,6);assert.deepEqual(entries[0].roleIds,['a','b']);assert.equal(entries.find(x=>x.engine==='antigravity').refreshable,false);assert.equal(entries.find(x=>x.locationId==='other').state,'unsupported');assert(!JSON.stringify(entries).includes('shared-codex'));
   add('h',{locationId:'other'});assert.equal(service.snapshot().filter(e=>e.locationId==='other').length,2);
 });
@@ -34,8 +37,10 @@ test('Used percentage normalization rejects missing, out-of-range, and non-numbe
 });
 test('Requests deduplicate shared accounts, respect cooldown and persist only sanitized quota data',async t=>{
   const f=fixture(t);f.add('a',{codexLoginSource:'desktop'});f.add('b',{codexLoginSource:'desktop'});let calls=0;
+  f.add('disabled',{enabled:false});
   f.service.native=async()=>{calls++;await new Promise(resolve=>setTimeout(resolve,30));return {state:'ready',windows:[{id:'first',usedPercent:5}],updatedAt:Date.now(),privateToken:'DO_NOT_EXPORT'};};
   await Promise.all([f.service.request('a'),f.service.request('b')]);await f.service.request('a');assert.equal(calls,1);assert.equal(f.service.snapshot()[0].windows[0].usedPercent,5);assert(!fs.readFileSync(f.service.file,'utf8').includes('DO_NOT_EXPORT'));
+  await f.service.request('disabled');await f.service.request();assert.equal(calls,1);
   const loaded=new Usage({...f.service});assert.equal(loaded.snapshot()[0].cached,true);assert.equal(loaded.snapshot()[0].windows[0].usedPercent,5);
 });
 test('A failed refresh retains old readings as explicitly cached and hides raw errors',async t=>{
@@ -49,7 +54,11 @@ test('API balance uses official endpoint, selected proxy, and current role key; 
   const f=fixture(t);f.add('a',{provider:'deepseek'});f.vault.values['api:a']='fixture-secret';let request;
   f.network.fetchFor=async role=>async(url,options)=>{request={role,url,options};return {ok:true,status:200,text:async()=>JSON.stringify({balance_infos:[{currency:'CNY',total_balance:'12.3400'}]})};};
   await f.service.request('a');const before=f.service.snapshot()[0];assert.equal(request.url,'https://api.deepseek.com/user/balance');assert.equal(request.options.headers.Authorization,'Bearer fixture-secret');assert.equal(request.options.redirect,'error');assert.deepEqual(before.balances,[{currency:'CNY',remaining:'12.3400'}]);
+  f.add('shared',{provider:'deepseek',baseUrl:'https://api.deepseek.com/v1'});
+  f.vault.values['api:shared']='fixture-secret';
+  assert.deepEqual(f.service.snapshot()[0].roleIds,['a','shared']);
   assert(!JSON.stringify(before).includes('fixture-secret'));f.vault.values['api:a']='changed-secret';const after=f.service.snapshot()[0];assert.notEqual(before.id,after.id);assert.equal(after.balances.length,0);assert.equal(after.state,'pending');
+  assert.deepEqual(f.service.snapshot().map(entry=>entry.roleIds),[['a'],['shared']]);
 });
 test('Custom endpoints and providers without balance adapters remain explicit unknowns',async t=>{
   const f=fixture(t);f.add('a',{provider:'deepseek',baseUrl:'https://example.com/v1'});f.add('b',{provider:'openai'});f.add('c',{provider:'gemini'});f.add('d',{engine:'kimi'});f.add('e',{engine:'workbuddy'});await f.service.request();assert.equal(f.service.snapshot().length,5);assert(f.service.snapshot().every(e=>e.state==='unsupported'&&e.windows.length===0&&e.balances.length===0));assert.equal(f.service.snapshot()[0].reason,'custom_endpoint');

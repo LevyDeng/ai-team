@@ -1,12 +1,20 @@
 const fs=require('node:fs/promises'),path=require('node:path'),crypto=require('node:crypto');
 const paths=require('../path-links.js');
 const {readMessageDetail}=require('./workspace-db.cjs');
+const {findProjectPaths,messagePaths}=require('./path-resolution.cjs');
 const imageExtension=/\.(?:png|jpe?g|webp|gif|bmp)$/i;
 
 function imagePath(value,encoded=false){
   try{const name=paths.normalize(value,{encoded});return imageExtension.test(name)&&!/^[/\\]/.test(name)?name:null;}catch{return null;}
 }
 function imageLinks(text){return paths.links(String(text||'')).filter(link=>link.kind==='local').map(link=>imagePath(link.value)).filter(Boolean);}
+function displayPath(reference, roots) {
+  if (path.isAbsolute(reference)) return path.normalize(reference);
+  if (roots.length !== 1 || /^~[\\/]/.test(reference)) return reference;
+  const filename = path.resolve(roots[0], reference);
+  const relative = path.relative(roots[0], filename);
+  return relative.startsWith('..' + path.sep) || path.isAbsolute(relative) ? reference : filename;
+}
 function candidates(message){
   const result=[];
   const add=value=>{const name=imagePath(value);if(name&&!result.some(p=>p.toLowerCase()===name.toLowerCase()))result.push(name);};
@@ -42,13 +50,21 @@ class MessageImages{
   }
   async list(chatId,messageId){
     const chat=this.store.get('chats',chatId),message=chat.messages.find(m=>m.id===messageId&&m.kind==='assistant');if(!message)throw new Error('Assistant message not found.');
-    const project=this.store.get('projects',chat.projectId),root=project.directories.find(d=>d.locationId==='local')?.path;
+    const project=this.store.get('projects',chat.projectId);
+    const roots=project.directories.filter(d=>d.locationId==='local').map(d=>d.path);
+    const activities=readMessageDetail(message,'activities')||[];
+    let hints;
     const result=[],digests=new Set(),names=new Set();
-    for(const candidate of candidates({text:message.text,imagePaths:message.imagePaths,activities:readMessageDetail(message,'activities')})){
+    for(const candidate of candidates({text:message.text,imagePaths:message.imagePaths,activities})){
       if(result.length>=8)break;
-      if(!path.isAbsolute(candidate)&&!root)continue;
-      const filename=path.resolve(root||'',candidate),key=filename.toLowerCase();if(names.has(key))continue;names.add(key);
-      let file;try{file=await this.preview(filename);}catch{file={path:filename,name:path.basename(filename),warning:'Image is unavailable or cannot be read.'};}
+      const matches=await findProjectPaths(candidate,roots,{search:false,getHints:()=>hints??=messagePaths(message,activities)}).catch(()=>({candidates:[]}));
+      const resolved=matches.candidates.length===1?matches.candidates[0].path:undefined;
+      const filename=resolved||displayPath(candidate,roots);
+      const key=filename.toLowerCase();if(names.has(key))continue;names.add(key);
+      let file;
+      if(resolved)try{file=await this.preview(filename);}catch{}
+      file||={path:filename,name:path.basename(filename),warning:'Image is unavailable or cannot be read.',
+        ...(!resolved&&filename!==candidate&&{reference:candidate})};
       if(!file||file.digest&&digests.has(file.digest))continue;if(file.digest)digests.add(file.digest);const {digest,...publicFile}=file;result.push(publicFile);
     }
     return result;

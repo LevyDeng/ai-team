@@ -76,6 +76,13 @@
         event.preventDefault(); event.stopPropagation();
         Promise.resolve(handlers.openPath(value)).catch(handlers.error);
       };
+      if (handlers.inspectPath) {
+        element.title += '（右键查看路径选项）';
+        element.oncontextmenu = (event) => {
+          event.preventDefault(); event.stopPropagation();
+          Promise.resolve(handlers.inspectPath(value)).catch(handlers.error);
+        };
+      }
     };
     for (const link of fragment.querySelectorAll('a')) {
       const href = link.getAttribute('data-relay-path') || link.getAttribute('href') || '';

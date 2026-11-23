@@ -11,7 +11,11 @@
   Object.assign(api,{
     snapshot:async()=>previewState(),
     'project-select':async id=>{value.settings.lastProjectId=id;return value.projects.find(project=>project.id===id).lastUsedAt=Date.now();},
-    'project-order':async order=>{value.settings.projectOrder=order;},
+    'project-order':async (order,direction)=>{
+      value.settings.projectOrder=order;
+      if(direction!==undefined)value.settings.projectOrderDirections={...value.settings.projectOrderDirections,[order]:direction};
+      return {projectOrder:order,projectOrderDirections:value.settings.projectOrderDirections};
+    },
     'project-search':async(id,text)=>value.chats.filter(chat=>chat.projectId===id&&chat.messages.some(message=>message.text?.toLowerCase().includes(text.toLowerCase()))).map(chat=>chat.id),
     'chat-messages':async id=>({messages:messages(id).map(({terminal,activities,...message})=>({...message,activityCount:activities?.length||0})),older:false,newer:false}),
     'chat-search':async(id,text,offset)=>{const matches=messages(id).filter(message=>message.text?.toLowerCase().includes(text.toLowerCase())).reverse();return {matches:matches.slice(offset,offset+30).map(message=>({...message,excerpt:message.text.slice(0,160)})),total:matches.length};},

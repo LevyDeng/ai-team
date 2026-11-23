@@ -1,5 +1,6 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs/promises'),path=require('node:path'),os=require('node:os'),{pathToFileURL}=require('node:url');
 const links=require('../path-links.js'),{resolveProjectPath}=require('../project-paths.cjs');
+const {findProjectPaths,messagePaths}=require('../workbench/path-resolution.cjs');
 test('Drive-prefixed Markdown links resolve as absolute Windows paths without a project root',async t=>{
   const directory=await fs.mkdtemp(path.join(os.tmpdir(),'relay-link-'));t.after(()=>fs.rm(directory,{recursive:true,force:true}));const filename=path.join(directory,'review entry.html');await fs.writeFile(filename,'<!doctype html><title>Fixture</title>');
   const drive='/' + filename.replaceAll('\\','/');assert.equal(links.normalize(drive),filename.replaceAll('\\','/'));assert.equal(await resolveProjectPath('',drive),await fs.realpath(filename));assert.equal(await resolveProjectPath('',pathToFileURL(filename).href),await fs.realpath(filename));
@@ -30,4 +31,45 @@ test('Plain paths preserve literal percent signs, URLs keep precedence and unsup
   assert.equal(links.links('D:/Project/percent%20.md',{plain:true})[0].value,'D:/Project/percent%20.md');
   const result=links.links('https://example.com/D:/foo.png. custom://host/path/foo.md',{plain:true});assert.equal(result.length,1);assert.equal(result[0].kind,'web');assert.equal(result[0].value,'https://example.com/D:/foo.png');
   assert.equal(links.links('[Missing support](custom://host/D:/foo.png)').length,0);
+});
+
+test('Project references try all roots and allow the user to disambiguate duplicate paths', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'workbench-paths-'));
+  t.after(() => fs.rm(directory, {recursive:true,force:true}));
+  const roots = [path.join(directory, 'first'), path.join(directory, 'second')];
+  for (const root of roots) await fs.mkdir(path.join(root, 'src'), {recursive:true});
+  const filename = path.join(roots[1], 'src', 'only here.js');
+  await fs.writeFile(filename, '');
+  const [only] = (await findProjectPaths('src/only here.js:18:2', roots)).candidates;
+  assert.equal(only.path, await fs.realpath(filename));
+  assert.equal(only.relative, path.join('src', 'only here.js'));
+  for (const root of roots) await fs.writeFile(path.join(root, 'src', 'common.js'), '');
+  assert.equal((await findProjectPaths('src/common.js', roots)).candidates.length, 2);
+  assert.equal((await findProjectPaths('/srv/docs/common.js', roots)).candidates.length, 0);
+  assert.equal((await findProjectPaths('../first/src/common.js', roots)).candidates.length, 0);
+  await assert.rejects(findProjectPaths('file://server/share/common.js', roots));
+});
+
+test('Message paths disambiguate a basename before bounded suffix search', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'workbench-path-hints-'));
+  t.after(() => fs.rm(root, {recursive:true,force:true}));
+  const paths = ['first/src/main.cjs', 'second, copy/src/main.cjs', 'node_modules/src/main.cjs'];
+  for (const relative of paths) {
+    const filename = path.join(root, relative);
+    await fs.mkdir(path.dirname(filename), {recursive:true});
+    await fs.writeFile(filename, '');
+  }
+  const hints = messagePaths({text:'Changed main.cjs.'}, [
+    {status:'complete',paths:[paths[1]]},
+    {status:'failed',paths:[paths[0]]},
+  ]);
+  const resolved = await findProjectPaths('main.cjs', [root], {getHints:()=>hints});
+  assert.deepEqual(resolved.candidates.map(item => item.path), [await fs.realpath(path.join(root, paths[1]))]);
+  const searched = await findProjectPaths('src/main.cjs#L12', [root]);
+  assert.deepEqual(searched.candidates.map(item => item.relative).sort(), paths.slice(0, 2).map(value => path.normalize(value)));
+  assert.equal(searched.incomplete, false);
+  assert.equal((await findProjectPaths('main.cjs', [root], {maxEntries:1})).incomplete, true);
+  assert.deepEqual([...messagePaths({text:'Changed [another file](<docs/start here.md>).'}, [{title:'Files: src/old.js'}])], ['src/old.js','docs/start here.md']);
+  assert.deepEqual(links.links('See Dockerfile, LICENSE and /srv/project/docs/readme.md.', {plain:true}).map(item=>item.value),
+    ['Dockerfile','LICENSE','/srv/project/docs/readme.md']);
 });

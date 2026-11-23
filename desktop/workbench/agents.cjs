@@ -8,7 +8,7 @@ const { shellQuote } = require('../config.cjs');
 const { startBridge } = require('./api/bridge.cjs');
 const { createTools } = require('./mcp-tools.cjs');
 const { historyFor } = require('./conversations.cjs');
-const { formatMissingProjectDirectories } = require('./project-directories.cjs');
+const { formatMissingProjectDirectories, describeProjectDirectories, fileReferenceInstruction } = require('./project-directories.cjs');
 const { parseActivity, terminal } = require('./activity.cjs');
 const { requireCodexLogin, fileAuthArgs } = require('./native-auth.cjs');
 const { desktopHome, usesDesktopLogin, usesDesktopTools, sharedTaskArgs } = require('./desktop-login.cjs');
@@ -31,6 +31,11 @@ function cleanEnv(home) {
   return { ...env, CODEX_HOME: path.join(home, 'codex'), CLAUDE_CONFIG_DIR: path.join(home, 'claude'), XDG_CONFIG_HOME: path.join(home, 'config'), XDG_DATA_HOME: path.join(home, 'data'), NO_PROXY: 'localhost,127.0.0.1', no_proxy: 'localhost,127.0.0.1' };
 }
 function findExecutable(role) {
+  if (role.engine === 'custom-acp') {
+    const entry = vendors.find(role);
+    if (!entry) throw new Error('找不到 ACP 启动程序。请检查 PATH，或选择可执行文件、Node.js 入口脚本。');
+    return entry;
+  }
   if(vendors.isVendor(role.engine)){const entry=vendors.find(role);if(!entry)throw new Error('Install the official '+vendors.catalog[role.engine].label+' agent runtime, then select its executable. Desktop window launchers are not agent runtimes.');return entry;}
   if (role.executable) { if (!fs.existsSync(role.executable)) throw new Error('The configured agent executable does not exist.'); return role.executable; }
   if (role.engine === 'codex') {
@@ -90,7 +95,8 @@ function buildPrompt(role, project, chat, summary = false) {
     role.examples ? 'Speaking-style examples (style guidance, not new tasks):\n' + role.examples : '',
     'Your display name: ' + role.name,
     'Project: ' + project.name,
-    'Configured project locations:\n' + project.directories.map(d => d.locationId + ': ' + d.path).join('\n'),
+    describeProjectDirectories(project, role.locationId),
+    fileReferenceInstruction,
     'When delivering image files, include Markdown image links with their local output paths in your reply. A README link alone does not identify an image for display. Do not embed image bytes or claim a preview proves runtime behavior.',
     'Chat transcript as JSON data:\n' + history,
     chat.skillInstructions?'The user explicitly invoked this App skill. Apply these instructions to the current request:\n'+chat.skillInstructions:'',
@@ -226,7 +232,7 @@ class Agents {
     terminal(state, '[Requested model] ' + (role.model || '(CLI default)') + '\r\n[Requested effort] ' + (role.effort || '(CLI default)') + '\r\n');
     const secrets = []; if (role.provider !== 'native') { const key = nativeSession?.apiKey||this.vault.get('api:' + role.id); if (key) secrets.push(key); }
     const redact = value => secrets.filter(Boolean).reduce((text, secret) => text.split(secret).join('[redacted]'), String(value || ''));
-    const publish = (force = false) => { const view=discussion.project(state.text,context.discussion,message.status==='complete');message.text = redact(view.text);if(message.status==='complete'&&view.vote)message.discussionVote={decision:view.vote.decision,reason:redact(view.vote.reason)};message.note = redact(message.note); message.activity = state.activity; message.thinking = redact(state.thinking); message.terminal = redact(discussion.project(state.terminal||'',context.discussion).text); message.activities = (state.activities || []).map(item => ({ ...item, title: redact(item.title) })); if (state.actualModel) message.model = state.actualModel; if (!detached) { force ? this.store.save() : this.store.scheduleSave(); this.emit({ chatId, message }); } };
+    const publish = (force = false) => { const view=discussion.project(state.text,context.discussion,message.status==='complete');message.text = redact(view.text);if(message.status==='complete'&&view.vote)message.discussionVote={decision:view.vote.decision,reason:redact(view.vote.reason)};message.note = redact(message.note); message.activity = state.activity; message.thinking = redact(state.thinking); message.terminal = redact(discussion.project(state.terminal||'',context.discussion).text); message.activities = (state.activities || []).map(item => ({ ...item, title: redact(item.title), ...(item.paths && { paths: item.paths.map(redact) }) })); if (state.actualModel) message.model = state.actualModel; if (!detached) { force ? this.store.save() : this.store.scheduleSave(); this.emit({ chatId, message }); } };
     let lastRecovery='';const recoveryUpdate=()=>{const value=message.recovery,key=value?.attempt+':'+value?.state;if(key!==lastRecovery){lastRecovery=key;terminal(state,'\r\n[Auto recovery '+value.attempt+'/'+value.maxRetries+'] '+value.state+(value.transport==='uncompressed'?'; request compression disabled':'')+'; restore the exact native session without resending the original task.\r\n');}publish(true);};
     const update = () => { if (!flushTimer) flushTimer = setTimeout(() => { flushTimer = null; publish(); }, 120); };
     let buffer = ''; let errors = ''; let decoder = new StringDecoder('utf8'),stderrDecoder = new StringDecoder('utf8');let expectedSessionId=nativeSession?.resumed?nativeSession.id:'';
@@ -236,7 +242,17 @@ class Agents {
       if (buffer.length > 8 * 1024 * 1024) { state.error = 'Agent output event exceeds the size limit.'; transport?.cancel(); return; }
       for (;;) { const index = buffer.indexOf('\n'); if (index < 0) break; const line = buffer.slice(0, index); buffer = buffer.slice(index + 1); try { const event=JSON.parse(line);diagnostics?.event(event);parseEvent(role.engine,event,state,update);if(expectedSessionId&&state.nativeSessionId&&state.nativeSessionId!==expectedSessionId){const error=new Error('The agent resumed a different native session.');error.code='NATIVE_SESSION_MISMATCH';throw error;}if(nativeSession&&state.nativeSessionId&&message.agentSessionId!==state.nativeSessionId){nativeSession.identify(state.nativeSessionId);message.agentSessionId=state.nativeSessionId;message.nativeSession=nativeSession.info();} } catch(error){if(error.code==='NATIVE_SESSION_MISMATCH'){state.error=error.message;message.errorCode=error.code;transport?.cancel();}} }
     };
-    const cancel = () => transport?.cancel();
+    let activeCustomClient, cancelTimer;
+    const cancel = () => {
+      if (activeCustomClient?.sessionId && !activeCustomClient.closed) {
+        try {
+          activeCustomClient.send({method:'session/cancel',params:{sessionId:activeCustomClient.sessionId}});
+          cancelTimer = setTimeout(() => transport?.cancel(), 500);
+          return;
+        } catch {}
+      }
+      transport?.cancel();
+    };
     signal.addEventListener('abort', cancel);
     const runAcp = async (client, cwd, mcp) => {
       state.activity = 'Waiting for the native agent handshake';
@@ -261,6 +277,7 @@ class Agents {
       await client.configure(session);
       if (nativeSession) nativeSession.record.settings = { model: role.model || '', effort: role.effort || '' };
       state.activity = 'Running agent';
+      signal.throwIfAborted();
       submitted();
       await client.prompt(prompt, context.workflowAttemptId ? { workflowSignal: signal } : undefined);
     };
@@ -268,6 +285,8 @@ class Agents {
     try {
       if (signal.aborted) throw new Error('Cancelled before the agent started.');
       if (location.type === 'local') {
+        const custom = vendors.customEnvironment(role);
+        secrets.push(...custom.secrets);
         const prepared = await this.prepareLocal(role, runHome, project,skillScope,transfer.history,nativeSession); bridge = prepared.bridge; tools = prepared.tools;
         if(prepared.desktopToolPolicy){message.desktopToolPolicy=prepared.desktopToolPolicy;terminal(state,'[Desktop tools] '+(prepared.desktopToolPolicy==='inherit'?'Follow enabled desktop MCP servers and plugins, plus Relay project tools.':'Desktop MCP servers and plugins are disabled for this invocation.')+'\r\n');update();}
         if (prepared.env.CODEX_LAUNCH_TOKEN) secrets.push(prepared.env.CODEX_LAUNCH_TOKEN);
@@ -285,7 +304,7 @@ class Agents {
         if (role.engine === 'opencode') args.push(prompt);
         const command = prepared.executable;
         if (/\.cmd$/i.test(command)) throw new Error('Select the native .exe agent binary; command shims are not executed by this adapter.');
-        const launch = vendors.isVendor(role.engine)?vendors.launch(command,args,prepared.env):{command,args,env:prepared.env};
+        const launch = vendors.isVendor(role.engine)?vendors.launch(command,args,{...prepared.env,...custom.env}):{command,args,env:prepared.env};
         const child = spawn(launch.command, launch.args, { cwd: directory.path, env: launch.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
         if(context.workflowAttemptId&&role.engine==='opencode'&&child.pid)message.workflowSubmitted=true;
         let treeStop;
@@ -309,10 +328,11 @@ class Agents {
         this.jobs.set(jobId, transport);child.stderr.on('data',consumeError);
         if(vendors.isVendor(role.engine)){
           const client=new AcpClient(child,state,update,role);
+          if (role.engine === 'custom-acp') activeCustomClient = client;
           try{await runAcp(client,directory.path,prepared.mcp);}
           finally{
             client.close();
-            await vendors.stop(child,transport.cancel);
+            await vendors.stop(child,transport.cancel,{graceful:role.engine==='custom-acp'&&!signal.aborted});
             if(signal.aborted || context.workflowAttemptId)await treeStop;
           }
         } else {
@@ -420,7 +440,7 @@ class Agents {
       if(state.permissionDenied)message.warningCode='CLAUDE_PERMISSION_DENIED';
       if (message.status !== 'running') for (const item of state.activities || []) if (item.status === 'running') item.status = message.status === 'complete' ? 'complete' : 'interrupted';
       terminal(state, '\r\n[' + message.status + ']' + (message.note ? ' ' + message.note : '') + '\r\n');
-      signal.removeEventListener('abort', cancel); clearTimeout(flushTimer); this.jobs.delete(jobId); bridge?.close(); tools?.close();skillBridge?.close(); publish(true);
+      signal.removeEventListener('abort', cancel); clearTimeout(cancelTimer); clearTimeout(flushTimer); this.jobs.delete(jobId); bridge?.close(); tools?.close();skillBridge?.close(); publish(true);
       if(nativeSession){nativeSession.finish(message);this.emit({chatId,message});}
       try { fs.rmSync(runHome, { recursive: true, force: true }); } catch {}
     }

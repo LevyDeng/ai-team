@@ -7,6 +7,7 @@ const {atomic}=require('./store.cjs');
 const {findExecutable}=require('./agents.cjs');
 const {usesDesktopLogin,sharedProcessArgs}=require('./desktop-login.cjs');
 const {fileAuthArgs}=require('./native-auth.cjs');
+const {catalog}=require('./vendor-agents.cjs');
 const guides={codex:'https://chatgpt.com/codex/settings/usage',claude:'https://claude.ai/settings/usage',antigravity:'https://antigravity.google/docs/cli/commands/usage/',kimi:'https://www.kimi.com/code/console',cursor:'https://cursor.com/dashboard/usage',codebuddy:'https://www.codebuddy.ai/docs/cli/slash-commands',workbuddy:'https://www.codebuddy.cn/workbuddy/',openai:'https://platform.openai.com/usage',gemini:'https://aistudio.google.com/usage',deepseek:'https://platform.deepseek.com/usage',moonshot:'https://platform.kimi.com/console/account'};
 const finite=value=>typeof value==='number'&&Number.isFinite(value);
 const percent=value=>finite(value)&&value>=0&&value<=100;
@@ -58,9 +59,21 @@ class Usage {
     const managed=native&&location.managed&&['claude','codex'].includes(role.engine);
     const refreshable=managed||native&&location.type==='local'&&['claude','codex'].includes(role.engine)||!native&&location.type==='local'&&['deepseek','moonshot'].includes(role.provider)&&this.endpoint(role)!==null;
     const env=native&&location.type==='local'?this.agents.environment(role,path.join(this.store.directory,'profiles',role.id)):{};
-    const home=managed?'managed':!native||location.type!=='local'?role.id:role.engine==='codex'?env.CODEX_HOME:role.engine==='claude'?env.CLAUDE_CONFIG_DIR:role.engine==='antigravity'?env.XDG_CONFIG_HOME||'native-google':env.KIMI_CODE_HOME||env.CODEBUDDY_CONFIG_DIR||env.WORKBUDDY_CONFIG_DIR||env.CURSOR_CONFIG_DIR||role.id;
     const credential=native?'':this.vault.values?.['api:'+role.id]||this.vault.get('api:'+role.id)||'';
-    const id=crypto.createHash('sha256').update(JSON.stringify([role.engine,role.provider,location.id,home,role.executable||'',role.baseUrl||'',this.network?.policy(role),credential])).digest('hex');
+    const configVariable={codex:'CODEX_HOME',claude:'CLAUDE_CONFIG_DIR'}[role.engine]||catalog[role.engine]?.config;
+    let profile;
+    if(managed)profile='managed';
+    else if(native&&location.type==='local'){
+      if(role.engine==='antigravity')profile=env.XDG_CONFIG_HOME||'native-google';
+      else if(configVariable)profile=env[configVariable];
+    }
+    // Isolated roles retain their own quota records. Shared login profiles use one record across roles.
+    const shared=managed||Boolean(profile&&(usesDesktopLogin(role)||!['codex','claude'].includes(role.engine)));
+    const apiAccount=!native&&location.type==='local'&&Boolean(credential);
+    const scope=apiAccount
+      ? ['api',this.endpoint(role)||role.baseUrl||'']
+      : [profile||role.id,shared?'':role.executable||'',shared?'':role.baseUrl||'',shared?undefined:this.network?.policy(role)];
+    const id=crypto.createHash('sha256').update(JSON.stringify([role.engine,role.provider,location.id,...scope,credential])).digest('hex');
     return {id,engine:role.engine,provider:role.provider,locationId:location.id,nativeConsole:native&&role.engine==='antigravity'&&location.type==='local',refreshable:Boolean(refreshable),managed,guide:guides[native?role.engine:role.provider]||''};
   }
   endpoint(role){
@@ -71,15 +84,19 @@ class Usage {
     }catch{}return null;
   }
   snapshot(){
-    const groups=new Map();for(const role of this.store.state.roles){const d=this.descriptor(role);if(groups.has(d.id)){groups.get(d.id).roleIds.push(role.id);continue;}
+    const groups=new Map();for(const role of this.store.state.roles){
+      if(role.enabled===false)continue;
+      const d=this.descriptor(role);if(groups.has(d.id)){groups.get(d.id).roleIds.push(role.id);continue;}
       let value=this.cache[d.id];if(d.managed&&!this.versions.has(d.id)){const shared=this.backend.usage[role.engine];if(shared?.windows?.length&&(!value?.updatedAt||shared.updatedAt>value.updatedAt))value=normalize(shared);}
       value||=normalize({state:d.refreshable?'pending':'unsupported',reason:d.refreshable?'not_loaded':role.provider==='native'?'manual_only':this.endpoint(role)?'api_console':role.baseUrl&&['deepseek','moonshot'].includes(role.provider)?'custom_endpoint':'api_console'});
       groups.set(d.id,{...d,roleIds:[role.id],...value,cached:value.cached||Boolean(value.updatedAt&&Date.now()-value.updatedAt>300000),loading:this.pending.has(d.id)});
     }return [...groups.values()];
   }
   async request(roleId){
-    if(!roleId){const seen=new Set();for(const role of [...this.store.state.roles]){const d=this.descriptor(role);if(!d.refreshable||seen.has(d.id))continue;seen.add(d.id);await this.request(role.id);}return this.snapshot();}
-    const role=structuredClone(this.store.get('roles',roleId)),d=this.descriptor(role);
+    if(!roleId){for(const entry of this.snapshot())if(entry.refreshable)await this.request(entry.roleIds[0]);return this.snapshot();}
+    const role=structuredClone(this.store.get('roles',roleId));
+    if(role.enabled===false)return this.snapshot();
+    const d=this.descriptor(role);
     if(!d.refreshable)return this.snapshot();if(this.pending.has(d.id))return this.pending.get(d.id);
     const cooldown=d.managed?300000:60000;if(Date.now()-(this.attempts.get(d.id)||0)<cooldown)return this.snapshot();this.attempts.set(d.id,Date.now());
     const version=this.versions.get(d.id)||0;

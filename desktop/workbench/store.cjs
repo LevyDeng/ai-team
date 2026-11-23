@@ -3,7 +3,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { settings: proxySettings } = require('./proxy.cjs');
 const conversations = require('./conversations.cjs');
-const {isVendor,supportsRemote}=require('./vendor-agents.cjs');
+const {isVendor,supportsRemote,customSettings}=require('./vendor-agents.cjs');
 const {engine:geminiWebEngine}=require('./gemini-web.cjs');
 const workflowPriorities = require('./workflow-ratings.js');
 const { WorkspaceDatabase, messageView } = require('./workspace-db.cjs');
@@ -100,13 +100,18 @@ class Store {
     catch (error) { [settings.lastProjectId, project.lastUsedAt] = previous; throw error; }
     return project.lastUsedAt;
   }
-  sortProjects(order) {
+  sortProjects(order, direction) {
     if (!projectOrders.includes(order)) throw new Error('请选择有效的项目排序方式。');
+    if (direction !== undefined && (order === 'manual' || !['asc', 'desc'].includes(direction))) {
+      throw new Error('请选择有效的项目排序方向。');
+    }
     const { settings } = this.state;
-    const previous = settings.projectOrder;
+    const previous = [settings.projectOrder, settings.projectOrderDirections];
     settings.projectOrder = order;
+    if (direction !== undefined) settings.projectOrderDirections = { ...settings.projectOrderDirections, [order]: direction };
     try { this.save(); }
-    catch (error) { settings.projectOrder = previous; throw error; }
+    catch (error) { [settings.projectOrder, settings.projectOrderDirections] = previous; throw error; }
+    return { projectOrder: order, projectOrderDirections: settings.projectOrderDirections };
   }
   saveDraft(chat, draft) {
     this.database.saveDraft(chat.id, draft);
@@ -202,7 +207,18 @@ class Store {
     if (typeof avatarId !== 'string' || (avatarId && !/^(?:[a-f0-9]{32}|preset-[a-z0-9-]{1,40})$/.test(avatarId))) throw new Error('Choose a valid local avatar.');
     const next = { ...previous, name: text(value.name, 60), description: text(value.description), avatar: Math.max(0, Math.min(2, Number(value.avatar) || 0)), persona: text(value.persona, 30000), examples: text(value.examples, 30000), engine: value.engine, provider: value.provider, locationId: location.id, model: text(value.model), effort: text(value.effort, 20), executable, baseUrl: text(value.baseUrl, 2000), permission: value.engine === 'codex' ? permission : 'acceptEdits' };
     if(value.engine==='claude'||isVendor(value.engine))next.permission=permission;
-    if(['kimi','cursor'].includes(value.engine))next.effort='';
+    if(['kimi','cursor','custom-acp'].includes(value.engine))next.effort='';
+    if (value.engine === 'custom-acp') {
+      if (!executable) throw new Error('请输入 ACP 启动命令或可执行文件路径。');
+      Object.assign(next, customSettings({
+        acpArgs: value.acpArgs === undefined ? previous.acpArgs : value.acpArgs,
+        acpEnv: value.acpEnv === undefined ? previous.acpEnv : value.acpEnv,
+      }));
+      next.baseUrl = '';
+    } else {
+      delete next.acpArgs;
+      delete next.acpEnv;
+    }
     next.allowLocationTools = value.allowLocationTools !== false;
     if (value.workflowRatings !== undefined) next.workflowRatings = require('./workflow-ratings.js').normalize(value.workflowRatings);
     if(isGeminiWeb) Object.assign(next, {model:'', effort:'', executable:'', baseUrl:'', permission:'read-only', allowLocationTools:false});

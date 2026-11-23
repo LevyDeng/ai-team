@@ -8,6 +8,7 @@ const catalog = {
   cursor: { label:'Cursor Agent', docs:'https://cursor.com/docs/cli/installation', names:['cursor-agent.exe','cursor-agent'], folder:'.cursor', config:'CURSOR_CONFIG_DIR', effort:false },
   workbuddy: { label:'WorkBuddy', docs:'https://www.codebuddy.cn/workbuddy/', names:[], folder:'.workbuddy', config:'WORKBUDDY_CONFIG_DIR', effort:true },
   codebuddy: { label:'CodeBuddy Code', docs:'https://www.codebuddy.ai/docs/cli/installation', names:['codebuddy.exe','codebuddy'], folder:'.codebuddy', config:'CODEBUDDY_CONFIG_DIR', effort:true },
+  'custom-acp': { label:'自定义 ACP', effort:false },
 };
 function isVendor(engine) { return Object.hasOwn(catalog,engine); }
 function supportsRemote(engine, location) {
@@ -25,8 +26,40 @@ function validEntry(file) {
   if (/^(?:cursor|kimi|workbuddyai)\.exe$/i.test(path.basename(file)) && fs.existsSync(path.join(path.dirname(file),'resources','app.asar'))) return false;
   return true;
 }
+function customSettings(role) {
+  const { acpArgs: args = [], acpEnv: env = {} } = role;
+  if (!Array.isArray(args) || args.length > 64 || args.some(arg => typeof arg !== 'string' || arg.length > 4000 || arg.includes('\0'))) {
+    throw new Error('ACP 启动参数须为 JSON 字符串数组，最多 64 项。');
+  }
+  if (!env || typeof env !== 'object' || Object.getPrototypeOf(env) !== Object.prototype || Object.keys(env).length > 64 ||
+      Object.entries(env).some(([name, value]) => !/^[a-z_][a-z0-9_]*$/i.test(name) ||
+        typeof value !== 'string' || value.length > 4000 || value.includes('\0'))) {
+    throw new Error('ACP 环境变量须为 JSON 对象，变量名须有效且值须为字符串，最多 64 项。');
+  }
+  return { acpArgs: args, acpEnv: env };
+}
+function findCustom(command, directories) {
+  command = String(command || '').trim();
+  if (/\.bat$/i.test(command)) return '';
+  if (path.isAbsolute(command)) return validEntry(command) ? command : '';
+  if (!/^[a-z0-9_.-]+$/i.test(command)) return '';
+  for (const directory of directories.filter(path.isAbsolute)) {
+    for (const name of [command, ...(process.platform === 'win32' && !path.extname(command) ? [command + '.exe'] : [])]) {
+      const file = path.join(directory, name);
+      if (validEntry(file)) return file;
+    }
+    if (command === 'pi-acp') {
+      const entry = packageBin(path.join(directory, 'node_modules', 'pi-acp'));
+      if (entry) return entry;
+    }
+  }
+  return '';
+}
 function find(role, { home = os.homedir(), local = process.env.LOCALAPPDATA || '', programFiles = process.env.ProgramFiles || 'C:/Program Files', searchPath = process.env.PATH || '' } = {}) {
   if (!isVendor(role.engine)) return '';
+  if (role.engine === 'custom-acp') {
+    return findCustom(role.executable, [...searchPath.split(path.delimiter), path.join(process.env.APPDATA || home, 'npm'), path.join(home, '.local', 'bin')]);
+  }
   if (role.executable) {
     if (!validEntry(role.executable)) throw new Error('Choose the official agent runtime, not a desktop window launcher or shell shim.');
     return role.executable;
@@ -51,9 +84,9 @@ function launch(entry, args, env) {
 }
 function environment(role, env) {
   if (!isVendor(role.engine)) return env;
-  if(role.engine==='antigravity'){
+  if(role.engine==='antigravity' || role.engine==='custom-acp'){
     const result={...env};
-    for(const name of Object.keys(result))if(/^(?:AGY_|ANTIGRAVITY_|GOOGLE_CLOUD_|GCLOUD_|GOOGLE_APPLICATION_CREDENTIALS$)/i.test(name))delete result[name];
+    if (role.engine==='antigravity') for(const name of Object.keys(result))if(/^(?:AGY_|ANTIGRAVITY_|GOOGLE_CLOUD_|GCLOUD_|GOOGLE_APPLICATION_CREDENTIALS$)/i.test(name))delete result[name];
     for(const name of ['XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_STATE_HOME','XDG_CACHE_HOME']){if(process.env[name])result[name]=process.env[name];else delete result[name];}
     return result;
   }
@@ -62,8 +95,23 @@ function environment(role, env) {
   if(role.engine==='workbuddy') Object.assign(result,{CODEBUDDY_CONFIG_DIR:directory,CODEBUDDY_DISABLE_IDE:'1',SERVER__HOST:'127.0.0.1',SERVER__PORT:'0',DISABLE_GALILEO:'1'});
   return result;
 }
+function customEnvironment(role) {
+  if (role.engine !== 'custom-acp') return { env: {}, secrets: [] };
+  const { acpEnv } = customSettings(role);
+  const secrets = [];
+  const env = Object.fromEntries(Object.entries(acpEnv).map(([name, value]) => {
+    const reference = /^\$\{([a-z_][a-z0-9_]*)\}$/i.exec(value);
+    if (!reference) return [name, value];
+    const resolved = process.env[reference[1]];
+    if (resolved === undefined) throw new Error('未找到 ACP 引用的本机环境变量：' + reference[1]);
+    if (resolved) secrets.push(resolved);
+    return [name, resolved];
+  }));
+  return { env, secrets };
+}
 function args(role) {
   if (!isVendor(role.engine)) throw new Error('Unsupported native agent.');
+  if (role.engine === 'custom-acp') return customSettings(role).acpArgs;
   if(role.engine==='antigravity')return ['acp','--process-per-session',...(role.permission==='danger-full-access'?['--dangerously-skip-permissions']:[])];
   const result=[];
   if(role.model)result.push('--model',role.model);
@@ -83,9 +131,24 @@ function args(role) {
   return [...result,'--acp'];
 }
 function loginArgs(engine) { return engine==='antigravity'?['acp','--login']:engine==='kimi'?['login']:engine==='cursor'?['login']:[]; }
-async function stop(child,cancel=()=>child.kill()) {
+async function stop(child,cancel=()=>child.kill(),{graceful=false}={}) {
   if(child.exitCode!==null||child.signalCode!==null)return;
-  await new Promise(resolve=>{const done=()=>{clearTimeout(timer);child.removeListener('exit',done);resolve();};const timer=setTimeout(done,1500);child.once('exit',done);cancel();});
+  await new Promise(resolve => {
+    let force;
+    const done = () => {
+      clearTimeout(deadline);
+      clearTimeout(force);
+      child.removeListener('exit', done);
+      resolve();
+    };
+    const grace = graceful ? 500 : 0;
+    const deadline = setTimeout(done, 1500 + grace);
+    child.once('exit', done);
+    if (graceful) {
+      child.stdin.end();
+      force = setTimeout(cancel, grace);
+    } else cancel();
+  });
 }
-function info(role) { let executable='',error='';try{executable=find(role);}catch(e){error=e.message;}return { ...catalog[role.engine],installed:Boolean(executable),executable,error,installable:Boolean(packages[role.engine])||role.engine==='antigravity',experimental:role.engine==='workbuddy',source:role.engine==='workbuddy'?'desktop-engine':'official-account-cli' }; }
-module.exports={catalog,isVendor,supportsRemote,find,validEntry,launch,environment,args,loginArgs,info,packages,managedRoot,packageBin,stop};
+function info(role) { let executable='',error='';try{executable=find(role);}catch(e){error=e.message;}return { ...catalog[role.engine],installed:Boolean(executable),executable,error,installable:Boolean(packages[role.engine])||role.engine==='antigravity',experimental:role.engine==='workbuddy',source:role.engine==='workbuddy'?'desktop-engine':role.engine==='custom-acp'?'custom-acp':'official-account-cli' }; }
+module.exports={catalog,isVendor,supportsRemote,find,validEntry,launch,environment,customSettings,customEnvironment,args,loginArgs,info,packages,managedRoot,packageBin,stop};

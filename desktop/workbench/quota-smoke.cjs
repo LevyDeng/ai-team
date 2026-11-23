@@ -3,6 +3,24 @@ const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function run({window,store,app,directory,services,js,errors}){
   if(process.argv.includes('--quota-live-only'))return live({window,store,app,directory,services,js,errors});
   store.saveRole({...store.state.roles[0],id:undefined,name:'Native Quota Route',engine:'antigravity',provider:'native',locationId:'local',executable:process.execPath,codexLoginSource:'isolated'});const processes=[],copied=[];
+  const managed = {id:'quota-fixture',name:'Fixture VPS',type:'ssh',managed:true,os:'linux',control:'ssh'};
+  store.state.locations.push(managed);
+  const claude = store.saveRole({...store.state.roles[0],id:undefined,name:'Managed Claude Fixture',engine:'claude',provider:'native',locationId:managed.id,codexLoginSource:'isolated'});
+  store.saveRole({...claude,id:undefined,name:'Shared Claude Fixture',proxyMode:'direct'});
+  const disabled = store.saveRole({...claude,id:undefined,name:'Disabled Claude Fixture'});
+  store.setRoleEnabled(disabled.id,false);
+  services.backend.usage.claude = {state:'ready',windows:[
+    {id:'model:fable',label:'Fable',usedPercent:3,resetsAt:Math.floor(Date.now()/1000)+3600},
+  ],updatedAt:Date.now(),source:'claude-cli-control'};
+  await js("(async()=>{state=await api.snapshot();$('usage-center-open').click();})()");
+  assert.equal(await js("Boolean($('account-usage'))"), false);
+  assert.equal(await js("document.querySelector('.usage-filter').value"), 'all');
+  assert.equal(await js("document.querySelector('.usage-search').value"), '');
+  const claudeCard = "[...document.querySelectorAll('.usage-card')].find(card => card.textContent.includes('Managed Claude Fixture'))";
+  assert.equal(await js(`(${claudeCard}).querySelector('progress').value`), 3);
+  assert.equal(await js(`(${claudeCard}).querySelector('.usage-role-names').textContent`), 'Managed Claude Fixture、Shared Claude Fixture');
+  assert.equal(await js("$('usage-center').textContent.includes('Disabled Claude Fixture')"), false);
+  await js("$('dialog-close').click()");
   const windows=require('electron').BrowserWindow.getAllWindows().length;
   services.network.environmentFor=async()=>({});services.clipboard.writeText=text=>copied.push(text);
   await js('window.Terminal=class extends window.Terminal {constructor(...args){super(...args);window.__quotaFixtureTerminal=this;}};true;');

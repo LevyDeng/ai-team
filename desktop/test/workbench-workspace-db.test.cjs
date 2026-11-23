@@ -89,7 +89,11 @@ test('project preferences survive reopening and search jumps across message page
   const store = new Store(directory, directory);
   const project = store.saveProject({ name: 'Another project', directories: [{ locationId: 'local', path: directory }] });
   store.selectProject(project.id);
+  store.sortProjects('name', 'desc');
+  store.sortProjects('created', 'asc');
+  store.sortProjects('manual');
   store.sortProjects('created');
+  assert.throws(() => store.sortProjects('manual', 'asc'), /排序方向/);
   const chat = store.createChat({ projectId: project.id, roleIds: [store.state.roles[0].id] }, {
     messages: Array.from({ length: 105 }, (_, index) => ({ id: 'm' + index, at: index, kind: 'user',
       text: index === 3 ? 'Find this Older text' : 'Ordinary message ' + index })),
@@ -97,6 +101,7 @@ test('project preferences survive reopening and search jumps across message page
   const loaded = new Store(directory, directory);
   assert.equal(loaded.state.settings.lastProjectId, project.id);
   assert.equal(loaded.state.settings.projectOrder, 'created');
+  assert.deepEqual(loaded.state.settings.projectOrderDirections, { name: 'desc', created: 'asc' });
   assert.ok(loaded.get('projects', project.id).createdAt);
   assert.ok(loaded.get('projects', project.id).lastUsedAt);
   const latest = loaded.messagePage(chat.id);

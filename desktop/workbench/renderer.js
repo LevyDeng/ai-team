@@ -1,7 +1,6 @@
 /* The renderer only receives sanitized state; credentials stay in the main process. */
 const api = window.desk;
 const $ = id => document.getElementById(id);
-const quotaPanel = window.createQuotaPanel($('account-usage'), { refresh: () => api['usage-refresh'](), error: problem => toast(problem.message) });
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const icon = name => `<img src="icons/${name}.svg" alt="">`;
 const workflowStepTimedOut = 'The workflow step timed out. Inspect the workspace and task output before retrying.';
@@ -25,7 +24,7 @@ const terminalViews = new Map();
 const agentTerminalViews=new Map();let agentTerminals=[],activityMode='log';
 const terminalConnectPending=new Set();
 const attachmentTasks=new Map(),sendingChats=new Set();
-const vendorKinds = { antigravity:'Antigravity（反重力）',workbuddy:'WorkBuddy（兼容测试）',kimi:'Kimi Code',cursor:'Cursor Agent',codebuddy:'CodeBuddy Code' };
+const vendorKinds = { antigravity:'Antigravity（反重力）',workbuddy:'WorkBuddy（兼容测试）',kimi:'Kimi Code',cursor:'Cursor Agent',codebuddy:'CodeBuddy Code','custom-acp':'自定义 ACP' };
 const geminiWebEngine = 'gemini-web';
 const engineChoices = [['codex','Codex CLI'],['claude','Claude Code CLI'],...Object.entries(vendorKinds),['opencode','OpenCode'],[geminiWebEngine,'Gemini 网页版']];
 const workflowStages = { implement: '执行阶段', review: '验收阶段' };
@@ -64,18 +63,25 @@ const locationOf = id => state.locations.find(l => l.id === id);
 const chats = () => state.chats.filter(c => c.projectId === projectId).sort((a, b) => b.updatedAt - a.updatedAt);
 const projectOrders = [['recent', '最近使用'], ['name', '项目名称'], ['created', '创建时间'], ['manual', '手动排序']];
 const projectNameOrder = new Intl.Collator('zh-CN', { numeric: true });
+const projectOrder = () => state.settings.projectOrder || 'recent';
+const projectOrderDirection = order => state.settings.projectOrderDirections?.[order] || (order === 'name' ? 'asc' : 'desc');
+let savingProjectOrder = false;
 function orderedProjects() {
-  const order = state.settings.projectOrder;
+  const order = projectOrder();
   if (order === 'manual') return state.projects;
+  const direction = projectOrderDirection(order) === 'asc' ? 1 : -1;
   const latest = new Map();
   if (order !== 'name' && order !== 'created') for (const c of state.chats) {
     latest.set(c.projectId, Math.max(latest.get(c.projectId) || 0, c.updatedAt || 0));
   }
   const used = p => p.lastUsedAt || latest.get(p.id) || p.createdAt || 0;
   return state.projects.toSorted((a, b) => {
-    if (order === 'name') return projectNameOrder.compare(a.name, b.name);
-    if (order === 'created') return (b.createdAt || 0) - (a.createdAt || 0);
-    return used(b) - used(a);
+    if (order === 'name') return direction * projectNameOrder.compare(a.name, b.name);
+    if (order === 'created') {
+      if (!a.createdAt || !b.createdAt) return Number(Boolean(b.createdAt)) - Number(Boolean(a.createdAt));
+      return direction * (a.createdAt - b.createdAt);
+    }
+    return direction * (used(a) - used(b));
   });
 }
 function rememberProject() {
@@ -236,16 +242,11 @@ function renderProjectNotifications() {
 function renderSidebar() {
   if (!project()) projectId = orderedProjects()[0]?.id;
   if (page === 'projects') {
-    $('sidebar-top').innerHTML = `<div class="project-selector"><div class="project-select-wrap"><select id="project-select" aria-label="项目"></select><span id="project-unread" class="badge project-unread" role="img" aria-label="其他项目有新回复" hidden></span></div><button class="icon-button" id="project-edit" title="项目设置" aria-label="项目设置">${icon('dots')}</button><button class="icon-button" id="project-new" title="新项目" aria-label="新项目">${icon('plus')}</button></div><label class="project-order">项目排序<select id="project-order">${options(projectOrders, state.settings.projectOrder || 'recent')}</select></label>${searchMarkup('搜索会话、角色或消息')}<div class="tabs"><button data-filter="all" class="${filter === 'all' ? 'active' : ''}">全部</button><button data-filter="direct" class="${filter === 'direct' ? 'active' : ''}">单聊</button><button data-filter="group" class="${filter === 'group' ? 'active' : ''}">群聊</button><button id="chat-new" class="icon-button" title="新建对话">${icon('plus')}</button></div>`;
+    $('sidebar-top').innerHTML = `<div class="project-selector"><div class="project-select-wrap"><select id="project-select" aria-label="项目"></select><span id="project-unread" class="badge project-unread" role="img" aria-label="其他项目有新回复" hidden></span></div><button class="icon-button" id="project-edit" title="项目设置" aria-label="项目设置">${icon('dots')}</button><button class="icon-button" id="project-new" title="新项目" aria-label="新项目">${icon('plus')}</button></div><div class="project-order"><label for="project-order">????</label><select id="project-order">${options(projectOrders, projectOrder())}</select><button type="button" id="project-order-direction" class="icon-button" hidden></button></div>${searchMarkup('搜索会话、角色或消息')}<div class="tabs"><button data-filter="all" class="${filter === 'all' ? 'active' : ''}">全部</button><button data-filter="direct" class="${filter === 'direct' ? 'active' : ''}">单聊</button><button data-filter="group" class="${filter === 'group' ? 'active' : ''}">群聊</button><button id="chat-new" class="icon-button" title="新建对话">${icon('plus')}</button></div>`;
     renderProjectOptions();
     $('project-select').onchange = e => { saveDraftNow(); projectId = e.target.value; chatId = chats()[0]?.id; renderSidebar(); activateChat(); refreshTerminalTabs(); };
-    $('project-order').onchange = e => action(async () => {
-      const value = e.target.value;
-      try { await api['project-order'](value); }
-      catch (error) { e.target.value = state.settings.projectOrder || 'recent'; throw error; }
-      state.settings.projectOrder = value;
-      renderProjectOptions();
-    });
+    $('project-order').onchange = e => action(() => saveProjectOrder(e.target.value));
+    $('project-order-direction').onclick = () => action(() => saveProjectOrder(projectOrder(), projectOrderDirection(projectOrder()) === 'asc' ? 'desc' : 'asc'));
     $('chat-new').insertAdjacentHTML('beforebegin','<button data-filter="workflow">工作流</button>');
     $('sidebar-top').querySelector('[data-filter="workflow"]').classList.toggle('active',filter==='workflow');
     $('chat-new').title = filter === 'workflow' ? '新建工作流' : '新建对话';
@@ -265,9 +266,36 @@ function renderSidebar() {
   renderProjectNotifications();
   renderWorkbenchFooter();
 }
+async function saveProjectOrder(order, direction) {
+  if (savingProjectOrder) return;
+  savingProjectOrder = true;
+  renderProjectOrderControls();
+  try {
+    const preferences = await api['project-order'](order, direction);
+    Object.assign(state.settings, preferences);
+  } finally {
+    savingProjectOrder = false;
+    renderProjectOptions();
+  }
+}
+function renderProjectOrderControls() {
+  const select = $('project-order');
+  if (!select) return;
+  const order = projectOrder();
+  const ascending = projectOrderDirection(order) === 'asc';
+  select.value = order;
+  select.disabled = savingProjectOrder;
+  const button = $('project-order-direction');
+  button.hidden = order === 'manual';
+  button.setAttribute('aria-disabled', String(savingProjectOrder));
+  button.innerHTML = icon(ascending ? 'arrow-up' : 'arrow-down');
+  button.title = ascending ? '当前升序，点击切换为降序' : '当前降序，点击切换为升序';
+  button.setAttribute('aria-label', button.title);
+}
 function renderProjectOptions() {
   const select = $('project-select');
   if (!select) return;
+  renderProjectOrderControls();
   const entries = orderedProjects().map(p => [p.id, p.name]);
   const key = JSON.stringify(entries);
   if (select._projects !== key) {
@@ -304,7 +332,7 @@ function renderList() {
     }).join('') || `<p class="hint" style="padding:18px 9px">${q ? '没有匹配的会话。' : '还没有对话，点击上方加号开始。'}</p>`;
     document.querySelectorAll('[data-chat]').forEach(b => { b.onclick = () => { saveDraftNow(); chatId = b.dataset.chat; autoBottom = true; renderList(); activateChat(); }; });
   } else if (page === 'roles') {
-    $('sidebar-list').innerHTML = `<button type="button" id="role-priorities-open" class="list-row ${refreshPriorityView ? 'active' : ''}">${icon('checks')}角色优先级</button>` + state.roles.filter(r => (r.name + r.description).toLowerCase().includes(q)).map(r => `<button data-role="${r.id}" class="list-row ${!refreshPriorityView && r.id === roleId ? 'active' : ''}">${avatar(r)}<div class="row-text"><div class="row-title">${esc(r.name)}${r.enabled === false ? '<span class="pill role-disabled-badge">已禁用</span>' : ''}</div><p>${esc(r.description || engineLabel(r.engine) + ' · ' + locationOf(r.locationId)?.name)}</p><small class="role-usage-summary">${esc(window.deskUsage.summary(state.accountUsage?.find(e=>e.roleIds.includes(r.id))))}</small></div></button>`).join('');
+    $('sidebar-list').innerHTML = `<button type="button" id="role-priorities-open" class="list-row ${refreshPriorityView ? 'active' : ''}">${icon('checks')}角色优先级</button>` + state.roles.filter(r => (r.name + r.description).toLowerCase().includes(q)).map(r => `<button data-role="${r.id}" class="list-row ${!refreshPriorityView && r.id === roleId ? 'active' : ''}">${avatar(r)}<div class="row-text"><div class="row-title">${esc(r.name)}${r.enabled === false ? '<span class="pill role-disabled-badge">已禁用</span>' : ''}</div><p>${esc(r.description || engineLabel(r.engine) + ' · ' + locationOf(r.locationId)?.name)}</p>${r.enabled === false ? '' : `<small class="role-usage-summary">${esc(window.deskUsage.summary(state.accountUsage?.find(e=>e.roleIds.includes(r.id))))}</small>`}</div></button>`).join('');
     $('role-priorities-open').onclick = openRolePriorities;
     document.querySelectorAll('[data-role]').forEach(b => { b.onclick = () => editRole(role(b.dataset.role)); });
   } else if(page==='skills'){
@@ -460,7 +488,7 @@ function renderMessages() {
   }
   for (const m of messages) {
     if(m.moderatorTask){renderModeratorMessage(list,c,m);continue;}
-    if(m.kind==='skill'){let element=document.getElementById('msg-'+m.id);if(!element){element=document.createElement('article');element.id='msg-'+m.id;list.append(element);}window.deskSkills.message(element,m,{caller:role(m.callerRoleId)?.name,open:file=>action(()=>api.open(file,c.projectId)),copy:text=>action(()=>api.copy(text)),cancel:id=>action(()=>api['skill-cancel'](c.id,id)),review:()=>openHandoff(c,m.handoff,m.request)});continue;}
+    if(m.kind==='skill'){let element=document.getElementById('msg-'+m.id);if(!element){element=document.createElement('article');element.id='msg-'+m.id;list.append(element);}window.deskSkills.message(element,m,{caller:role(m.callerRoleId)?.name,open:file=>action(()=>openPathReference(file,c.projectId,{chatId:c.id,messageId:m.id})),copy:text=>action(()=>api.copy(text)),cancel:id=>action(()=>api['skill-cancel'](c.id,id)),review:()=>openHandoff(c,m.handoff,m.request)});continue;}
     if (m.kind === 'system' && document.getElementById('msg-' + m.id)) continue;
     let element = document.getElementById('msg-' + m.id);
     if (!element) {
@@ -514,14 +542,14 @@ function renderMessages() {
     const login = element.querySelector('.native-login'); if (login) { login.hidden = !['CODEX_LOGIN_REQUIRED','CODEX_LOGIN_CHECK_FAILED','CODEX_DESKTOP_LOGIN_REQUIRED','CODEX_DESKTOP_LOGIN_CHECK_FAILED','VENDOR_LOGIN_REQUIRED'].includes(m.errorCode); login.textContent = m.errorCode?.startsWith('CODEX_DESKTOP_') ? '检查桌面版登录' : '登录此角色'; }
     const modelChoice = element.querySelector('.select-task-model'); if (modelChoice) modelChoice.hidden = m.errorCode !== 'CODEX_MODEL_REQUIRED';
     const diagnostic=element.querySelector('.diagnostic-copy');if(diagnostic)diagnostic.hidden=!m.diagnostics||m.status==='running';
-    if(m.kind==='assistant')window.deskMessageImages.render(element.querySelector('.message-images'),m,{chatId:c.id,load:(id,messageId)=>api['message-images'](id,messageId),open:file=>api.open(file,c.projectId),copy:text=>api.copy(text),error:e=>toast(e.message),layout:follow=>{if(chatId!==c.id)return false;if(follow==='before')return list.scrollHeight-list.scrollTop-list.clientHeight<100;if(follow)requestAnimationFrame(()=>{if(chatId===c.id)list.scrollTop=list.scrollHeight;});}});
+    if(m.kind==='assistant')window.deskMessageImages.render(element.querySelector('.message-images'),m,{chatId:c.id,load:(id,messageId)=>api['message-images'](id,messageId),open:file=>openPathReference(file,c.projectId,{chatId:c.id,messageId:m.id}),copy:text=>api.copy(text),error:e=>toast(uiError(e)),layout:follow=>{if(chatId!==c.id)return false;if(follow==='before')return list.scrollHeight-list.scrollTop-list.clientHeight<100;if(follow)requestAnimationFrame(()=>{if(chatId===c.id)list.scrollTop=list.scrollHeight;});}});
     const timedOut = isWorkflowStepTimeout(c, m);
     const key = m.text + '\0' + m.status + '\0' + m.activity + '\0' + m.note + '\0' + m.errorCode + '\0' + m.warningCode + '\0' + JSON.stringify(m.contextTransfer) + '\0' + JSON.stringify(m.cliShutdown) + '\0' + timedOut;
     if (element._key !== key) {
       element._key = key;
       const body = element.querySelector('.message-bubble');
       if (m.kind === 'user') {body.replaceChildren();if(m.text){const text=document.createElement('div');text.className='user-message-text';text.textContent=m.text;body.append(text);}if(m.attachments?.length){const files=document.createElement('div');files.className='message-attachments';attachmentCards(files,m.attachments,{projectId:c.projectId});body.append(files);}}
-      else if (m.text) window.relayMarkdown.render(body, m.text, { copy: text => api.copy(text), openLink: value => api.open(value, projectId), openPath: value => api.open(value, projectId), error: e => toast(e.message) });
+      else if (m.text) window.relayMarkdown.render(body, m.text, { copy: text => api.copy(text), openLink: value => api.open(value, c.projectId), openPath: value => openPathReference(value, c.projectId, {chatId:c.id,messageId:m.id}), inspectPath: value => openPathReference(value, c.projectId, {chatId:c.id,messageId:m.id,inspect:true}), error: e => toast(uiError(e)) });
       else body.textContent = m.errorCode === 'WORKBUDDY_DESKTOP_AUTH_UNAVAILABLE' ? '尚未接通 WorkBuddy 桌面账号，本次未收到回复。' : m.errorCode === 'CODEX_MODEL_REQUIRED' ? '请先选择本对话使用的模型。' : m.errorCode === 'CODEX_DESKTOP_LOGIN_REQUIRED' ? '请先在桌面版 Codex 中登录，再重新发送。' : m.errorCode === 'CODEX_LOGIN_REQUIRED' ? '需要登录此角色后才能开始任务。' : m.status === 'running' ? '正在思考…' : '没有收到回复内容。';
       const statusLabels={running:m.geminiWeb?'待录入回复':'生成中',complete:'',failed:'失败',interrupted:'已中断',cancelled:'已暂停',submitting:'等待 CLI 接收',unconfirmed:'提交未确认'};
       element.querySelector('.message-state').textContent = m.status==='running'
@@ -986,6 +1014,72 @@ function dialog(html, submit, label = '保存') {
   else $('dialog-form').querySelector('.dialog-actions').append(button);
   modal.showModal();
   if (headerSave) modal.scrollTop = 0;
+}
+async function openPathReference(filename, targetProjectId, context) {
+  const result = await api.open(filename, targetProjectId, context);
+  if (!result?.candidates || targetProjectId !== projectId) return;
+  const { candidates, incomplete, remoteDirectory, hasLocalDirectories } = result;
+  let selected = candidates.length === 1 ? candidates[0] : undefined;
+  const openSelected = async reveal => {
+    const result = await api.open(selected.path, targetProjectId, { reveal });
+    if (result?.candidates) throw new Error('这个路径已无法访问，请重新点击原链接查找。');
+  };
+  const notice = incomplete ? '搜索达到范围限制或部分目录无法读取，结果可能不完整。'
+    : candidates.length ? '' : remoteDirectory !== undefined ? '本机未找到此路径，可以前往项目文件查看远端目录。'
+    : hasLocalDirectories ? '在本机项目目录中未找到此路径。' : '找不到此路径，请检查绝对路径或先添加本机项目目录。';
+  dialog(
+    `<h2>${candidates.length ? '选择文件路径' : '找不到文件路径'}</h2>
+    <code class="path-reference-name">${esc(filename)}</code>
+    ${notice ? `<p class="hint">${notice}</p>` : ''}
+    ${candidates.length > 1 ? '<input id="path-reference-filter" type="search" aria-label="筛选路径" placeholder="筛选路径…">' : ''}
+    <div id="path-reference-results" aria-label="候选路径" role="group"></div>
+    <div class="tool-actions"><button type="button" id="path-reference-copy" class="quiet">复制路径</button>
+    ${candidates.length ? '<button type="button" id="path-reference-reveal" class="quiet">在资源管理器中查看</button>' : ''}
+    ${remoteDirectory !== undefined ? '<button type="button" id="path-reference-remote" class="quiet">查看远端项目文件</button>' : ''}</div>`,
+    async () => {
+      if (!candidates.length) return;
+      if (!selected) return false;
+      await openSelected(false);
+    }, candidates.length ? '打开' : '关闭');
+  const filter = $('path-reference-filter'), results = $('path-reference-results');
+  const copy = $('path-reference-copy'), reveal = $('path-reference-reveal');
+  function updateButtons() {
+    if (!candidates.length) return;
+    $('dialog-submit').disabled = copy.disabled = reveal.disabled = !selected;
+  }
+  function renderCandidates() {
+    const query = filter?.value.trim().toLowerCase() || '';
+    const visible = candidates.filter(item => item.path.toLowerCase().includes(query));
+    if (!visible.includes(selected)) selected = undefined;
+    results.replaceChildren();
+    for (const item of visible) {
+      const row = document.createElement('label');
+      row.className = 'path-reference-candidate';
+      const input = document.createElement('input');
+      input.type = 'radio'; input.name = 'path-reference'; input.checked = item === selected;
+      input.onchange = () => { selected = item; updateButtons(); };
+      const label = document.createElement('span');
+      label.textContent = item.relative || item.path;
+      if (item.relative) {
+        const folder = document.createElement('small');
+        folder.className = 'hint'; folder.textContent = item.path;
+        label.append(folder);
+      }
+      row.append(input, label); results.append(row);
+    }
+    if (candidates.length && !visible.length) results.textContent = '没有匹配的路径。';
+    updateButtons();
+  }
+  if (filter) filter.oninput = renderCandidates;
+  copy.onclick = () => action(async () => { await api.copy(selected?.path || filename); toast('已复制路径'); });
+  if (reveal) reveal.onclick = () => action(() => openSelected(true));
+  const remote = $('path-reference-remote');
+  if (remote) remote.onclick = () => action(async () => {
+    $('dialog').close();
+    await openTools('files', remoteDirectory);
+  });
+  renderCandidates();
+  filter?.focus();
 }
 async function openAvatarPicker(current, select) {
   const { presets, uploads: library } = await api['avatar-list']();
@@ -1642,6 +1736,24 @@ function editRole(r) {
   $('r-provider').closest('label').insertAdjacentHTML('afterend', `<label id="r-login-source-field">Codex 登录来源<select id="r-login-source">${options([['isolated','独立登录（此角色专用）'],['desktop','复用桌面版 Codex 登录']],value.codexLoginSource || 'isolated')}</select><small class="hint" id="r-login-source-hint"></small></label>`);
   $('r-login-source-field').insertAdjacentHTML('afterend','<div id="r-desktop-tools-field" class="wide"><div class="desktop-tool-inheritance"><strong id="r-desktop-tools-status"></strong><button type="button" id="r-desktop-tools-toggle" aria-describedby="r-desktop-tools-status"></button></div><input type="checkbox" id="r-desktop-tools" '+(value.codexDesktopTools===false?'':'checked')+' hidden><small class="hint">继承桌面版已启用的 MCP 和插件，适用于发言和主持人。关闭后仅使用本工具提供的工具。</small></div>');
   const remoteAntigravity = () => $('r-engine').value === 'antigravity' && $('r-location').value !== 'local';
+  const customAcp = () => $('r-engine').value === 'custom-acp';
+  const executableField = $('r-executable').closest('label');
+  const executableLabel = executableField.firstChild;
+  executableField.insertAdjacentHTML('afterend', `<label class="wide" id="r-acp-preset-field" hidden>启动预设<select id="r-acp-preset">${options([['','自定义命令'],['hermes','Hermes Agent'],['pi','Pi（pi-acp）']],value.executable === 'hermes' ? 'hermes' : value.executable === 'pi-acp' ? 'pi' : '')}</select><small class="hint">选择预设可填入命令和参数，安装与登录在 Agent 自身的界面完成。</small></label>
+    <label class="wide" hidden>启动参数<textarea id="r-acp-args" rows="2" spellcheck="false">${esc(JSON.stringify(value.acpArgs || []))}</textarea><small class="hint">使用 JSON 数组，每个参数占一个元素，例如 ["acp"]。</small></label>
+    <label class="wide" hidden>环境变量<textarea id="r-acp-env" rows="3" spellcheck="false">${esc(JSON.stringify(value.acpEnv || {}, null, 2))}</textarea><small class="hint">使用 JSON 对象。密钥请用 ${esc('${API_KEY}')} 的形式引用本机环境变量。</small></label>`);
+  executableField.before($('r-acp-preset-field'));
+  const acpFields = () => {
+    if (!customAcp()) return {};
+    try {
+      return {
+        acpArgs: JSON.parse($('r-acp-args').value.trim() || '[]'),
+        acpEnv: JSON.parse($('r-acp-env').value.trim() || '{}'),
+      };
+    } catch {
+      throw new Error('请检查 ACP 启动参数和环境变量的 JSON 格式。');
+    }
+  };
   let savedRoleId = r?.id;
   const loginSource = () => $('r-login-source').disabled ? 'isolated' : $('r-login-source').value;
   const refreshLoginSource = () => {
@@ -1653,6 +1765,7 @@ function editRole(r) {
     $('r-login-source-hint').textContent = shared ? '共用桌面版账号；切换或退出登录会影响共用角色。' : '此角色单独登录账号。';
     $('role-login').innerHTML = icon('login') + (remoteAntigravity() ? '配置并登录 VPS' : shared ? '检查桌面版登录' : $('r-engine').value===geminiWebEngine?'在浏览器打开 Gemini':$('r-engine').value==='workbuddy'?'打开 WorkBuddy 登录':vendorKinds[$('r-engine').value]?'登录 '+vendorKinds[$('r-engine').value]+' 账号':'登录原生账号');
     $('role-login').classList.toggle('primary', remoteAntigravity());
+    $('role-login').hidden = customAcp();
   };
   for (const id of ['r-engine','r-provider','r-location','r-login-source']) $(id).addEventListener('change',refreshLoginSource); refreshLoginSource();
   $('r-desktop-tools-toggle').onclick=()=>{$('r-desktop-tools').checked=!$('r-desktop-tools').checked;refreshLoginSource();};
@@ -1670,7 +1783,9 @@ function editRole(r) {
       if (!runtimeCard.isConnected || request !== runtimeRequest) return;
       $('agent-runtime-status').textContent = remote
         ? (info.installed ? '已找到 VPS 上的 agy，可验证登录。' : '未找到 VPS 上的 agy，可通过「配置并登录 VPS」自动安装。')
-        : (info.installed ? (info.source === 'desktop-engine' ? '已找到桌面引擎，兼容性待验证' : '已找到官方引擎，可登录账号') : '未检测到引擎，请安装官方 CLI 或选择运行时文件。' + (info.error ? ' ' + info.error : ''));
+        : info.source === 'custom-acp'
+          ? (info.installed ? '已找到启动程序：' + info.executable : '未找到启动程序。请检查 PATH 或填写完整路径。')
+          : (info.installed ? (info.source === 'desktop-engine' ? '已找到桌面引擎，兼容性待验证' : '已找到官方引擎，可登录账号') : '未检测到引擎，请安装官方 CLI 或选择运行时文件。' + (info.error ? ' ' + info.error : ''));
     } catch (error) {
       if (runtimeCard.isConnected && request === runtimeRequest) $('agent-runtime-status').textContent = uiError(error);
     }
@@ -1687,9 +1802,9 @@ function editRole(r) {
     }
     if ($('r-location').selectedOptions[0]?.disabled) $('r-location').value = 'local';
     const remote = remoteAntigravity(), nextKey = engine + ':' + $('r-location').value;
-    if (runtimeKey !== nextKey && (remote || (runtimeKey.startsWith('antigravity:') && runtimeKey !== 'antigravity:local'))) {
+    if (runtimeKey !== nextKey && (customAcp() || runtimeKey.startsWith('custom-acp:') || remote || (runtimeKey.startsWith('antigravity:') && runtimeKey !== 'antigravity:local'))) {
       executables.set(runtimeKey, $('r-executable').value);
-      $('r-executable').value = executables.get(nextKey) || '';
+      $('r-executable').value = executables.get(nextKey) || (customAcp() ? ({hermes:'hermes',pi:'pi-acp'}[$('r-acp-preset').value] || '') : '');
     }
     runtimeKey = nextKey;
     runtimeRequest++;
@@ -1699,20 +1814,29 @@ function editRole(r) {
     const loginActions = remote ? runtimeCard.querySelector('.agent-runtime-actions') : defaultLoginActions;
     if (login.parentElement !== loginActions) loginActions.prepend(login);
     $('exe-pick').hidden = remote;
-    $('r-executable').placeholder = remote ? '留空自动检测，或填写 VPS 上的 / 或 ~/ 路径' : '留空自动检测原生可执行文件';
+    executableLabel.nodeValue = customAcp() ? 'ACP 启动命令' : 'Agent 可执行文件（可选）';
+    $('r-executable').placeholder = customAcp() ? 'PATH 中的命令，或可执行文件、Node.js 脚本的完整路径' : remote ? '留空自动检测，或填写 VPS 上的 / 或 ~/ 路径' : '留空自动检测原生可执行文件';
     for (const id of ['r-location','r-proxy','r-provider','role-model-picker','r-effort','r-permission','r-key','r-url','r-executable','r-location-tools']) $(id).closest('label').hidden=web;
+    for (const id of ['r-acp-preset','r-acp-args','r-acp-env']) $(id).closest('label').hidden=!customAcp();
+    if (customAcp()) for (const id of ['r-provider','r-key','r-url','r-effort']) $(id).closest('label').hidden = true;
+    $('agent-runtime-guide').hidden = customAcp() && !$('r-acp-preset').value;
+    $('agent-runtime-guide').textContent = customAcp() ? '查看预设安装说明' : '官方安装 / 登录说明';
+    $('agent-runtime-detect').textContent = customAcp() ? '检查启动程序' : '检测引擎';
     for (const id of ['r-proxy-hint','permission-hint']) $(id).hidden=web;
     $('r-location-tools').closest('.checks').nextElementSibling.hidden=web;
     $('gemini-web-role-hint').hidden=!web;
     $('r-effort').disabled=!supportsEffort(engine);if(!supportsEffort(engine))$('r-effort').value='';
     $('r-key').disabled=$('r-provider').value==='native';$('r-url').disabled=$('r-provider').value==='native';
-    if(vendor){$('agent-runtime-title').textContent=vendorKinds[engine]+(remote ? ' · ' + locationOf($('r-location').value).name : ' · 官方账号优先');$('agent-runtime-help').textContent=engine==='antigravity'?(remote ? '一键检测和安装官方 agy，然后在本机浏览器授权。登录归这个 VPS 的 SSH 用户使用。' : '使用 Google 账号登录；模型以列表为准，额度可用 /usage 查看。'):engine==='workbuddy'?'桌面引擎登录尚未兼容，请改用官方 CLI，以 WorkBuddy 同站点、同账号登录。':engine==='kimi'?'使用 Kimi Code 账号登录，首次需浏览器授权。':engine==='cursor'?'使用 Cursor 账号登录，可能需单独完成浏览器授权。':'使用 WorkBuddy 同站点、同账号登录 CLI；各角色共用登录，额度按站点和套餐计算。';if(!remote&&$('role-connection').open)action(detectRuntime);}
+    if (customAcp()) {
+      $('agent-runtime-title').textContent = vendorKinds[engine] + ' · 本机';
+      $('agent-runtime-help').textContent = '先安装并配置支持 ACP 的智能体。模型可刷新列表、输入 ID，或留空使用 Agent 的默认模型。';
+    } else if(vendor){$('agent-runtime-title').textContent=vendorKinds[engine]+(remote ? ' · ' + locationOf($('r-location').value).name : ' · 官方账号优先');$('agent-runtime-help').textContent=engine==='antigravity'?(remote ? '一键检测和安装官方 agy，然后在本机浏览器授权。登录归这个 VPS 的 SSH 用户使用。' : '使用 Google 账号登录；模型以列表为准，额度可用 /usage 查看。'):engine==='workbuddy'?'桌面引擎登录尚未兼容，请改用官方 CLI，以 WorkBuddy 同站点、同账号登录。':engine==='kimi'?'使用 Kimi Code 账号登录，首次需浏览器授权。':engine==='cursor'?'使用 Cursor 账号登录，可能需单独完成浏览器授权。':'使用 WorkBuddy 同站点、同账号登录 CLI；各角色共用登录，额度按站点和套餐计算。';if(!remote&&$('role-connection').open)action(detectRuntime);}
     refreshLoginSource();
   }
   $('r-engine').addEventListener('change',refreshAgentKind);$('r-provider').addEventListener('change',refreshAgentKind);$('r-location').addEventListener('change',refreshAgentKind);refreshAgentKind();
   $('agent-runtime-account').onclick=()=>{ $('r-executable').value='';$('r-url').value='';$('r-effort').value='';$('r-model').value='';$('r-engine').value='codebuddy';$('r-engine').dispatchEvent(new Event('change'));toast('已切换到官方 CLI。保存后用 WorkBuddy 同站点、同账号登录。'); };
   $('agent-runtime-install').onclick=()=>action(async()=>{const engine=$('r-engine').value,button=$('agent-runtime-install');button.disabled=true;button.textContent='正在安装官方 CLI…';try{const result=await api['agent-install'](engine);if(runtimeCard.isConnected&&$('r-engine').value===engine){if(!$('r-executable').value)$('r-executable').value=result.executable;await detectRuntime();roleModelPicker?.reset();toast('官方 CLI '+result.version+' 已安装，请登录账号');}}finally{if(button.isConnected){button.disabled=false;button.textContent='安装 / 更新官方 CLI（本工具独立目录）';}}});
-  $('agent-runtime-detect').onclick=()=>action(detectRuntime);$('agent-runtime-guide').onclick=()=>action(()=>api['agent-guide']($('r-engine').value));
+  $('agent-runtime-detect').onclick=()=>action(detectRuntime);$('agent-runtime-guide').onclick=()=>action(()=>api['agent-guide']($('r-engine').value,$('r-acp-preset').value));
   $('role-connection').addEventListener('toggle',()=>{if($('role-connection')?.open&&runtimeCard.isConnected&&!remoteAntigravity())action(detectRuntime);});
   let editorModels=[];
   const editorOffering=()=>modelOffering(editorModels,$('r-model').value.trim());
@@ -1720,7 +1844,7 @@ function editRole(r) {
   const syncEditorEfforts=(selected,promote=false)=>{
     if (!isCursor()) renderEfforts($('r-effort'),editorOffering(),selected,{promote});
   };
-  const catalogDraft=()=>({ id:savedRoleId, engine:$('r-engine').value, provider:$('r-provider').value, locationId:$('r-location').value, baseUrl:$('r-url').value, executable:$('r-executable').value, apiKey:$('r-key').value, proxyMode:$('r-proxy').value, codexLoginSource:loginSource() });
+  const catalogDraft=()=>({ id:savedRoleId, engine:$('r-engine').value, provider:$('r-provider').value, locationId:$('r-location').value, baseUrl:customAcp()?'':$('r-url').value, executable:$('r-executable').value, apiKey:customAcp()?'':$('r-key').value, proxyMode:$('r-proxy').value, codexLoginSource:loginSource(), ...acpFields() });
   roleModelPicker = window.createModelPicker($('role-model-picker'), { value:value.model, load:force=>api.models(catalogDraft(),{force}),
     cursor: { active: isCursor, effort: $('r-effort') }, onCatalog:models=>{
     editorModels=models;
@@ -1732,12 +1856,22 @@ function editRole(r) {
   $('r-model').addEventListener('change',()=>syncEditorEfforts($('r-effort').value,true));
   syncEditorEfforts(supportsEffort(value.engine)?value.effort||'':'');
   const picker = roleModelPicker;
-  const autoReadModels = () => $('role-connection')?.open && picker === roleModelPicker && $('r-engine').value !== geminiWebEngine && !remoteAntigravity();
+  const autoReadModels = () => $('role-connection')?.open && picker === roleModelPicker && $('r-engine').value !== geminiWebEngine && !remoteAntigravity() && !customAcp();
   $('role-connection').addEventListener('toggle', () => { if (autoReadModels()) picker.update(); });
-  for (const id of ['r-engine','r-provider','r-location','r-key','r-url','r-executable','r-proxy','r-login-source']) $(id).addEventListener('change', () => {
+  for (const id of ['r-engine','r-provider','r-location','r-key','r-url','r-executable','r-proxy','r-login-source','r-acp-args','r-acp-env']) $(id).addEventListener('change', () => {
     picker.reset();
     if (autoReadModels()) picker.update();
   });
+  $('r-acp-preset').onchange = () => {
+    const preset = $('r-acp-preset').value;
+    if (preset) {
+      $('r-executable').value = preset === 'hermes' ? 'hermes' : 'pi-acp';
+      $('r-acp-args').value = preset === 'hermes' ? '["acp"]' : '[]';
+      $('r-model').value = '';
+    }
+    refreshAgentKind();
+    picker.reset();
+  };
   const refreshProxyHint = () => { const target = locationOf($('r-location').value); const config = target?.proxy || { mode: 'system' }; $('r-proxy-hint').textContent = $('r-proxy').value === 'direct' ? '直连模型服务。' : '使用「' + (target?.name || '') + '」的代理设置：' + (config.mode === 'custom' ? config.url : config.mode === 'direct' ? '直连' : target?.type === 'local' ? '系统代理' : '服务器环境变量') + '。'; };
   $('r-proxy').addEventListener('change', refreshProxyHint); $('r-location').addEventListener('change', refreshProxyHint); refreshProxyHint();
   if(value.engine==='claude'&&value.permission==='acceptEdits')$('r-permission').value='workspace-write';
@@ -1748,6 +1882,11 @@ function editRole(r) {
     $('r-permission').querySelector('[value="read-only"]').textContent=claude?'计划模式（按 Claude 规则）':'只读';
     $('r-permission').querySelector('[value="danger-full-access"]').textContent=claude?'完全权限（跳过工具审批）':vendor?'完全权限（自动同意工具审批）':'完全权限（无沙箱、不弹审批）';
     if(claude){$('permission-hint').textContent=$('r-permission').value==='danger-full-access'?'跳过工具审批；仍受系统权限、容器挂载和 MCP 授权限制。':$('r-permission').value==='read-only'?'Claude 计划模式，并非系统级只读沙箱。':'自动接受编辑；部分工具仍需审批，可在交互终端处理。';return;}
+    if (customAcp()) {
+      $('r-permission').querySelector('[value="workspace-write"]').textContent = '标准权限（按 Agent 规则）';
+      $('permission-hint').textContent = '工具权限由 Agent 自身管理。只读模式需要 Agent 支持；完全权限会自动同意 Agent 发给 AI 小队的单次审批。';
+      return;
+    }
     if(vendor){$('permission-hint').textContent='标准模式保留官方审批规则，额外审批请求会被拒绝；完全权限自动批准工具请求。';return;}
     $('permission-hint').textContent = !codex ? '权限由所选 Agent 管理。' : $('r-permission').value === 'danger-full-access' ? '允许访问项目外文件、运行命令和联网，不弹审批；仍受系统权限和容器挂载限制。' : '使用 Codex 沙箱；额外权限请求不会自动批准。';
   }
@@ -1762,10 +1901,10 @@ function editRole(r) {
     selectedAvatar = chosen.avatar; selectedAvatarId = chosen.avatarId; selectedAvatarUrl = chosen.avatarUrl;
     $('avatar-picker').querySelector('.avatar').outerHTML = avatar(chosen, 'large'); $('preview-avatar').innerHTML = avatar(chosen);
   }));
-  const save = async () => { const effort = isCursor() ? '' : $('r-effort').value; assertEffort(editorOffering(),effort); const next = await api['role-save']({ id: savedRoleId, name: $('r-name').value, avatar: selectedAvatar, avatarId: selectedAvatarId, persona: $('r-persona').value, examples: $('r-examples').value, engine: $('r-engine').value, provider: $('r-provider').value, locationId: $('r-location').value, model: picker.value(), effort, apiKey: $('r-key').value, baseUrl: $('r-url').value, executable: $('r-executable').value, description: $('r-description').value, permission: $('r-permission').value, proxyMode: $('r-proxy').value, codexLoginSource:loginSource(), codexDesktopTools:$('r-desktop-tools').checked, allowLocationTools: $('r-location-tools').checked }); savedRoleId = next.id; roleId = next.id; roleCatalogs.delete(next.id); return next; };
+  const save = async () => { const effort = isCursor() ? '' : $('r-effort').value; assertEffort(editorOffering(),effort); const next = await api['role-save']({ ...catalogDraft(), name: $('r-name').value, avatar: selectedAvatar, avatarId: selectedAvatarId, persona: $('r-persona').value, examples: $('r-examples').value, model: picker.value(), effort, description: $('r-description').value, permission: $('r-permission').value, codexDesktopTools:$('r-desktop-tools').checked, allowLocationTools: $('r-location-tools').checked }); savedRoleId = next.id; roleId = next.id; roleCatalogs.delete(next.id); return next; };
   $('role-connection').open=true;
   $('role-form').onsubmit = e => { e.preventDefault(); action(async () => { const next = await save();toast('角色已保存，下次发言生效'); editRole({...role(next.id),...next}); }); };
-  $('exe-pick').onclick = () => action(async () => { const files = await api.pick('file'); if (files[0]) $('r-executable').value = files[0]; });
+  $('exe-pick').onclick = () => action(async () => { const files = await api.pick('file'); if (files[0]) { $('r-executable').value = files[0]; $('r-executable').dispatchEvent(new Event('change')); } });
   $('role-login').onclick = () => action(async () => {
     if ($('r-engine').value === geminiWebEngine) return api['gemini-web-open']();
     const button = $('role-login'), remote = remoteAntigravity();
@@ -1794,6 +1933,7 @@ function editRole(r) {
       button.textContent = enabled ? '禁用角色' : '启用角色';
       button.title = enabled ? '暂停接收新任务，保留配置和会话' : '恢复接收新任务';
       tryButton.disabled = !enabled;
+      $('role-usage-open').hidden = !enabled;
     };
     refreshEnabled();
     button.onclick = () => action(async () => {
@@ -1879,7 +2019,7 @@ function renderSettings() {
   for (const name of ['check','update']) $('cli-' + name).onclick = () => action(async () => { cliResult.textContent = name === 'check' ? '正在检查…' : '正在升级托管 CLI…'; const result = await api['cli-' + name](); cliResult.textContent = result.message || JSON.stringify(result); });
 }
 function renderToolDirectory() { const select = $('tool-directory'); const previous = select.value; select.innerHTML = options((project()?.directories || []).map((d,i) => [i, (locationOf(d.locationId)?.name || d.locationId) + ' · ' + d.path]), previous || 0); }
-async function openTools(mode) { if (!project()) return; toolMode = mode; $('tools-panel').hidden = false; $('tools-rail').hidden = true; $('terminal-tools').hidden = mode !== 'terminal'; $('file-tools').hidden = mode !== 'files'; $('activity-tools').hidden = mode !== 'activity'; $('tool-directory').hidden = mode === 'activity'; $('tools-title').textContent = ({ terminal:'项目终端', files:'项目文件', activity:'对话任务输出' })[mode]; renderToolDirectory(); if (mode === 'files') await loadFiles(); else if (mode === 'activity') {agentTerminals=await api['agent-terminals']();renderActivity();} else { await refreshTerminals(); if (!terminals.some(t => t.projectId === projectId)) toast('点击加号打开此项目的共享终端'); fitTerminal(); } }
+async function openTools(mode, directoryIndex) { if (!project()) return; toolMode = mode; $('tools-panel').hidden = false; $('tools-rail').hidden = true; $('terminal-tools').hidden = mode !== 'terminal'; $('file-tools').hidden = mode !== 'files'; $('activity-tools').hidden = mode !== 'activity'; $('tool-directory').hidden = mode === 'activity'; $('tools-title').textContent = ({ terminal:'项目终端', files:'项目文件', activity:'对话任务输出' })[mode]; renderToolDirectory(); if (mode === 'files') { if (directoryIndex !== undefined) $('tool-directory').value = String(directoryIndex); await loadFiles(); } else if (mode === 'activity') {agentTerminals=await api['agent-terminals']();renderActivity();} else { await refreshTerminals(); if (!terminals.some(t => t.projectId === projectId)) toast('点击加号打开此项目的共享终端'); fitTerminal(); } }
 let activityRuns, activityRequest = 0;
 async function renderActivity() {
   const c = chat();
@@ -1928,7 +2068,7 @@ async function renderActivity() {
     const term = new Terminal({ fontSize:14, fontFamily:'Cascadia Mono, Consolas, monospace', theme:{ background:'#18202a', foreground:'#e0e8ed' }, disableStdin:true, convertEol:true, scrollback:8000, cursorBlink:false });
     const fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open(element);
     window.relayTerminalUI.installCopy(term,element,{copy:text=>api.copy(text),readOnly:true,error:e=>toast(e.message)});
-    window.relayTerminalUI.installLinks(term,{openPath:value=>api.open(value,chat()?.projectId),openLink:value=>api.open(value,chat()?.projectId),error:e=>toast(e.message)});
+    window.relayTerminalUI.installLinks(term,{openPath:value=>openPathReference(value,chat()?.projectId,{chatId,messageId:activityRunId}),openLink:value=>api.open(value,chat()?.projectId),error:e=>toast(e.message)});
     activityView = { term,fit,source:'',output:'' };
   }
   const message = runs.find(m => m.id === activityRunId);
@@ -1973,7 +2113,7 @@ function renderAgentTerminal(){
     term.onData(value=>api['agent-terminal-input'](current.id,value).catch(e=>toast(e.message)));
     term.onResize(({cols,rows})=>api['agent-terminal-resize'](current.id,cols,rows).catch(e=>toast(e.message)));
     window.relayTerminalUI.installCopy(term,element,{copy:text=>api.copy(text),readClipboard:()=>api['clipboard-text'](),error:e=>toast(e.message)});
-    window.relayTerminalUI.installLinks(term,{openPath:value=>api.open(value,current.projectId),openLink:value=>api.open(value,current.projectId),error:e=>toast(e.message)});
+    window.relayTerminalUI.installLinks(term,{openPath:value=>openPathReference(value,current.projectId),openLink:value=>api.open(value,current.projectId),error:e=>toast(e.message)});
     term.write(current.output||'');view={element,term,fit,sequence:current.sequence||0};agentTerminalViews.set(current.id,view);
   }
   view.element.hidden=false;view.term.options.disableStdin=current.state!=='ready';fitTerminal();
@@ -1993,7 +2133,7 @@ function ensureTerminal(info) {
   const term = new Terminal({ fontSize: 13, fontFamily: 'Cascadia Mono, Consolas, monospace', theme: { background: '#18202a', foreground: '#e0e8ed' }, cursorBlink: true, scrollback: 5000 }); const fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open(element);
   term.onData(value => api['terminal-input'](info.id,value)); term.onResize(({cols,rows}) => api['terminal-resize'](info.id,cols,rows));
   window.relayTerminalUI.installCopy(term,element,{copy:text=>api.copy(text),readClipboard:()=>api['clipboard-text'](),error:e=>toast(e.message)});
-  window.relayTerminalUI.installLinks(term,{openPath:value=>api.open(value,info.projectId),openLink:value=>api.open(value,info.projectId),error:e=>toast(e.message)});
+  window.relayTerminalUI.installLinks(term,{openPath:value=>openPathReference(value,info.projectId),openLink:value=>api.open(value,info.projectId),error:e=>toast(e.message)});
   if (info.output) term.write(info.output); const view = { element, term, fit, sequence: info.sequence || 0 }; terminalViews.set(info.id,view); return view;
 }
 function fitTerminal() { requestAnimationFrame(() => { if (!$('tools-panel').hidden) try { if (toolMode === 'terminal') terminalViews.get(terminalId)?.fit.fit(); else if (toolMode === 'activity') {if(activityMode==='interactive')agentTerminalViews.get(selectedAgentTerminal()?.id)?.fit.fit();else activityView?.fit.fit();} } catch {} }); }
@@ -2028,7 +2168,7 @@ async function loadFiles(operation = 'list', parts) {
   $('file-explorer').onclick = () => explore(targetParts);
   $('file-open').textContent = local ? '系统打开' : '复制远端路径';
   $('file-open').onclick = () => action(async () => {
-    if (local) await api.open(result.path, targetProject);
+    if (local) await openPathReference(result.path, targetProject);
     else { await api.copy(result.path); toast('已复制远端路径'); }
   });
   if (!listing) {
@@ -2067,7 +2207,7 @@ function attachmentCards(container,files,{remove,projectId:targetProjectId}={}){
     const open=document.createElement('button');open.type='button';open.className='attachment-open';open.title=file.path;open.setAttribute('aria-label','打开 '+file.name);
     const image=document.createElement('img');image.alt='';image.src=file.kind==='clipboard-image'&&/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(file.thumbnail||'')?file.thumbnail:'icons/file.svg';image.className=file.kind==='clipboard-image'?'attachment-thumbnail':'attachment-icon';
     const details=document.createElement('span');details.className='attachment-details';const name=document.createElement('strong');name.textContent=file.kind==='clipboard-image'?'剪贴板图片':file.name;
-    const meta=document.createElement('small');const size=file.sizeBytes<1024?file.sizeBytes+' B':file.sizeBytes<1048576?(file.sizeBytes/1024).toFixed(1)+' KiB':(file.sizeBytes/1048576).toFixed(1)+' MiB';meta.textContent=(file.width?file.width+'×'+file.height+' · ':'')+size+' · 本机路径';details.append(name,meta);open.append(image,details);open.onclick=()=>action(()=>api.open(file.path,targetProjectId));
+    const meta=document.createElement('small');const size=file.sizeBytes<1024?file.sizeBytes+' B':file.sizeBytes<1048576?(file.sizeBytes/1024).toFixed(1)+' KiB':(file.sizeBytes/1048576).toFixed(1)+' MiB';meta.textContent=(file.width?file.width+'×'+file.height+' · ':'')+size+' · 本机路径';details.append(name,meta);open.append(image,details);open.onclick=()=>action(()=>openPathReference(file.path,targetProjectId));
     const copy=document.createElement('button');copy.type='button';copy.className='attachment-copy';copy.innerHTML=icon('copy');copy.title='复制文件路径';copy.setAttribute('aria-label','复制 '+file.name+' 的路径');copy.onclick=()=>action(async()=>{await api.copy(file.path);toast('已复制文件路径');});card.append(open,copy);
     if(remove){const button=document.createElement('button');button.type='button';button.className='attachment-remove';button.innerHTML=icon('x');button.title='移除附件';button.setAttribute('aria-label','移除 '+file.name);button.onclick=()=>action(()=>remove(file.id));card.append(button);}
     container.append(card);
@@ -2159,7 +2299,6 @@ api.on('state', value => {
   if (!state) return;
   state = value;
   window.applyDeskTheme(value.settings.theme);
-  quotaPanel.render(value);
   if ($('usage-center') && $('dialog').open) usageCenter?.render(value);
   if (page === 'settings') claudeUpdateView?.render(value.claudeUpdate);
   if (page === 'projects' && !project() && state.projects.length) {
@@ -2215,5 +2354,4 @@ action(async () => {
   chatId = chats()[0]?.id;
   renderSidebar();
   activateChat();
-  quotaPanel.render(state);
 });

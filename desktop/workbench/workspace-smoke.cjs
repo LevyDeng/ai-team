@@ -47,13 +47,23 @@ async function run({ window, store, app, fixture, js, errors, services }) {
   await until(js, `$('msg-${reply.id}')?.textContent.includes('Updated stream fixture')`);
   await js("$('project-order').value='name';$('project-order').dispatchEvent(new Event('change'))");
   await until(js, "state.settings.projectOrder === 'name'");
-  assert.deepEqual(await js("Array.from($('project-select').options, option => option.value)"),
-    [project, fixture.project].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true })).map(item => item.id));
+  const projectOptions = "Array.from($('project-select').options, option => option.value)";
+  const byName = [project, fixture.project].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true })).map(item => item.id);
+  assert.deepEqual(await js(projectOptions), byName);
+  await js("$('project-order-direction').click()");
+  await until(js, "state.settings.projectOrderDirections?.name === 'desc'");
+  assert.deepEqual(await js(projectOptions), byName.toReversed());
+  await js("$('project-order-direction').click()");
+  await until(js, "state.settings.projectOrderDirections?.name === 'asc'");
+  assert.deepEqual(await js(projectOptions), byName);
+  await js("$('project-order-direction').click()");
+  await until(js, "state.settings.projectOrderDirections?.name === 'desc'");
 
   const loaded = new Promise(resolve => window.webContents.once('did-finish-load', resolve));
   window.webContents.reload();
   await loaded;
   await until(js, `$('project-select')?.value === ${JSON.stringify(project.id)} && $('project-order').value === 'name' && $('messages').children.length === 40`);
+  assert.deepEqual(await js(projectOptions), byName.toReversed());
   assert.deepEqual(errors, []);
   console.log('Workspace migration UI smoke passed.');
   app.exit(0);

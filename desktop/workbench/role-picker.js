@@ -8,7 +8,7 @@
     const list = container.querySelector('.role-picker-list');
     const chips = container.querySelector('.role-picker-chips');
     const rows = [];
-    const engines = { codex: 'Codex CLI', claude: 'Claude Code', opencode: 'OpenCode', kimi:'Kimi Code', cursor:'Cursor Agent', workbuddy:'WorkBuddy', codebuddy:'CodeBuddy Code', antigravity:'Antigravity' };
+    const engines = { codex: 'Codex CLI', claude: 'Claude Code', opencode: 'OpenCode', kimi:'Kimi Code', cursor:'Cursor Agent', workbuddy:'WorkBuddy', codebuddy:'CodeBuddy Code', antigravity:'Antigravity', 'custom-acp':'自定义 ACP' };
     function portrait(role) {
       const element = document.createElement('span');
       element.className = 'avatar a' + (Number(role.avatar) || 0);

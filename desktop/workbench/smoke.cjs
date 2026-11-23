@@ -332,7 +332,7 @@ async function run(window,store,app,directory,services) {
   services.running.clear();await js('(async()=>{state=await api.snapshot();renderMessages();})()');
   fixture.roles[0].name='铃音';fixture.roles[0].persona='你叫铃音，是我的开发搭档。擅长发现代码中的边界条件和逻辑问题。回答使用中文，说明依据和不确定性，不编造验证结果。';fixture.roles[0].examples='我：这个方案靠谱吗？\n铃音：我先检查边界条件喵，还没验证的地方会单独标出来。\n\n我：发现问题怎么办？\n铃音：先列出证据，再给出最小修改建议。';store.save();
   await js('(async()=>{state=await api.snapshot();document.querySelector("[data-page=roles]").click();})()');await wait(350);
-  assert.equal(await js('document.querySelectorAll("#editor-view textarea").length'),2);
+  assert.equal(await js('[...document.querySelectorAll("#editor-view textarea")].filter(field => !field.closest("label").hidden).length'),2);
   assert.equal(await js('document.querySelector("#role-connection").open'),true);
   assert.equal(await js('document.querySelector("#role-persona").open'),false);
   assert.equal(await js('document.querySelector("#role-persona").contains(document.querySelector(".role-preview"))'),true);
@@ -393,7 +393,7 @@ async function run(window,store,app,directory,services) {
     await js('document.querySelector("#role-connection").open=true;document.querySelector("#r-login-source").value="desktop";document.querySelector("#r-login-source").dispatchEvent(new Event("change"))');await wait(100);
     assert.equal(modelCalls.at(-1).codexLoginSource,'desktop');
     assert.equal(await js('document.querySelector("#r-login-source-field").hidden'),false);
-    assert((await js('document.querySelector("#r-login-source-hint").textContent')).includes('不复制凭据'));
+    assert((await js('document.querySelector("#r-login-source-hint").textContent')).includes('共用桌面版账号'));
     await js('document.querySelector("#role-form").requestSubmit()');await wait(100);
     assert.equal(store.get('roles',fixture.roles[0].id).codexLoginSource,'desktop');
     await js('document.querySelector("#role-connection").open=true;document.querySelector("#r-login-source").scrollIntoView({block:"center"})');await wait(100);
@@ -676,13 +676,6 @@ async function run(window,store,app,directory,services) {
   await js('document.querySelector("#chat-settings").click()');
   assert.equal(await js('document.querySelectorAll(".role-option input:checked").length'),2);
   await js('document.querySelector(".role-picker-chip").click();document.querySelector("#dialog-form").requestSubmit()');await wait(120);assert.equal(newChat.roleIds.length,1);
-  if(!store.state.locations.some(item=>item.managed))store.state.locations.push({id:'quota-fixture',name:'Fixture VPS',type:'ssh',managed:true,os:'linux',control:'ssh'});
-  services.backend.usage.claude={provider:'claude',state:'ready',windows:[{id:'five_hour',label:'5 小时',usedPercent:12,resetsAt:Date.now()/1000+3600,windowMinutes:300},{id:'seven_day',label:'7 天总额度',usedPercent:40,resetsAt:Date.now()/1000+86400,windowMinutes:10080},{id:'model:fable',label:'Fable 周额度',usedPercent:3,resetsAt:Date.now()/1000+86400,windowMinutes:10080,modelName:'Fable'}],updatedAt:Date.now(),source:'claude-cli-control',modelScopedAvailable:true};
-  await js('(async()=>{state=await api.snapshot();quotaPanel.render(state);if(document.querySelector(".account-usage-body").hidden)document.querySelector(".account-usage-toggle").click();})()');await wait(120);
-  assert.equal(await js('[...document.querySelectorAll(".account-usage-window")].find(item=>item.dataset.windowId==="model:fable").querySelector("strong").textContent'),'剩余 97%');
-  assert.equal(await js('[...document.querySelectorAll(".account-usage-window")].find(item=>item.dataset.windowId==="model:fable").querySelector("progress").value'),3);
-  fs.writeFileSync(path.join(directory,'claude-usage.png'),(await window.webContents.capturePage()).toPNG());
-  await js('document.querySelector(".account-usage-toggle").click()');assert(await js('document.querySelector(".account-usage-body").hidden'));
   window.setContentSize(1000,700);await wait(180);
   assert(await js('document.querySelector("#send").getBoundingClientRect().right<=innerWidth'));
   await js('document.querySelector("#tool-files").click()');await wait(180);await js('document.querySelector("#tools-wide").click()');await wait(100);

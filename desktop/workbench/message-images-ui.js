@@ -20,9 +20,9 @@
           const view=document.createElement('button');view.type='button';view.className='message-image-view';view.title='打开原图';
           if(/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(file.thumbnail||'')){const img=document.createElement('img');img.src=file.thumbnail;img.alt=file.name;img.width=file.width;img.height=file.height;img.onload=()=>layout?.(follow);view.append(img);}
           else view.textContent='预览不可用，原始路径已保留';
-          view.onclick=()=>Promise.resolve(open(file.path)).catch(error);
+          view.onclick=()=>Promise.resolve(open(file.reference||file.path)).catch(error);
           const caption=document.createElement('figcaption');const name=document.createElement('span');name.textContent=file.name+(file.width?' · '+file.width+'×'+file.height:'');name.title=file.path;caption.append(name);
-          for(const [label,action]of [['打开原图',()=>open(file.path)],['复制路径',()=>copy(file.path)]]){const button=document.createElement('button');button.type='button';button.className='quiet';button.textContent=label;button.onclick=()=>Promise.resolve(action()).catch(error);caption.append(button);}
+          for(const [label,action]of [['打开原图',()=>open(file.reference||file.path)],['复制路径',()=>copy(file.path)]]){const button=document.createElement('button');button.type='button';button.className='quiet';button.textContent=label;button.onclick=()=>Promise.resolve(action()).catch(error);caption.append(button);}
           figure.append(view,caption);if(file.warning){const original=document.createElement('code');original.className='message-image-original-path';original.textContent=file.path;figure.append(original);}host.append(figure);
         }
         layout?.(follow);

@@ -1,6 +1,6 @@
 (() => {
   const stateLabels={ready:'已同步',pending:'尚未查询',unsupported:'暂不支持自动查询',not_signed_in:'登录或密钥需要检查',error:'查询失败'};
-  const names={codex:'Codex',claude:'Claude Code',antigravity:'Antigravity',kimi:'Kimi Code',cursor:'Cursor Agent',codebuddy:'CodeBuddy Code',workbuddy:'WorkBuddy',opencode:'OpenCode',openai:'OpenAI API',gemini:'Gemini API','gemini-web':'Gemini 网页版',deepseek:'DeepSeek API',moonshot:'Moonshot API'};
+  const names={codex:'Codex',claude:'Claude Code',antigravity:'Antigravity',kimi:'Kimi Code',cursor:'Cursor Agent',codebuddy:'CodeBuddy Code',workbuddy:'WorkBuddy',opencode:'OpenCode','custom-acp':'自定义 ACP',openai:'OpenAI API',gemini:'Gemini API','gemini-web':'Gemini 网页版',deepseek:'DeepSeek API',moonshot:'Moonshot API'};
   const time=value=>value&&Number.isFinite(value)?new Date(value).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'';
   function summary(entry){
     if(!entry)return '额度未查询';
@@ -14,7 +14,7 @@
   }
   function create(container,{refresh,guide,error,api,roleIds=[],focusRole}){
     let snapshot,busy=false,disposed=false,request=0,opening=false,nativeView;const currentRoles=new Set(roleIds);
-    container.innerHTML='<div class="usage-center-controls"><label>显示<select class="usage-filter"><option value="all">全部角色</option><option value="current">当前对话的角色</option></select></label><input class="usage-search" placeholder="搜索角色或 Agent" aria-label="搜索额度条目"><button type="button" class="usage-refresh-all">刷新显示项</button></div><p class="hint">按登录配置汇总，同一账号的额度共享。浅色为已用，深色为剩余。</p><div class="usage-cards"></div>';
+    container.innerHTML='<div class="usage-center-controls"><label>显示<select class="usage-filter"><option value="all">全部启用的角色</option><option value="current">当前对话的启用角色</option></select></label><input class="usage-search" placeholder="搜索角色或 Agent" aria-label="搜索额度条目"><button type="button" class="usage-refresh-all">刷新显示项</button></div><p class="hint">按登录配置汇总，同一账号的额度共享。浅色为已用，深色为剩余。</p><div class="usage-cards"></div>';
     const filter=container.querySelector('.usage-filter'),search=container.querySelector('.usage-search'),list=container.querySelector('.usage-cards'),button=container.querySelector('.usage-refresh-all');
     const overview=document.createElement('div');overview.className='usage-overview';overview.append(...container.childNodes);container.append(overview);
     const nativeHost=document.createElement('section');nativeHost.className='native-quota-host';nativeHost.hidden=true;container.append(nativeHost);
@@ -61,7 +61,7 @@
         if(entry.updatedAt)card.append(node('small',(entry.cached?'缓存 · ':'更新时间 · ')+time(entry.updatedAt)+' · 本机时间','hint'));
         list.append(card);
       }
-      if(!shown.length)list.append(node('p','没有符合条件的角色。','hint'));
+      if(!shown.length)list.append(node('p','没有符合条件的启用角色。','hint'));
     }
     return {render,destroy(){disposed=true;request++;nativeView?.destroy();container.closest('dialog')?.classList.remove('native-quota-open');}};
   }

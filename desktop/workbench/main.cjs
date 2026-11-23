@@ -21,6 +21,8 @@ const { ProxyRouter, environment: proxyEnvironment } = require('./proxy.cjs');
 const { effectiveRole } = require('./conversations.cjs');
 const { projectGuestIds } = require('./mentions.js');
 const { formatMissingProjectDirectories } = require('./project-directories.cjs');
+const { findProjectPaths, messagePaths } = require('./path-resolution.cjs');
+const pathLinks = require('../path-links.js');
 const { usesDesktopLogin } = require('./desktop-login.cjs');
 const { requireCodexLogin } = require('./native-auth.cjs');
 const vendors = require('./vendor-agents.cjs');
@@ -158,9 +160,6 @@ function snapshot() {
   const terminals=interactiveAgents.list();
   value.forceStops=Object.fromEntries(value.chats.map(chat=>[chat.id,forceStopTarget(chat,terminals)]));
   value.mcp = { ssh: backend.status.ssh, mcp: backend.status.mcp, tunnel: backend.status.tunnel, mcpOwned:backend.status.mcpOwned, tunnelOwned:backend.status.tunnelOwned, forceControl:backend.appliedForceControl };
-  const accountLocation = value.locations.find(item => item.managed);
-  value.claudeUsage = { enabled: Boolean(accountLocation), accountName: accountLocation?.name || '',
-    online: backend.status.ssh === 'ready' && backend.status.tunnel === 'ready', ...backend.usage.claude };
   value.claudeUpdate = claudeUpdater.snapshot();
   value.accountUsage = accountUsage.snapshot();
   value.skills=skills.list();
@@ -197,7 +196,7 @@ function renderBadges(count) {
 }
 handle('snapshot', snapshot);
 handle('project-select', id => store.selectProject(id));
-handle('project-order', order => store.sortProjects(order));
+handle('project-order', (order, direction) => store.sortProjects(order, direction));
 handle('project-search', (id, query) => store.searchProject(id, query));
 handle('chat-messages', (id, cursor) => store.messagePage(id, cursor));
 handle('chat-search', (id, query, offset) => store.searchMessages(id, query, offset));
@@ -218,15 +217,14 @@ handle('skill-save',value=>{const result=skills.save(value);emit();return result
 handle('skill-delete',id=>{skills.remove(id);emit();});
 handle('skill-cancel',(chatId,id)=>skills.cancel(chatId,id));
 handle('account-usage', async roleId => { await accountUsage.request(roleId); return snapshot(); });
-handle('usage-guide', (sender,roleId) => {const role=store.get('roles',roleId);if(role.engine==='antigravity'&&role.provider==='native'&&role.locationId==='local')return quotaConsole.open(roleId,sender);const url=accountUsage.guide(roleId);if(url)return shell.openExternal(url); },true);
+handle('usage-guide', (sender,roleId) => {
+  const role=store.get('roles',roleId);
+  if(role.enabled===false)return;
+  if(role.engine==='antigravity'&&role.provider==='native'&&role.locationId==='local')return quotaConsole.open(roleId,sender);
+  const url=accountUsage.guide(roleId);
+  if(url)return shell.openExternal(url);
+},true);
 for(const method of ['action','screen','resize','stop'])handle('quota-'+method,(sender,...args)=>quotaConsole[method](sender,...args),true);
-handle('usage-refresh', async () => {
-  const location = store.state.locations.find(item => item.managed);
-  if (!location) throw new Error('No managed Relay VPS account is configured.');
-  await locations.connect(location.id);
-  await backend.refreshUsage('claude', true);
-  return snapshot();
-});
 handle('cli-check', () => require('./runtime.cjs').check());
 handle('claude-cli', action => claudeUpdater.request(action));
 handle('cli-update', () => { if (running.size||interactiveAgents.active()) throw new Error('End interactive terminals and pause running discussions before updating the CLI.'); return require('./runtime.cjs').install(); });
@@ -235,14 +233,23 @@ handle('agent-info', async value => {
   if (!vendors.isVendor(value?.engine)) throw new Error('Choose an official account agent.');
   const location = store.get('locations', value.locationId || 'local');
   if (location.type === 'local') return vendors.info(value);
+  if (value.engine === 'custom-acp') throw new Error('自定义 ACP 仅支持本机运行。');
   return remoteAntigravity.runtime(locations, location, String(value.executable || '').trim());
 });
-handle('agent-guide', engine => { if(!vendors.isVendor(engine))throw new Error('Choose an official account agent.');return shell.openExternal(vendors.catalog[engine].docs); });
+handle('agent-guide', (engine, preset) => {
+  if (engine === 'custom-acp') {
+    if (preset === 'hermes') return shell.openExternal('https://hermes-agent.nousresearch.com/docs/user-guide/features/acp');
+    if (preset === 'pi') return shell.openExternal('https://www.npmjs.com/package/pi-acp');
+    throw new Error('请选择需要查看安装说明的 ACP 预设。');
+  }
+  if(!vendors.isVendor(engine))throw new Error('Choose an official account agent.');
+  return shell.openExternal(vendors.catalog[engine].docs);
+});
 handle('agent-install', async engine => { if(store.state.roles.some(role=>role.engine===engine&&busyRole(role.id)))throw new Error('Wait for active tasks using this agent to finish before updating.');return require('./vendor-install.cjs').install(engine); });
 handle('role-save', value => {
   if (value.avatarId && !avatars.get(value.avatarId)) throw new Error('The selected avatar no longer exists. Choose it again.');
   const role = store.saveRole(value);
-  if (value.apiKey && role.engine !== geminiWebEngine) vault.set('api:' + role.id, value.apiKey);
+  if (value.apiKey && ![geminiWebEngine,'custom-acp'].includes(role.engine)) vault.set('api:' + role.id, value.apiKey);
   emit(); return role;
 });
 handle('role-enabled', (id, enabled) => {
@@ -956,10 +963,41 @@ async function readClipboardText() { if (typeof clipboard.readText === 'function
 handle('clipboard-text', readClipboardText);
 handle('image', async id => {store.get('chats',id);const image=await imageSource.read();if(attachments.files(id).length>=8)throw new Error('Attach at most 8 files per message.');const file=images.stage(image,attachments.protectedPaths());try{const files=attachments.add(id,[file.path],file);emit();return files;}catch(error){images.remove(file);throw error;}});
 handle('message-images',(chatId,messageId)=>messageImages.list(chatId,messageId));
-handle('open', async (filename, projectId) => {
-  if (/^https?:\/\//i.test(filename)) return shell.openExternal(filename);
-  const project = store.get('projects', projectId);const local=project.directories.find(d=>d.locationId==='local');const file=await require('../project-paths.cjs').resolveProjectPath(local?.path||'',filename);
-  const error = await shell.openPath(file); if (error) throw new Error(error); return '';
+handle('open', async (filename, projectId, { chatId, messageId, inspect, reveal } = {}) => {
+  if (/^https?:\/\//i.test(filename)) {
+    const link = pathLinks.target(filename);
+    if (link?.kind !== 'web') throw new Error('无法打开此网页地址。');
+    return shell.openExternal(link.value);
+  }
+  const project = store.get('projects', projectId);
+  const chat = chatId && chatById(chatId);
+  const message = chat?.projectId === projectId && chat.messages.find(item => item.id === messageId);
+  const roots = project.directories.filter(directory => directory.locationId === 'local').map(directory => directory.path);
+  let result;
+  try {
+    result = await findProjectPaths(filename, roots, {
+      getHints: message ? () => messagePaths(message, readMessageDetail(message, 'activities')) : undefined,
+    });
+  } catch {
+    throw new Error('路径格式无效。请检查盘符、文件名或项目相对路径。');
+  }
+  if (!inspect && result.candidates.length === 1 && !result.incomplete) {
+    const file = result.candidates[0];
+    if (reveal && !file.directory) shell.showItemInFolder(file.path);
+    else if (await shell.openPath(file.path)) throw new Error('系统无法打开此文件或文件夹，请检查文件关联和访问权限。');
+    return;
+  }
+  if (!result.candidates.length) {
+    const remote = project.directories.map((directory, index) => ({ directory, index }))
+      .filter(({directory}) => directory.locationId !== 'local');
+    const value = pathLinks.normalize(filename);
+    const matching = remote.filter(({directory}) => value.startsWith(directory.path.replace(/\/+$/, '') + '/'))
+      .sort((a, b) => b.directory.path.length - a.directory.path.length)[0];
+    const sameLocation = remote.find(({directory}) => directory.locationId === message?.locationId);
+    result.remoteDirectory = (matching || sameLocation || remote[0])?.index;
+    result.hasLocalDirectories = roots.length > 0;
+  }
+  return result;
 });
 async function tools(projectId, directoryIndex) {
   const project = store.get('projects', projectId); const directory = project.directories[directoryIndex]; if (!directory) throw new Error('Choose a project directory.');
@@ -1126,6 +1164,7 @@ async function configureRemoteAntigravity(role, location) {
 
 handle('role-login', async id => {
   const role = store.get('roles', id); if (role.provider !== 'native') throw new Error('API roles use the saved API key.');
+  if (role.engine === 'custom-acp') throw new Error('请在 ACP Agent 自身的界面完成账号登录。');
   accountUsage.invalidate(id);
   const location = store.get('locations', role.locationId);
   if (vendors.supportsRemote(role.engine, location)) return configureRemoteAntigravity(role, location);

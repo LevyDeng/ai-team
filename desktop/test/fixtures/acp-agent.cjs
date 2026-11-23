@@ -19,7 +19,7 @@ input.on('line',line=>{
   const message=JSON.parse(line);
   if(message.method==='initialize'){
     cursor=message.params.clientCapabilities?._meta?.parameterizedModelPicker;
-    return send({id:message.id,result:{protocolVersion:1,agentCapabilities:{mcpCapabilities:{http:true}}}});
+    return send({id:message.id,result:{protocolVersion:1,agentCapabilities:{mcpCapabilities:{http:!process.argv.includes('--no-http')}}}});
   }
   if(message.method==='session/new'){servers=message.params.mcpServers;return send({id:message.id,result:{sessionId:'fixture-session',models:{availableModels:[{modelId:'fixture-model',name:'Fixture model'}]},modes:{availableModes:[{id:'plan',name:'Plan'}]},configOptions:cursor ? cursorOptions : [{id:'model',category:'model',options:[{value:'fixture-model',name:'Fixture model'}]},{id:'thought_level',category:'thought_level',options:[{value:'high',name:'High'},{value:'medium',name:'Medium'}]}]}});}
   if(message.method==='cursor/list_available_models')return send({id:message.id,result:{models:[
@@ -32,6 +32,10 @@ input.on('line',line=>{
     return send({id:message.id,result:{configOptions:cursorOptions}});
   }
   if(['session/set_config_option','session/set_mode','session/set_model'].includes(message.method))return send({id:message.id,result:{}});
+  if(message.method==='session/cancel' && prompt?.params.prompt[0].text.includes('CUSTOM_CANCEL_FIXTURE')){
+    notify({sessionUpdate:'agent_message_chunk',content:{type:'text',text:' Cancel notification received'}});
+    return send({id:prompt.id,result:{stopReason:'cancelled'}});
+  }
   if(message.method==='session/prompt'){
     prompt=message;
     const text=message.params.prompt[0].text;
@@ -45,14 +49,16 @@ input.on('line',line=>{
     if(text.includes('ASYNC_COMMAND_FIXTURE')){
       backgroundRemaining=2;
       commandUpdate('build','in_progress', {title:'Build',rawInput:{WaitMsBeforeAsync:500}});
-      commandUpdate('tests','in_progress', {title:'Tests'});
+      notify({sessionUpdate:'tool_call',toolCallId:'tests',name:'run_command',status:'pending',title:'Tests'});
+      notify({sessionUpdate:'tool_call_update',toolCallId:'tests',status:'in_progress'});
       commandUpdate('server','in_progress', {title:'Development server',rawInput:{RunPersistent:true}});
+      commandUpdate('daemon','in_progress', {title:'Daemon',rawInput:{IsDaemon:true}});
       notify({sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Still building'}});
       send({id:message.id,result:{stopReason:'end_turn'}});
       if(!text.includes('NEVER_EXIT')){
         for(const [id, delay] of [['build',30],['tests',300]])setTimeout(()=>{
           backgroundRemaining--;
-          commandUpdate(id,'completed',{rawOutput:{exit_code:0}});
+          notify({sessionUpdate:'tool_call_update',toolCallId:id,status:'completed',rawOutput:{exit_code:0}});
         },delay);
       }
       return;
@@ -86,6 +92,9 @@ input.on('line',line=>{
     if(text==='fixture-auth-refusal')return send({id:message.id,result:{stopReason:'refusal',_meta:{'codebuddy.ai/outcome':'FAILED_MODEL_REQUEST','codebuddy.ai/errorMessage':JSON.stringify({code:-32000,message:'Authentication required',data:{category:'auth'}})}}});
     if(text==='fixture-interrupt'){notify({sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Partial'}});return process.exit(1);}
     if(text==='fixture-wait')return;
+    if(text.includes('CUSTOM_CANCEL_FIXTURE')){
+      return notify({sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Waiting for cancellation'}});
+    }
     notify({sessionUpdate:'agent_thought_chunk',content:{type:'text',text:'Public reasoning summary'}});
     notify({sessionUpdate:'tool_call',toolCallId:'fixture-tool',title:'Inspect fixture',status:'in_progress'});
     send({id:'permission',method:'session/request_permission',params:{options:[{optionId:'once',kind:'allow_once'},{optionId:'always',kind:'allow_always'}]}});return;

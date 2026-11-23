@@ -40,6 +40,7 @@ test('ACP decodes split UTF-8 events and rejects unsupported project MCP transpo
 test('New native engines validate local account use, preserve permissions, and do not invent effort flags',t=>{
   const directory=fixture(t),store=new Store(directory,directory),base=store.state.roles[0];
   for(const engine of Object.keys(vendors.catalog)){
+    if (engine === 'custom-acp') continue;
     const role=store.saveRole({...base,id:undefined,engine,model:'fixture-model',effort:'high',permission:'danger-full-access',codexLoginSource:'isolated'});
     assert.equal(store.saveRole({...role,permission:undefined}).permission,'danger-full-access');
     assert.equal(role.effort,['kimi','cursor'].includes(engine)?'':'high');
@@ -60,6 +61,7 @@ test('Native runtime discovery rejects GUI launchers and shell shims and finds b
 test('Each native adapter completes a fixture job and model metadata uses ACP without a prompt',async t=>{
   const directory=fixture(t),store=new Store(directory,directory),project=store.state.projects[0],agents=new Agents(store,{get:()=>''},{},()=>{});t.after(()=>agents.close());
   for(const engine of Object.keys(vendors.catalog)){
+    if (engine === 'custom-acp') continue;
     const role=store.saveRole({...store.state.roles[0],id:undefined,engine,provider:'native',executable:entry,model:'fixture-model',permission:'read-only',allowLocationTools:false,codexLoginSource:'isolated'});
     const chat=store.createChat({projectId:project.id,roleIds:[role.id]});store.message(chat.id,{kind:'user',text:'Fixture request',status:'accepted'});
     const result=await agents.run(chat.id,role,project,new AbortController().signal);assert.equal(result.status,'complete',result.note);assert(result.text.startsWith('ACP_FIXTURE_COMPLETE'));assert.equal(result.agentSessionId,'fixture-session');
@@ -70,6 +72,57 @@ test('Each native adapter completes a fixture job and model metadata uses ACP wi
       ]);
     }else assert.deepEqual(models,engine==='antigravity'?[{id:'fixture-model',label:'Fixture model'}]:[{id:'fixture-model',label:'Fixture model',description:undefined}]);
   }
+});
+test('Custom ACP persists its argv and environment and runs through the workflow agent path',async t=>{
+  const directory=fixture(t),store=new Store(directory,directory),project=store.state.projects[0];
+  const role=store.saveRole({...store.state.roles[0],engine:'custom-acp',executable:entry,model:'fixture-model',
+    acpArgs:['--no-http','argument with spaces'],acpEnv:{FIXTURE_CONFIG:directory},allowLocationTools:false});
+  const saved=new Store(directory,directory).get('roles',role.id);
+  assert.deepEqual(vendors.args(saved),['--no-http','argument with spaces']);
+  assert.deepEqual(vendors.customEnvironment(saved).env,{FIXTURE_CONFIG:directory});
+  assert.throws(()=>store.saveRole({...saved,acpArgs:[true]}),/JSON/);
+  assert.throws(()=>store.saveRole({...saved,acpEnv:['value']}),/JSON/);
+  const models=await queryCli(saved,directory,directory);
+  assert.deepEqual(models,[{id:'fixture-model',label:'Fixture model'}]);
+  const chat=store.createChat({projectId:project.id,roleIds:[role.id]});
+  const agents=new Agents(store,{get:()=>''},{},()=>{});
+  t.after(()=>agents.close());
+  store.message(chat.id,{kind:'user',text:'Fixture request',status:'accepted'});
+  const result=await agents.run(chat.id,role,project,new AbortController().signal,false,{workflowAttemptId:'custom-acp-attempt'});
+  assert.equal(result.status,'complete',result.note);
+  assert(result.text.startsWith('ACP_FIXTURE_COMPLETE'));
+  assert.equal(result.workflowSubmitted,true);
+});
+test('Custom ACP skips unsupported HTTP MCP, applies a manual model and requires an advertised read-only mode',async t=>{
+  const {acp,state}=client(t);
+  acp.role={engine:'custom-acp',model:'manual-model',permission:'workspace-write'};
+  acp.capabilities={};
+  const calls=[];
+  acp.call=async (method,params)=>{
+    calls.push([method,params]);
+    return method==='session/new'?{sessionId:'fixture-session'}:{};
+  };
+  const session=await acp.session(process.cwd(),{fixture:{command:'node'},unavailable:{url:'https://example.test/mcp'}});
+  assert.deepEqual(calls[0][1].mcpServers,[{name:'fixture',command:'node',args:[],env:[]}]);
+  assert.match(state.note,/HTTP MCP.*unavailable/);
+  await acp.configure(session);
+  assert.deepEqual(calls[1],['session/set_model',{sessionId:'fixture-session',modelId:'manual-model'}]);
+  acp.role={engine:'custom-acp',permission:'read-only'};
+  await assert.rejects(acp.configure(session),/ACP/);
+});
+test('Stopping a custom ACP workflow notifies its native session before stopping the adapter', {timeout:5000}, async t=>{
+  const directory=fixture(t),store=new Store(directory,directory),project=store.state.projects[0];
+  const role=store.saveRole({...store.state.roles[0],engine:'custom-acp',executable:entry,allowLocationTools:false});
+  const chat=store.createChat({projectId:project.id,roleIds:[role.id]});
+  const controller=new AbortController();
+  const agents=new Agents(store,{get:()=>''},{},({message})=>{
+    if(message.status==='running' && message.text==='Waiting for cancellation')controller.abort();
+  });
+  t.after(()=>agents.close());
+  store.message(chat.id,{kind:'user',text:'CUSTOM_CANCEL_FIXTURE',status:'accepted'});
+  const result=await agents.run(chat.id,role,project,controller.signal,false,{workflowAttemptId:'custom-cancel'});
+  assert.equal(result.status,'cancelled');
+  assert.equal(result.text,'Waiting for cancellation Cancel notification received');
 });
 test('Cursor applies the saved model parameter through ACP and reports the confirmed value',async t=>{
   const {acp,state}=client(t);
@@ -124,6 +177,29 @@ test('Antigravity workflow can be stopped while waiting for background commands'
   assert.equal(result.stopConfirmed,true);
   assert.equal(result.text,'Still building');
   assert.equal(agents.jobs.size,0);
+});
+test('Antigravity chat ends on the first response even while a command is active', {timeout:5000}, async t=>{
+  const {acp,state}=client(t);
+  acp.role.engine='antigravity';
+  await acp.initialize();
+  await acp.session(process.cwd(),{});
+  await acp.prompt('ASYNC_COMMAND_FIXTURE NEVER_EXIT');
+  assert.equal(state.text,'Still building');
+  assert(state.completed);
+  assert.equal(state.activity,undefined);
+});
+test('Antigravity reports missing command exit results at the background wait deadline', async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const child=new EventEmitter();
+  child.stdout=new PassThrough();
+  child.stdin=new PassThrough();
+  const acp=new AcpClient(child,{text:''},()=>{},{engine:'antigravity'});
+  t.after(()=>acp.close());
+  acp.backgroundCommands=new Set(['pending-command']);
+  const waiting=acp.waitForBackgroundCommands(new AbortController().signal);
+  t.mock.timers.tick(30 * 60 * 1000);
+  await assert.rejects(waiting,error=>error.code==='AGY_BACKGROUND_TIMEOUT');
+  assert.equal(acp.backgroundWaiter,null);
 });
 test('Antigravity uses explicit ACP model/effort/mode settings and rejects unavailable selections',async t=>{
   const {acp}=client(t);acp.role={engine:'antigravity',model:'fixture-model',effort:'high',permission:'read-only'};await acp.initialize();const session=await acp.session(process.cwd(),{});const calls=[],call=acp.call.bind(acp);acp.call=(method,params,...rest)=>{calls.push({method,params});return call(method,params,...rest);};await acp.configure(session);assert.deepEqual(calls.map(x=>[x.method,x.params.configId||x.params.modeId,x.params.value]),[['session/set_config_option','model','fixture-model'],['session/set_config_option','thought_level','high'],['session/set_mode','plan',undefined]]);

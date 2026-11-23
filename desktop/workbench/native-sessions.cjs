@@ -15,7 +15,8 @@ function messageHash(message){return digest([message.kind,message.roleId||'',mes
 function plan({store,chatId,role,project,location,directory,executable='',desktopHome='',env={},apiKey='',relayReplies}){
   const chat=store.get('chats',chatId),scope=loginScope(role,location,desktopHome);
   const flow=relayReplies??chat.relayReplies;
-  const identity=digest([role.id,role.engine,role.provider,role.baseUrl||'',apiKey?digest(apiKey):'',location.id,location.host||'',location.port||'',location.username||'',location.keyPath||'',directory.path,project.directories,executable,role.codexLoginSource||'',desktopHome,scope,store.state.nativeLoginEpochs?.[scope]||0,authHint(role.engine,env),role.permission||'workspace-write',role.allowLocationTools!==false,flow!==false]);
+  const customBinding = role.engine === 'custom-acp' ? [role.acpArgs, role.acpEnv] : [];
+  const identity=digest([role.id,role.engine,role.provider,role.baseUrl||'',apiKey?digest(apiKey):'',location.id,location.host||'',location.port||'',location.username||'',location.keyPath||'',directory.path,project.directories,executable,role.codexLoginSource||'',desktopHome,scope,store.state.nativeLoginEpochs?.[scope]||0,authHint(role.engine,env),role.permission||'workspace-write',role.allowLocationTools!==false,flow!==false,...customBinding]);
   chat.nativeSessions||={};let record=chat.nativeSessions[role.id],reason='';
   if(!record||record.identity!==identity){reason=record?'binding_changed':'first_use';record={identity,id:role.engine==='claude'?crypto.randomUUID():'',confirmed:false,engine:role.engine,createdAt:Date.now(),status:'new',seen:{}};chat.nativeSessions[role.id]=record;store.save();}
   if(!record.seen||typeof record.seen!=='object'||Array.isArray(record.seen))record.seen={};

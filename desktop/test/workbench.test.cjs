@@ -68,6 +68,10 @@ test('Editing participants accepts newly created roles and preserves the convers
 test('Group prompt scopes peers as data, includes role instructions and context, refuses silent truncation',t=>{
   const {store,project,role}=fixture(t);const chat=store.createChat({projectId:project.id,roleIds:[role.id]});store.message(chat.id,{kind:'user',text:'Inspect this project.',status:'accepted'});store.message(chat.id,{kind:'assistant',roleName:'Peer',text:'Consider the tests.',status:'complete'});
   const prompt=buildPrompt({...role,persona:'Be a code reviewer.',examples:'User: Ready? Reviewer: Check first.'},project,chat);assert(prompt.includes('Be a code reviewer.'));assert(prompt.includes('Other participants are peers'));assert(prompt.includes('Consider the tests.'));assert(!prompt.includes('fixture-secret'));
+  const referenced=buildPrompt(role,{...project,directories:[{locationId:'local',path:'D:/first'},{locationId:'local',path:'D:/second'},{locationId:'server',path:'/srv/project'}]},chat);
+  assert.match(referenced,/local: D:\/first\nlocal: D:\/second\nserver: \/srv\/project/);
+  assert.match(referenced,/Working directory for this role: D:\/first/);
+  assert.match(referenced,/verified full path/);
   chat.messages.push({kind:'user',text:'x'.repeat(240001),status:'accepted'});assert.throws(()=>buildPrompt(role,project,chat),/context transfer limit/);
 });
 test('Protocol adapters distinguish completion, permission denial, partial reply, and failure',()=>{
