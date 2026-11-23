@@ -15,8 +15,8 @@ const roles = [
   {
     id: 'role-arch',
     name: '架构师 · Claude',
-    description: '系统拆解、接口规范与代码评审',
-    persona: '负责模块边界、并发一致性与关键改动审核，结论简洁可执行。',
+    description: '方案探索、架构拆解与代码评审',
+    persona: '负责模块边界、并发一致性与关键改动审核。',
     examples: '先确认数据模型和失败回滚，再开始写代码。',
     engine: 'claude',
     provider: 'native',
@@ -37,7 +37,7 @@ const roles = [
   {
     id: 'role-be',
     name: '后端 · Codex',
-    description: '核心业务逻辑、数据库与自动化测试',
+    description: '后端实际执行、接口与单元测试',
     persona: '专注服务端实现、事务处理与边界单元测试。',
     examples: '',
     engine: 'codex',
@@ -61,8 +61,8 @@ const roles = [
   {
     id: 'role-fe',
     name: '前端 · Gemini',
-    description: '交互界面、状态管理与视觉细节',
-    persona: '负责页面布局、交互动效与深浅色主题适配。',
+    description: '前端界面、交互动效与视觉细节',
+    persona: '负责页面布局、状态管理与深浅色主题适配。',
     examples: '',
     engine: 'antigravity',
     provider: 'native',
@@ -82,14 +82,14 @@ const roles = [
   },
   {
     id: 'role-review',
-    name: '审稿 · Kimi',
-    description: '边界用例检查、文档与安全复核',
+    name: '审稿 · Cursor',
+    description: '代码审核、边界用例与回归检查',
     persona: '重点检查异常分支、并发竞态与文档同步。',
     examples: '',
-    engine: 'kimi',
+    engine: 'cursor',
     provider: 'native',
     locationId: 'local',
-    model: 'kimi-k2.5',
+    model: 'cursor-default',
     effort: '',
     permission: 'read-only',
     executable: '',
@@ -103,14 +103,14 @@ const roles = [
     enabled: true,
   },
   {
-    id: 'role-ops',
-    name: '运维 · Linux VPS',
-    description: '远程容器构建、日志排查与发布验证',
-    persona: '运行在 Linux 服务器，负责部署检查与服务监控。',
+    id: 'role-remote',
+    name: '远程 · Claude',
+    description: '运行在远程 Linux 服务器，可反向操作本机',
+    persona: '运行在远程服务器环境，通过加密通道协助本机开发。',
     examples: '',
     engine: 'claude',
     provider: 'native',
-    locationId: 'loc-vps',
+    locationId: 'loc-server',
     model: 'claude-sonnet-4-6',
     effort: 'medium',
     permission: 'acceptEdits',
@@ -128,7 +128,7 @@ const roles = [
 
 const locations = [
   { id: 'local', name: '本机', type: 'local', os: 'windows', control: 'ssh', proxy: { mode: 'system', url: '' } },
-  { id: 'loc-vps', name: '生产测试 VPS', type: 'ssh', os: 'linux', control: 'ssh', host: 'demo-vps.example.com', username: 'deploy', port: 22, keyPath: '', proxy: { mode: 'inherit', url: '' } },
+  { id: 'loc-server', name: '远程 Linux 服务器', type: 'ssh', os: 'linux', control: 'ssh', host: 'dev-server.example.com', username: 'dev', port: 22, keyPath: '', proxy: { mode: 'inherit', url: '' } },
 ];
 
 const projects = [
@@ -139,7 +139,7 @@ const projects = [
     allowGuestMentions: true,
     directories: [
       { locationId: 'local', path: 'D:\\workspace\\order-service' },
-      { locationId: 'loc-vps', path: '/srv/order-service' },
+      { locationId: 'loc-server', path: '/srv/order-service' },
     ],
   },
   {
@@ -156,7 +156,7 @@ const groupChat = {
   projectId: 'proj-shop',
   name: '支付回调与重试方案',
   roleIds: ['role-arch', 'role-be', 'role-fe', 'role-review'],
-  defaultReplyRoleIds: ['role-arch', 'role-be', 'role-review'],
+  defaultReplyRoleIds: ['role-arch', 'role-be'],
   flow: 'relay',
   rounds: 3,
   autoStop: true,
@@ -182,7 +182,7 @@ const groupChat = {
     {
       id: 'm-1',
       kind: 'user',
-      text: '@架构师 · Claude @后端 · Codex @审稿 · Kimi 支付回调偶发重复通知，先一起定个幂等和重试方案，然后直接落代码。',
+      text: '@架构师 · Claude @后端 · Codex @审稿 · Cursor 支付回调偶发重复通知，先一起定个幂等和重试方案，然后直接落代码。',
       status: 'accepted',
       at: now - 240_000,
     },
@@ -196,7 +196,7 @@ const groupChat = {
       status: 'complete',
       at: now - 205_000,
       nativeSessionStatus: 'reused',
-      text: '建议拆成两层防重：\n1. **回调记录表**增加 `(provider, notify_id)` 唯一约束，重复通知直接返回 `200 OK`；\n2. **状态机更新**使用条件写 `WHERE status = "pending"`，保证并发下只扣减一次库存。\n\n@后端 · Codex 可以按这个表结构先补迁移脚本和单元测试。',
+      text: '建议拆成两层防重：\n1. **回调记录表**增加 `(provider, notify_id)` 唯一约束，重复通知直接返回 `200 OK`；\n2. **状态机更新**使用条件写 `WHERE status = "pending"`，保证并发下只扣减一次库存。',
     },
     {
       id: 'm-3',
@@ -214,13 +214,13 @@ const groupChat = {
       id: 'm-4',
       kind: 'assistant',
       roleId: 'role-review',
-      roleName: '审稿 · Kimi',
+      roleName: '审稿 · Cursor',
       locationId: 'local',
-      model: 'kimi-k2.5',
+      model: 'cursor-default',
       status: 'complete',
       at: now - 85_000,
       nativeSessionStatus: 'created',
-      text: '复核了 `callback.ts` 的异常分支：唯一键冲突返回 200 没问题，但建议对**验签失败**的请求保持返回 `400` 且不写入幂等表，防止恶意重放占满记录。',
+      text: '复核了 `callback.ts` 的异常分支：唯一键冲突返回 200 没问题，建议对**验签失败**的请求保持返回 `400` 且不写入幂等表，防止恶意重放占满记录。',
     },
   ],
 };
@@ -249,9 +249,9 @@ const workflowChat = {
     reworkLimit: 2,
     reason: '全部 3 个步骤已通过验收标准。',
     nodes: [
-      { id: 'n1', title: '设计超时关闭状态机与索引', domain: '架构', duty: '方案', mode: 'auto' },
-      { id: 'n2', title: '实现定时扫描任务与库存回补', domain: '后端', duty: '实施', mode: 'auto' },
-      { id: 'n3', title: '边界用例验收与代码复核', domain: '代码', duty: '审核', mode: 'auto', reworkTo: 2 },
+      { id: 'n1', title: '探索超时关闭状态机与索引方案', domain: '架构', duty: '方案', mode: 'auto' },
+      { id: 'n2', title: '实现定时扫描任务与库存回补', domain: '后端', duty: '执行', mode: 'auto' },
+      { id: 'n3', title: '边界用例验收与代码审核', domain: '代码', duty: '审核', mode: 'auto', reworkTo: 2 },
     ],
     attempts: [
       {
@@ -270,7 +270,7 @@ const workflowChat = {
         roleId: 'role-be',
         roleName: '后端 · Codex',
         via: 'priority',
-        priority: { domain: '后端', duty: '实施', tier: 1, weight: 10 },
+        priority: { domain: '后端', duty: '执行', tier: 1, weight: 10 },
         status: 'complete',
         selectionReason: '匹配第 1 档最高优先级',
       },
@@ -278,7 +278,7 @@ const workflowChat = {
         id: 'a3',
         nodeIndex: 2,
         roleId: 'role-review',
-        roleName: '审稿 · Kimi',
+        roleName: '审稿 · Cursor',
         via: 'priority',
         priority: { domain: '代码', duty: '审核', tier: 1, weight: 8 },
         status: 'complete',
@@ -297,7 +297,7 @@ const workflowChat = {
       status: 'complete',
       workflowAttemptId: 'a1',
       at: now - 360_000,
-      text: '步骤 1 完成：已确定 `orders(status, expire_at)` 联合索引方案，采用批量游标扫描 + 乐观锁回补库存，避免长事务锁表。',
+      text: '步骤 1 完成：确定 `orders(status, expire_at)` 联合索引方案，采用批量游标扫描 + 乐观锁回补库存，避免长事务锁表。',
     },
     {
       id: 'wm-2',
@@ -315,13 +315,13 @@ const workflowChat = {
       id: 'wm-3',
       kind: 'assistant',
       roleId: 'role-review',
-      roleName: '审稿 · Kimi',
+      roleName: '审稿 · Cursor',
       locationId: 'local',
-      model: 'kimi-k2.5',
+      model: 'cursor-default',
       status: 'complete',
       workflowAttemptId: 'a3',
       at: now - 150_000,
-      text: '步骤 3 验收通过：幂等保护、事务回滚与前端倒计时联动均符合标准。\n\nVERDICT: PASS',
+      text: '步骤 3 审核通过：幂等保护、事务回滚与前端倒计时联动均符合标准。\n\nVERDICT: PASS',
     },
   ],
 };
@@ -346,7 +346,7 @@ const workflowPriorities = [
   {
     id: 'pr-1',
     domain: '架构',
-    duty: '方案',
+    duty: '探索方案',
     candidates: [
       { roleId: 'role-arch', tier: 1, weight: 10 },
       { roleId: 'role-be', tier: 2, weight: 6 },
@@ -355,7 +355,7 @@ const workflowPriorities = [
   {
     id: 'pr-2',
     domain: '后端',
-    duty: '实施',
+    duty: '实际执行',
     candidates: [
       { roleId: 'role-be', tier: 1, weight: 10 },
       { roleId: 'role-arch', tier: 2, weight: 5 },
@@ -364,7 +364,7 @@ const workflowPriorities = [
   {
     id: 'pr-3',
     domain: '前端',
-    duty: '实施',
+    duty: '实际执行',
     candidates: [
       { roleId: 'role-fe', tier: 1, weight: 10 },
       { roleId: 'role-arch', tier: 2, weight: 4 },
@@ -428,16 +428,17 @@ const accountUsage = [
     balances: [],
   },
   {
-    key: 'deepseek-api',
-    engine: 'codex',
-    provider: 'deepseek',
+    key: 'cursor-local',
+    engine: 'cursor',
+    provider: 'native',
     locationId: 'local',
-    roleIds: ['role-ops'],
-    state: 'ready',
-    refreshable: true,
-    updatedAt: now - 180_000,
+    roleIds: ['role-review'],
+    state: 'unsupported',
+    guide: true,
+    refreshable: false,
+    updatedAt: null,
     windows: [],
-    balances: [{ remaining: '86.40', currency: 'CNY' }],
+    balances: [],
   },
 ];
 
@@ -454,8 +455,8 @@ const state = {
   locations,
   chats: [groupChat, workflowChat, directChat],
   workflowPriorities,
-  settings: { keepAwake: true, maxJobs: 3, theme: 'dark' },
-  connectionStatus: { local: 'ready', 'loc-vps': 'idle' },
+  settings: { keepAwake: true, maxJobs: 3, theme: 'light' },
+  connectionStatus: { local: 'ready', 'loc-server': 'idle' },
   running: {},
   inputBusy: { 'chat-group': false, 'chat-workflow': false, 'chat-direct': false },
   forceStops: {},
@@ -467,25 +468,6 @@ const state = {
   skillSources: [],
   appVersion: '0.1.0',
   phoneLink: { connected: false },
-};
-
-const demoFiles = {
-  '': [
-    { name: 'migrations', type: 'directory', path: 'D:\\workspace\\order-service\\migrations' },
-    { name: 'src', type: 'directory', path: 'D:\\workspace\\order-service\\src' },
-    { name: 'tests', type: 'directory', path: 'D:\\workspace\\order-service\\tests' },
-    { name: 'package.json', type: 'file', path: 'D:\\workspace\\order-service\\package.json', size: 1240 },
-    { name: 'README.md', type: 'file', path: 'D:\\workspace\\order-service\\README.md', size: 2890 },
-  ],
-  'D:\\workspace\\order-service\\src': [
-    { name: 'payment', type: 'directory', path: 'D:\\workspace\\order-service\\src\\payment' },
-    { name: 'order-expire.ts', type: 'file', path: 'D:\\workspace\\order-service\\src\\order-expire.ts', size: 3120 },
-    { name: 'server.ts', type: 'file', path: 'D:\\workspace\\order-service\\src\\server.ts', size: 1840 },
-  ],
-  'D:\\workspace\\order-service\\src\\payment': [
-    { name: 'callback.ts', type: 'file', path: 'D:\\workspace\\order-service\\src\\payment\\callback.ts', size: 2460 },
-    { name: 'signature.ts', type: 'file', path: 'D:\\workspace\\order-service\\src\\payment\\signature.ts', size: 1410 },
-  ],
 };
 
 const sampleCode = `// src/payment/callback.ts — 支付回调幂等处理
@@ -547,6 +529,18 @@ const api = {
   'phone-addresses': async () => [],
   'account-usage': async () => structuredClone(state),
   'usage-refresh': async () => structuredClone(state),
+  'chat-messages': async (targetChatId) => {
+    const found = state.chats.find(c => c.id === targetChatId);
+    return {
+      messages: structuredClone(found?.messages || []),
+      older: false,
+      newer: false,
+    };
+  },
+  'chat-runs': async () => [],
+  'project-search': async () => [],
+  'chat-search': async () => [],
+  'message-details': async () => ({}),
   files: async (_projectId, _dirIdx, parts = [], operation = 'list') => {
     const joined = ['D:\\workspace\\order-service', ...parts].join('\\');
     if (operation === 'read') {
@@ -583,6 +577,7 @@ const api = {
 const noop = async () => structuredClone(state);
 const allMethods = [
   'snapshot', 'role-save', 'role-enabled', 'avatar-list', 'avatar-upload', 'role-delete', 'role-login',
+  'project-select', 'project-order', 'project-search', 'chat-messages', 'chat-search', 'message-details', 'chat-runs',
   'agent-info', 'agent-guide', 'agent-install', 'location-save', 'location-proxy-save', 'location-test',
   'location-delete', 'project-save', 'project-move', 'project-delete', 'chat-add', 'chat-save',
   'chat-role-settings', 'chat-flow', 'chat-discussion', 'chat-order', 'chat-delete', 'draft',

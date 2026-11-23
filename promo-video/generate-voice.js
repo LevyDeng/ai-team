@@ -21,13 +21,17 @@ function probeDuration(filePath) {
 
 async function synthesize(text, outFile, voice, rate) {
   const tts = new MsEdgeTTS();
-  await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_96KBITRATE_MONO_MP3);
-  const { audioStream } = tts.toStream(text, { rate });
-  const chunks = [];
-  for await (const chunk of audioStream) chunks.push(chunk);
-  const buffer = Buffer.concat(chunks);
-  if (buffer.length < 1000) throw new Error('Audio output unexpectedly small for ' + outFile);
-  fs.writeFileSync(outFile, buffer);
+  try {
+    await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_96KBITRATE_MONO_MP3);
+    const { audioStream } = tts.toStream(text, { rate });
+    const chunks = [];
+    for await (const chunk of audioStream) chunks.push(chunk);
+    const buffer = Buffer.concat(chunks);
+    if (buffer.length < 1000) throw new Error('Audio output unexpectedly small for ' + outFile);
+    fs.writeFileSync(outFile, buffer);
+  } finally {
+    tts.close();
+  }
 }
 
 async function main() {
