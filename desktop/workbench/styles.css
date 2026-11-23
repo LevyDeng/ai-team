@@ -290,17 +290,8 @@ dialog { background:var(--canvas); }
 .role-persona-fields>label { display:flex;flex-direction:column;gap:8px;margin:0 0 20px; }
 .role-persona-fields input { width:100%; }
 #role-persona .role-preview { width:auto;min-width:0;padding:18px;border:1px solid var(--border);border-radius:10px; }
-#chat-role-persona, #chat-role-voice, #voice-settings-fields details, #voice-local-settings { margin:12px 0;padding:10px 12px;border:1px solid var(--line);border-radius:8px; }
-#voice-model-controls { margin-top:10px; }
-.voice-model-actions { display:flex;flex-wrap:wrap;gap:6px;margin:6px 0; }
-.voice-model-actions button { padding:5px 9px; }
+#chat-role-persona { margin:12px 0;padding:10px 12px;border:1px solid var(--line);border-radius:8px; }
 #chat-role-persona > .hint { margin-top:10px; }
-dialog label.voice-check { flex-direction:row;align-items:center; }
-#voice-quick-controls { display:flex;align-items:center;gap:5px;flex:none; }
-.voice-quick-toggle { padding:5px 9px;font-size:12px;color:var(--muted); }
-.voice-quick-toggle[aria-pressed="true"] { background:var(--selected);border-color:var(--accent-border);color:var(--green-dark);font-weight:600; }
-.voice-path { display:flex;gap:8px; }
-.voice-path input { flex:1; }
 .message-images { display:grid;gap:14px;min-width:0;margin-top:12px; }
 .message-images:empty { min-height:1px;margin:0; }
 .message-image-card { min-width:0;margin:0;overflow:hidden;border:1px solid var(--border);border-radius:12px;background:var(--surface); }

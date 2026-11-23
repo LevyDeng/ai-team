@@ -16,9 +16,9 @@ import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 
 final class Link {
-    static final int AUTH = 1, LISTEN = 2, STOP = 3, MIC = 4, TEXT = 5, PLAYED = 6;
-    static final int READY = 10, PHASE = 11, MESSAGE = 12, WAV = 14, ERROR = 16;
-    private static final int MAX_REPLY = 16 * 1024 * 1024;
+    static final int AUTH = 1, TEXT = 5;
+    static final int READY = 10, MESSAGE = 12, ERROR = 16;
+    private static final int MAX_REPLY = 131072;
 
     interface Observer {
         void event(Link link, int kind, byte[] payload) throws IOException;
@@ -71,10 +71,6 @@ final class Link {
         new Thread(this::read, "relay-desk-link").start();
     }
 
-    void send(int kind) {
-        send(kind, new byte[0]);
-    }
-
     boolean send(int kind, byte[] payload) {
         if (closed) {
             return false;
@@ -114,7 +110,7 @@ final class Link {
                 while (!closed) {
                     int kind = input.readUnsignedByte();
                     int size = input.readInt();
-                    if (size < 0 || size > (kind == WAV ? MAX_REPLY : 131072)) {
+                    if (size < 0 || size > MAX_REPLY) {
                         throw new IOException("Invalid frame length");
                     }
                     byte[] payload = new byte[size];

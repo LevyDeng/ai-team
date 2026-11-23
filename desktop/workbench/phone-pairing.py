@@ -2,7 +2,6 @@ from datetime import datetime, timedelta, timezone
 from ipaddress import IPv4Address
 import json
 from pathlib import Path
-import os
 import sys
 
 
@@ -13,7 +12,7 @@ def identity(address):
 
     key = ec.generate_private_key(ec.SECP256R1())
     now = datetime.now(timezone.utc)
-    name = x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, 'Relay Desk LAN')])
+    name = x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, 'ai-team LAN')])
     cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
             .public_key(key.public_key()).serial_number(x509.random_serial_number())
             .not_valid_before(now - timedelta(minutes=5)).not_valid_after(now + timedelta(days=1))
@@ -27,7 +26,8 @@ def identity(address):
 
 def main():
     runtime = Path(sys.argv[1])
-    sys.path.insert(0, os.environ.get('RELAY_VOICE_DEPS', str(runtime / 'deps')))
+    # Reuse pairing packages from existing installations when present.
+    sys.path[:0] = [str(runtime / 'deps'), str(runtime.parent / 'voice' / 'deps')]
     command = sys.argv[2]
     if command == 'identity':
         print(json.dumps(identity(sys.argv[3])))

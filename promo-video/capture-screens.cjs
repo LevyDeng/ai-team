@@ -74,7 +74,7 @@ app.whenReady().then(async () => {
   })()`);
   await snap('02a-group-mention-light.png');
 
-  // 2b. Group chat with input queue + interrupt & voice controls visible
+  // 2b. Group chat with the input queue and interrupt controls visible.
   await js(`(() => {
     const inp = $('input');
     inp.value = '';

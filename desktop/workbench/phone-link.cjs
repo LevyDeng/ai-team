@@ -4,8 +4,7 @@ const { randomBytes, timingSafeEqual } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 
-const frame = { auth: 1, listen: 2, stop: 3, mic: 4, text: 5, played: 6,
-  ready: 10, phase: 11, message: 12, audio: 14, error: 16 };
+const frame = { auth: 1, text: 5, ready: 10, message: 12, error: 16 };
 
 function privateAddress(address) {
   return /^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(address || '');
@@ -17,13 +16,13 @@ function addresses() {
     .map(item => ({ name, address: item.address })));
 }
 
-function pairingTool(runtime, config, args, input = '') {
-  const python = config?.python || process.env.VOICE_DESK_PYTHON || (process.platform === 'win32' ? 'py' : 'python3');
+function pairingTool(runtime, args, input = '') {
+  const python = process.env.AI_TEAM_PHONE_PYTHON || (process.platform === 'win32' ? 'py' : 'python3');
   const launcher = python === 'py' ? ['-3.12'] : [];
   return new Promise((resolve, reject) => {
-    const child = spawn(python, [...launcher, path.join(__dirname, 'voice-runtime', 'pairing.py'), runtime, ...args],
+    const child = spawn(python, [...launcher, path.join(__dirname, 'phone-pairing.py'), runtime, ...args],
       { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    const error = () => new Error('手机配对组件启动失败。请先安装 AI 小队语音运行时依赖。');
+    const error = () => new Error('手机配对组件启动失败。请检查是否已安装 Python 3.12、cryptography 和 qrcode。');
     let stdout = '';
     const timer = setTimeout(() => { child.kill(); reject(error()); }, 12000);
     child.stdout.setEncoding('utf8').on('data', part => { stdout += part; if (stdout.length > 40000) child.kill(); });
@@ -40,8 +39,8 @@ function pairingTool(runtime, config, args, input = '') {
 }
 
 class PhoneLink {
-  constructor({ runtime, getChat, live, submit, changed, identity = pairingTool }) {
-    Object.assign(this, { runtime, getChat, live, submit, changed, identity });
+  constructor({ runtime, getChat, submit, changed, identity = pairingTool }) {
+    Object.assign(this, { runtime, getChat, submit, changed, identity });
   }
 
   status() {
@@ -58,7 +57,7 @@ class PhoneLink {
     const entry = { chatId, address, token: randomBytes(16).toString('hex'), sockets: new Set(), expires: Date.now() + 600000 };
     this.entry = entry;
     try {
-      const identity = await this.identity(this.runtime, chat.voice, ['identity', address]);
+      const identity = await this.identity(this.runtime, ['identity', address]);
       if (this.entry !== entry) throw new Error('配对已关闭。');
       const server = entry.server = tls.createServer({ ...identity, minVersion: 'TLSv1.2', handshakeTimeout: 5000 },
         socket => this.connect(entry, socket));
@@ -74,7 +73,7 @@ class PhoneLink {
       server.on('error', () => { if (this.entry === entry) this.close(); });
       if (this.entry !== entry) throw new Error('配对已关闭。');
       const code = address + ':' + server.address().port + '/' + identity.fingerprint + '/' + entry.token;
-      const qr = await this.identity(this.runtime, chat.voice, ['qr'], code);
+      const qr = await this.identity(this.runtime, ['qr'], code);
       if (this.entry !== entry) throw new Error('配对已关闭。');
       entry.expiration = setTimeout(() => { if (this.entry === entry && !entry.socket) this.close(); }, 600000);
       entry.expiration.unref();
@@ -91,7 +90,6 @@ class PhoneLink {
     if (!entry) return;
     this.entry = null;
     clearTimeout(entry.expiration);
-    if (entry.socket) this.live.stop(entry.chatId, entry.socket);
     for (const socket of entry.sockets) socket.destroy();
     entry.socket?.destroy();
     entry.server?.close();
@@ -116,11 +114,8 @@ class PhoneLink {
         else if (kind === frame.auth && !entry.socket && Date.now() < entry.expires &&
             len === 32 && timingSafeEqual(payload, Buffer.from(entry.token))) {
           entry.socket = socket;
-          entry.listening = false;
-          entry.lastState = '';
           entry.messages = new Map();
           socket.setTimeout(0);
-          this.live.stop(entry.chatId);
           this.send(entry, frame.ready, { name: this.getChat(entry.chatId)?.name || '' });
           this.sync();
           this.changed();
@@ -129,7 +124,6 @@ class PhoneLink {
     });
     socket.once('close', () => {
       if (entry.socket !== socket || this.entry !== entry) return;
-      this.live.stop(entry.chatId, socket);
       entry.socket = null;
       if (Date.now() >= entry.expires) this.close();
       else this.changed();
@@ -137,22 +131,10 @@ class PhoneLink {
   }
 
   receive(entry, kind, payload) {
+    if (kind !== frame.text) return;
     try {
-      if (kind === frame.listen) {
-        entry.listening = true;
-        this.sync();
-      } else if (kind === frame.stop) {
-        entry.listening = false;
-        this.sync();
-      } else if (kind === frame.mic && entry.listening) {
-        this.live.frame(entry.chatId, entry.socket, payload);
-      } else if (kind === frame.text) {
-        const value = payload.toString('utf8').trim();
-        if (value) this.submit(entry.chatId, value);
-      } else if (kind === frame.played) {
-        const { messageId, index } = JSON.parse(payload.toString('utf8'));
-        this.live.played(entry.chatId, entry.socket, messageId, index);
-      }
+      const value = payload.toString('utf8').trim();
+      if (value) this.submit(entry.chatId, value);
     } catch (error) { this.send(entry, frame.error, { message: error.message }); }
   }
 
@@ -161,29 +143,7 @@ class PhoneLink {
     if (!entry?.socket) return;
     const chat = this.getChat(entry.chatId);
     if (!chat || chat.disbandedAt || chat.workflow) { this.close(); return; }
-    const desired = chat.voice?.enabled || (entry.listening && chat.voice?.inputEnabled);
-    if (!desired) this.live.stop(entry.chatId, entry.socket);
-    else this.live.start(entry.chatId, entry.socket, (kind, value) => {
-      if (kind === 'audio') {
-        const { audio, ...metadata } = value;
-        const json = Buffer.from(JSON.stringify(metadata));
-        const size = Buffer.alloc(4); size.writeUInt32BE(json.length);
-        this.send(entry, frame.audio, Buffer.concat([size, json, audio]));
-      } else if (kind === 'phase') this.sendState(entry, this.getChat(entry.chatId));
-      else this.send(entry, frame[kind], value);
-    });
-    this.sendState(entry, chat);
     for (const message of chat.messages.slice(-30)) this.message(chat.id, message);
-  }
-
-  sendState(entry, chat) {
-    if (!chat) return;
-    const state = { phase: this.live.sessions.get(chat.id)?.phase || 'off',
-      input: chat.voice?.inputEnabled === true, output: chat.voice?.enabled === true };
-    const key = JSON.stringify(state);
-    if (key === entry.lastState) return;
-    entry.lastState = key;
-    this.send(entry, frame.phase, state);
   }
 
   message(chatId, message) {

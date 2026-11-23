@@ -1,13 +1,9 @@
 package app.relaydesk.lan;
 
-import android.Manifest;
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.ServiceConnection;
-import android.content.pm.PackageManager;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.text.InputFilter;
@@ -19,25 +15,20 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
-import java.util.ArrayList;
 
 public final class MainActivity extends Activity {
-    private static final int AUDIO_PERMISSIONS = 1;
     private static final int SCAN_PAIRING = 2;
     private EditText code;
     private EditText message;
     private Button connect;
     private Button scan;
-    private Button microphone;
     private Button send;
     private TextView status;
-    private TextView inputHint;
     private TextView transcript;
     private ScrollView scroll;
     private ConversationService service;
     private boolean bound;
     private boolean resumed;
-    private boolean pendingStart;
     private String pendingPairing;
     private final Runnable render = this::render;
     private final ServiceConnection connection = new ServiceConnection() {
@@ -45,7 +36,6 @@ public final class MainActivity extends Activity {
             service = ((ConversationService.LocalBinder) binder).service();
             service.attach(render);
             connectScannedCodeIfReady();
-            startAutoIfReady();
         }
 
         @Override public void onServiceDisconnected(ComponentName name) {
@@ -56,7 +46,6 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle saved) {
         super.onCreate(saved);
-        setVolumeControlStream(android.media.AudioManager.STREAM_MUSIC);
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
         int padding = dp(16);
@@ -97,12 +86,6 @@ public final class MainActivity extends Activity {
         transcript.setPadding(0, dp(8), 0, dp(8));
         scroll.addView(transcript);
         page.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        microphone = new Button(this);
-        microphone.setOnClickListener(view -> toggleMic());
-        page.addView(microphone);
-        inputHint = new TextView(this);
-        inputHint.setText(R.string.auto_input_hint);
-        page.addView(inputHint);
         LinearLayout composer = new LinearLayout(this);
         message = new EditText(this);
         message.setSingleLine(true);
@@ -139,7 +122,6 @@ public final class MainActivity extends Activity {
         super.onResume();
         resumed = true;
         connectScannedCodeIfReady();
-        startAutoIfReady();
     }
 
     @Override protected void onPause() {
@@ -162,17 +144,12 @@ public final class MainActivity extends Activity {
     private void render() {
         boolean connected = service != null && service.isConnected();
         boolean hasLink = service != null && service.hasLink();
-        boolean automatic = service != null && service.isAutomatic();
-        boolean working = service != null && service.isWorking();
         connect.setEnabled(service != null);
         connect.setText(hasLink ? R.string.disconnect : R.string.connect);
         code.setEnabled(!hasLink);
         scan.setEnabled(service != null && !hasLink);
-        microphone.setText(automatic ? R.string.auto_stop : R.string.auto_start);
-        microphone.setEnabled(connected && (automatic || service.isInputAllowed() && !working));
-        message.setEnabled(connected && !automatic && !working);
-        send.setEnabled(connected && !automatic && !working);
-        inputHint.setVisibility(connected && automatic ? View.VISIBLE : View.GONE);
+        message.setEnabled(connected);
+        send.setEnabled(connected);
         status.setText(service == null ? getString(R.string.connect_hint) : service.getStatus());
         String text = service == null ? "" : service.getTranscript();
         String previous = transcript.getText().toString();
@@ -203,78 +180,6 @@ public final class MainActivity extends Activity {
         if (!service.hasLink()) {
             code.setText(scanned);
             service.connect(scanned);
-        }
-    }
-
-    private void toggleMic() {
-        if (service == null || !service.isConnected()) {
-            return;
-        }
-        if (service.isAutomatic()) {
-            service.stopAuto();
-            return;
-        }
-        new AlertDialog.Builder(this)
-            .setTitle(R.string.auto_start)
-            .setMessage(R.string.auto_input_confirm)
-            .setNegativeButton(android.R.string.cancel, null)
-            .setPositiveButton(R.string.auto_start, (dialog, which) -> requestMicrophone())
-            .show();
-    }
-
-    private void requestMicrophone() {
-        if (service == null || !service.isConnected() || !service.isInputAllowed()
-                || service.isWorking() || service.isAutomatic()) {
-            return;
-        }
-        ArrayList<String> permissions = new ArrayList<>(2);
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            permissions.add(Manifest.permission.RECORD_AUDIO);
-        }
-        if (Build.VERSION.SDK_INT >= 33
-                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-                && !getPreferences(MODE_PRIVATE).getBoolean("notification_prompted", false)) {
-            permissions.add(Manifest.permission.POST_NOTIFICATIONS);
-            getPreferences(MODE_PRIVATE).edit().putBoolean("notification_prompted", true).apply();
-        }
-        if (permissions.isEmpty()) {
-            pendingStart = true;
-            startAutoIfReady();
-        } else {
-            requestPermissions(permissions.toArray(new String[0]), AUDIO_PERMISSIONS);
-        }
-    }
-
-    @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] grants) {
-        super.onRequestPermissionsResult(request, permissions, grants);
-        if (request != AUDIO_PERMISSIONS) {
-            return;
-        }
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-            pendingStart = true;
-            startAutoIfReady();
-        } else if (service != null) {
-            service.setStatus(R.string.mic_error);
-        }
-    }
-
-    private void startAutoIfReady() {
-        if (!pendingStart || !resumed || service == null) {
-            return;
-        }
-        pendingStart = false;
-        if (!service.isConnected() || !service.isInputAllowed() || service.isWorking() || service.isAutomatic()) {
-            return;
-        }
-        Intent intent = new Intent(this, ConversationService.class).setAction(ConversationService.START_AUTO);
-        try {
-            if (Build.VERSION.SDK_INT >= 26) {
-                startForegroundService(intent);
-            } else {
-                startService(intent);
-            }
-        } catch (RuntimeException error) {
-            service.setStatus(R.string.background_error);
         }
     }
 

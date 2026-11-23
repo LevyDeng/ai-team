@@ -81,7 +81,7 @@ class Store {
   summary() {
     const { chats, ...workspace } = this.state;
     return structuredClone({ ...workspace, chats: chats.map(chat => {
-      const { messages, nativeSessions, interactiveTerminals, moderatorMemory, ...metadata } = chat;
+      const { messages, nativeSessions, interactiveTerminals, moderatorMemory, voice, roleVoices, ...metadata } = chat;
       return {
         ...metadata,
         historyVersion: this.database.historyVersion(chat.id),
@@ -333,10 +333,6 @@ class Store {
     if (value.persona !== undefined) chat.rolePersonas[roleId] = conversations.copyPersona({
       persona: text(value.persona, 30000), examples: text(value.examples, 30000)
     });
-    if (value.voice !== undefined) {
-      chat.roleVoices ||= {};
-      chat.roleVoices[roleId] = value.voice;
-    }
     this.save(); return chat;
   }
   saveChatFlow(chatId, relayReplies) {

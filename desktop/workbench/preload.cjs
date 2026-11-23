@@ -16,13 +16,11 @@ for(const name of ['workflow-create','workflow-resume','workflow-teams','workflo
 api['workflow-priority-save']=(...args)=>ipcRenderer.invoke('desk:workflow-priority-save',...args);
 api['workflow-template-save']=value=>ipcRenderer.invoke('desk:workflow-template-save',value);
 for(const name of ['chat-branch','chat-handoff'])api[name]=(...args)=>ipcRenderer.invoke('desk:'+name,...args);
-for (const name of ['chat-voice-settings', 'chat-voice-toggle', 'chat-voice-speak', 'chat-voice-cancel', 'voice-live-start', 'voice-live-stop',
-  'voice-live-frame', 'voice-live-played', 'voice-model-status', 'voice-model-warmup', 'voice-model-release',
-  'phone-addresses', 'phone-open', 'phone-close']) {
+for (const name of ['phone-addresses', 'phone-open', 'phone-close']) {
   api[name] = (...args) => ipcRenderer.invoke('desk:' + name, ...args);
 }
 for(const name of ['workbench-restart','workbench-quit','workbench-support'])api[name]=()=>ipcRenderer.invoke('desk:'+name);
-api.on = (name, callback) => { if (!['state', 'terminal', 'message','agent-terminal','quota','voice-live','voice-model-status'].includes(name)) throw new Error('Invalid event.'); const listener = (_e, value) => callback(value); ipcRenderer.on('desk:' + name, listener); return () => ipcRenderer.removeListener('desk:' + name, listener); };
+api.on = (name, callback) => { if (!['state', 'terminal', 'message','agent-terminal','quota'].includes(name)) throw new Error('Invalid event.'); const listener = (_e, value) => callback(value); ipcRenderer.on('desk:' + name, listener); return () => ipcRenderer.removeListener('desk:' + name, listener); };
 api.onFiles = (callback, drag = () => {}) => {
   let depth=0;
   const hasFiles=event=>Array.from(event.dataTransfer?.types || []).includes('Files');

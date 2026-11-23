@@ -28,9 +28,7 @@ function branch(store, source, name) {
   },{
     sourceChatId:source.id,messages,relayReplies:source.relayReplies,maxRounds:source.maxRounds,autoStop:source.autoStop,
     roleSettings:structuredClone(source.roleSettings||{}),
-    rolePersonas:structuredClone(source.rolePersonas||{}),
-    voice:source.voice ? {...source.voice,enabled:false} : undefined,
-    roleVoices:structuredClone(source.roleVoices||{})
+    rolePersonas:structuredClone(source.rolePersonas||{})
   });
 }
 

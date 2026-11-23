@@ -50,13 +50,6 @@ async function run(window,store,app,directory,services) {
     app.exit(0);
     return;
   }
-  if (process.argv.includes('--chat-voice-only')) {
-    await require('./chat-voice-smoke.cjs').run(js, store, fixture, services.agents, services.dialog);
-    assert.deepEqual(errors, []);
-    console.log('Conversation voice and persona smoke checks passed.');
-    app.exit(0);
-    return;
-  }
   if (process.argv.includes('--role-enabled-only')) {
     const id = fixture.chat.roleIds[0], projectId = fixture.chat.projectId;
     const direct = store.createChat({ projectId, roleIds:[id], name:'Disabled-role fixture' });

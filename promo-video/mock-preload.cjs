@@ -525,7 +525,6 @@ const api = {
   'agent-terminals': async () => [],
   terminals: async () => [],
   'message-images': async () => ({ items: [], files: [] }),
-  'voice-model-status': async () => ({ model: null, loading: null, operation: null }),
   'phone-addresses': async () => [],
   'account-usage': async () => structuredClone(state),
   'usage-refresh': async () => structuredClone(state),
@@ -596,9 +595,6 @@ const allMethods = [
   'workflow-create', 'workflow-resume', 'workflow-teams', 'workflow-plan', 'workflow-plan-cancel',
   'workflow-generated-update', 'workflow-priority-save', 'workflow-template-save',
   'chat-branch', 'chat-handoff',
-  'chat-voice-settings', 'chat-voice-toggle', 'chat-voice-speak', 'chat-voice-cancel',
-  'voice-live-start', 'voice-live-stop', 'voice-live-frame', 'voice-live-played',
-  'voice-model-status', 'voice-model-warmup', 'voice-model-release',
   'phone-addresses', 'phone-open', 'phone-close',
   'workbench-restart', 'workbench-quit', 'workbench-support',
 ];

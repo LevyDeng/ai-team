@@ -33,7 +33,6 @@ const { KeepAwake } = require('../keep-awake.cjs');
 const { ProjectTerminals, projectFiles } = require('../project-tools.cjs');
 const { ClipboardImages, readClipboardImage } = require('../clipboard-images.cjs');
 const { Attachments }=require('./attachments.cjs');
-const voiceSettings = require('./chat-voice.cjs');
 const {GeminiWeb, engine:geminiWebEngine, home:geminiWebHome}=require('./gemini-web.cjs');
 const root = path.resolve(__dirname, '../..');
 const smoke = process.argv.includes('--workbench-smoke');
@@ -62,32 +61,15 @@ const antigravitySetups = new Set();
 let confirmingQuit = false, quitting = false, quitReady = false, workbenchWindow, displayedBadgeCount;
 // Chromium's network stack follows the user's system proxy; Node fetch does not.
 const providerFetch = (input, options) => net.fetch(input, options);
-const chatVoice = new voiceSettings.ChatVoice(providerFetch, vault, path.join(data, 'voice'), publishVoiceModelStatus);
-let voiceModelOperation = null;
-function voiceModelStatus() {
-  return { ...chatVoice.local.status(), operation: voiceModelOperation };
-}
-function publishVoiceModelStatus() {
-  const value = voiceModelStatus();
-  for (const w of BrowserWindow.getAllWindows()) {
-    if (!w.webContents.isDestroyed()) w.webContents.send('desk:voice-model-status', value);
-  }
-}
 const chatById = id => store.state.chats.find(chat => chat.id === id);
 const { PhoneLink, addresses: phoneAddresses } = require('./phone-link.cjs');
-const liveVoice = new (require('./realtime-voice.cjs').RealtimeVoice)({
-  voice: chatVoice, getChat: chatById, busy: inputBusy,
-  submit: (chatId, text) => submitChat({ chatId, text, plain: true }),
-});
-const liveSenders = new WeakSet();
 const phoneLink = new PhoneLink({
-  runtime: path.join(data, 'voice'), getChat: chatById, live: liveVoice,
+  runtime: path.join(data, 'phone'), getChat: chatById,
   submit: (chatId, text) => submitChat({ chatId, text, plain: true }),
   changed: () => emit(),
 });
 const network = new ProxyRouter(store, { app, session });
 const emit = () => {
-  for (const id of liveVoice.sessions.keys()) liveVoice.sync(id);
   phoneLink.sync();
   const windows = BrowserWindow.getAllWindows();
   if (!windows.length) return;
@@ -103,7 +85,6 @@ const sendMessage = ({ chatId, message }) => {
 };
 const publishMessage = event => {
   if (!event) { emit(); return; }
-  liveVoice.message(event.chatId, event.message);
   phoneLink.message(event.chatId, event.message);
   sendMessage(event);
 };
@@ -153,7 +134,6 @@ backend.on('status', emit);
 function snapshot() {
   const value = store.summary();
   value.phoneLink = phoneLink.status();
-  for (const chat of value.chats) if (chat.voice) chat.voice.hasKey = vault.has(voiceSettings.credentialKey(chat.id, chat.voice.baseUrl));
   value.roles = value.roles.map(r => ({ ...r, avatarId: r.avatarId || avatars.defaultId(r.engine), avatarUrl: avatars.get(r.avatarId || avatars.defaultId(r.engine)), hasKey: vault.has('api:' + r.id), available: r.engine === geminiWebEngine || r.locationId !== 'local' || (() => { try { findExecutable(r); return true; } catch { return false; } })() }));
   value.connectionStatus = locations.status(); value.running = Object.fromEntries([...running].map(([id, job]) => [id, { roleId: job.roleId, round: job.round, rounds: job.rounds, phase:job.phase||'participant', stopping: job.controller.signal.aborted }]));
   value.inputBusy=Object.fromEntries(value.chats.map(chat=>[chat.id,inputBusy(chat.id)]));
@@ -560,109 +540,12 @@ handle('chat-disband', id => {
   if(chat.inputQueue?.length)throw new Error('请先处理待发送消息。');
   if(chat.draft?.trim()||chat.draftAttachments?.length)throw new Error('请先处理输入框中的草稿和附件。');
   chat.disbandedAt=Date.now();chat.unread=false;store.save();emit();updateBadges();
-  chatVoice.cancelChat(id);
 });
 handle('chat-role-settings', (chatId, roleId, value) => {
   activeChat(chatId);
-  const chat = store.saveChatRole(chatId, roleId, {
-    ...value, voice: value.voice === undefined ? undefined : voiceSettings.roleSettings(value.voice),
-  });
+  const chat = store.saveChatRole(chatId, roleId, value);
   emit(); return chat;
 });
-handle('chat-voice-settings', (chatId, value) => {
-  const chat = activeChat(chatId), next = voiceSettings.settings(value);
-  const previous = chat.voice;
-  const key = voiceSettings.credentialKey(chat.id, next.baseUrl);
-  const previousKey = voiceSettings.credentialKey(chat.id, previous?.baseUrl);
-  const credential = typeof value.apiKey === 'string' ? value.apiKey.trim() : '';
-  if (credential && (!next.baseUrl || credential.length > 2000 || /[\x00-\x1f]/.test(credential))) {
-    throw new Error('请填写有效的远程语音服务地址和密钥。');
-  }
-  if (credential) {
-    try { vault.set(key, credential); }
-    catch { throw new Error('无法加密保存语音服务密钥，请检查系统凭据存储。'); }
-  }
-  saveVoiceSettings(chat, next);
-  if (vault.has(previousKey) && (previousKey !== key || !credential && value.clearKey)) vault.remove(previousKey);
-  refreshVoiceSettings(chatId);
-});
-function saveVoiceSettings(chat, next) {
-  const previous = chat.voice;
-  chat.voice = next;
-  try { store.save(); }
-  catch (error) { chat.voice = previous; throw error; }
-}
-function refreshVoiceSettings(chatId) {
-  chatVoice.cancelChat(chatId);
-  liveVoice.stop(chatId);
-  if (!store.state.chats.some(chat => (chat.voice?.enabled || chat.voice?.inputEnabled) && !chat.disbandedAt)) chatVoice.local.close();
-  emit();
-}
-handle('chat-voice-toggle', (chatId, channel, enabled) => {
-  const chat = activeChat(chatId);
-  if (chat.workflow || !['input', 'output'].includes(channel) || typeof enabled !== 'boolean') {
-    throw new Error('请选择要切换的语音功能。');
-  }
-  const voice = voiceSettings.settings(chat.voice);
-  if (channel === 'input') {
-    voice.inputEnabled = enabled;
-    if (enabled && voice.transcription === 'off') voice.transcription = 'local';
-  } else voice.enabled = enabled;
-  saveVoiceSettings(chat, voice);
-  refreshVoiceSettings(chatId);
-});
-handle('voice-model-status', voiceModelStatus);
-async function changeVoiceModel(operation, run) {
-  if (quitting || voiceModelOperation) throw new Error('本地语音模型正在处理，请稍候。');
-  voiceModelOperation = operation;
-  publishVoiceModelStatus();
-  try {
-    await liveVoice.whenPlaybackIdle();
-    if (quitting) return;
-    await run();
-  } finally {
-    voiceModelOperation = null;
-    publishVoiceModelStatus();
-  }
-}
-handle('voice-model-warmup', chatId => changeVoiceModel('warming', async () => {
-  const chat = activeChat(chatId);
-  const model = chat.voice?.model;
-  if (model?.source !== 'local') throw new Error('请先选择并保存本对话的默认本地合成模型。');
-  const voice = chat.roleIds.map(id => {
-    if (!store.state.roles.some(role => role.id === id && role.enabled !== false)) return;
-    try { return voiceSettings.speechFor(chat, id); }
-    catch { return; }
-  }).find(voice => voice?.model.source === 'local' && voice.model.id === model.id);
-  if (!voice) throw new Error('请先为使用本对话默认本地模型的角色配置音色，再预热。');
-  await chatVoice.local.request(chat.voice, { type: 'warmup', input: 'Ready.', ...voice }, new AbortController().signal);
-}));
-handle('voice-model-release', () => changeVoiceModel('releasing', () => chatVoice.local.release()));
-handle('chat-voice-speak', (sender, chatId, requestId, messageId) => {
-  const chat = activeChat(chatId);
-  return chatVoice.run(chat, sender, requestId, signal => chatVoice.speak(chat, messageId, signal));
-}, true);
-handle('chat-voice-cancel', (sender, requestId) => chatVoice.cancel(sender, requestId), true);
-handle('voice-live-start', (sender, chatId) => {
-  const phone = phoneLink.status();
-  if (phone?.chatId === chatId && phone.connected) throw new Error('这个对话的语音由已连接的手机接收。');
-  liveVoice.start(chatId, sender, (kind, value) => {
-    if (!sender.isDestroyed()) sender.send('desk:voice-live', { kind, chatId, ...value });
-  });
-  if (!liveSenders.has(sender)) {
-    liveSenders.add(sender);
-    const cleanup = () => { for (const id of liveVoice.sessions.keys()) liveVoice.stop(id, sender); };
-    sender.once('destroyed', cleanup);
-    sender.on('did-start-navigation', cleanup);
-    sender.on('render-process-gone', cleanup);
-  }
-  return liveVoice.sessions.get(chatId)?.phase;
-}, true);
-handle('voice-live-stop', (sender, chatId) => liveVoice.stop(chatId, sender), true);
-handle('voice-live-frame', (sender, chatId, chunk) => {
-  if (chunk instanceof ArrayBuffer && chunk.byteLength === 3200) liveVoice.frame(chatId, sender, Buffer.from(chunk));
-}, true);
-handle('voice-live-played', (sender, chatId, messageId, index) => liveVoice.played(chatId, sender, messageId, index), true);
 handle('phone-addresses', () => phoneAddresses());
 handle('phone-open', (chatId, address) => phoneLink.open(chatId, address));
 handle('phone-close', () => phoneLink.close());
@@ -677,9 +560,6 @@ handle('chat-delete', id => {
   store.state.chats = previous.filter(c => c.id !== id);
   try { store.save(); }
   catch (error) { store.state.chats = previous; throw error; }
-  chatVoice.cancelChat(id);
-  const key = voiceSettings.credentialKey(id, chat.voice?.baseUrl);
-  if (vault.has(key)) vault.remove(key);
   emit();
   updateBadges();
 });
@@ -936,25 +816,8 @@ handle('pick', async (kind, initialPath) => {
   const options = { properties: [kind === 'folder' ? 'openDirectory' : 'openFile', ...(kind === 'files' ? ['multiSelections'] : [])] };
   const validPath = value => typeof value === 'string' && value.length <= 4096 && path.isAbsolute(value) && !/[\x00-\x1f]/.test(value);
   if (kind === 'folder' && validPath(initialPath)) options.defaultPath = initialPath;
-  if (kind === 'voice-reference') {
-    options.title = '选择参考录音';
-    const currentDirectory = validPath(initialPath) ? path.dirname(initialPath) : '';
-    for (const directory of [store.state.settings.voiceReferenceDirectory, currentDirectory]) {
-      if (validPath(directory) && (await fs.promises.stat(directory).catch(() => null))?.isDirectory()) {
-        options.defaultPath = directory;
-        break;
-      }
-    }
-  }
   const result = await dialog.showOpenDialog(options);
   if (result.canceled) return [];
-  if (kind === 'voice-reference' && result.filePaths.length) {
-    const directory = path.dirname(result.filePaths[0]);
-    if (store.state.settings.voiceReferenceDirectory !== directory) {
-      store.state.settings.voiceReferenceDirectory = directory;
-      store.save();
-    }
-  }
   return result.filePaths;
 });
 async function writeClipboardText(text) { if (typeof clipboard.writeText === 'function') clipboard.writeText(String(text)); else await clipboard.write([{ 'text/plain': String(text) }]); }
@@ -1224,16 +1087,8 @@ function createWindow() {
   w.on('restore', restoreBadges);
   w.on('focus', () => { w.flashFrame(false); restoreBadges(); });
   w.webContents.setWindowOpenHandler(() => ({ action: 'deny' })); w.webContents.on('will-navigate', e => e.preventDefault());
-  const workbenchUrl = pathToFileURL(path.join(__dirname, 'index.html')).href;
-  const microphoneAllowed = (contents, permission, url, mainFrame) =>
-    permission === 'media' && contents === w.webContents && url === workbenchUrl && mainFrame &&
-    store.state.chats.some(chat => chat.voice?.inputEnabled && !chat.disbandedAt && chat.voice.transcription !== 'off');
-  w.webContents.session.setPermissionRequestHandler((contents, permission, callback, details) => {
-    callback(microphoneAllowed(contents, permission, details.requestingUrl, details.isMainFrame) &&
-      details.mediaTypes?.length === 1 && details.mediaTypes[0] === 'audio');
-  });
-  w.webContents.session.setPermissionCheckHandler((contents, permission, _origin, details) =>
-    microphoneAllowed(contents, permission, details.requestingUrl, details.isMainFrame) && details.mediaType === 'audio');
+  w.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  w.webContents.session.setPermissionCheckHandler(() => false);
   w.loadFile(path.join(__dirname, 'index.html'));
   w.webContents.once('did-finish-load',restoreBadges);
   return w;
@@ -1272,8 +1127,6 @@ async function requestQuit(restart = false) {
     for (const job of running.values()) if (!restart || !job.localExecutor) job.controller.abort();
     skills.close();
     phoneLink.close();
-    liveVoice.close();
-    chatVoice.close();
     agents.close();
     const terminalsClosed = interactiveAgents.closeAll();
     for (const manager of terminalManagers.values()) manager.closeAll();

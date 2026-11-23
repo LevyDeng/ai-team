@@ -11,7 +11,7 @@
     "tailOut": 0.72,
     "transitionSec": 0.45
   },
-  "totalDuration": 181.318,
+  "totalDuration": 173.326,
   "slides": [
     {
       "id": "slide-01",
@@ -27,18 +27,18 @@
       "id": "slide-02",
       "audioFile": "audio/slide-02.mp3",
       "start": 20.474,
-      "duration": 50.148,
+      "duration": 42.156,
       "voiceStart": 20.894,
-      "voiceDuration": 49.008,
+      "voiceDuration": 41.016,
       "leadIn": 0.42,
       "tailOut": 0.72
     },
     {
       "id": "slide-03",
       "audioFile": "audio/slide-03.mp3",
-      "start": 70.622,
+      "start": 62.63,
       "duration": 28.188,
-      "voiceStart": 71.042,
+      "voiceStart": 63.05,
       "voiceDuration": 27.048,
       "leadIn": 0.42,
       "tailOut": 0.72
@@ -46,9 +46,9 @@
     {
       "id": "slide-04",
       "audioFile": "audio/slide-04.mp3",
-      "start": 98.81,
+      "start": 90.818,
       "duration": 30.516,
-      "voiceStart": 99.23,
+      "voiceStart": 91.238,
       "voiceDuration": 29.376,
       "leadIn": 0.42,
       "tailOut": 0.72
@@ -56,9 +56,9 @@
     {
       "id": "slide-05",
       "audioFile": "audio/slide-05.mp3",
-      "start": 129.326,
+      "start": 121.334,
       "duration": 11.148,
-      "voiceStart": 129.746,
+      "voiceStart": 121.754,
       "voiceDuration": 10.008,
       "leadIn": 0.42,
       "tailOut": 0.72
@@ -66,9 +66,9 @@
     {
       "id": "slide-06",
       "audioFile": "audio/slide-06.mp3",
-      "start": 140.474,
+      "start": 132.482,
       "duration": 13.956,
-      "voiceStart": 140.894,
+      "voiceStart": 132.902,
       "voiceDuration": 12.816,
       "leadIn": 0.42,
       "tailOut": 0.72
@@ -76,9 +76,9 @@
     {
       "id": "slide-07",
       "audioFile": "audio/slide-07.mp3",
-      "start": 154.43,
+      "start": 146.438,
       "duration": 12.756,
-      "voiceStart": 154.85,
+      "voiceStart": 146.858,
       "voiceDuration": 11.616,
       "leadIn": 0.42,
       "tailOut": 0.72
@@ -86,9 +86,9 @@
     {
       "id": "slide-08",
       "audioFile": "audio/slide-08.mp3",
-      "start": 167.186,
+      "start": 159.194,
       "duration": 14.132,
-      "voiceStart": 167.606,
+      "voiceStart": 159.614,
       "voiceDuration": 12.312,
       "leadIn": 0.42,
       "tailOut": 1.4

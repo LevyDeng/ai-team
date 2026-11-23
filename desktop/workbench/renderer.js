@@ -100,54 +100,7 @@ function rememberProject() {
 }
 const engineLabel = engine => ({ codex:'Codex CLI', claude:'Claude Code', opencode:'OpenCode', [geminiWebEngine]:'Gemini 网页版', ...vendorKinds }[engine] || engine);
 function toast(value) { $('toast').textContent = String(value); $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 6000); }
-const voiceUI = window.deskChatVoice;
-$('attach').insertAdjacentHTML('beforebegin', `
-  <div id="voice-quick-controls" role="group" aria-label="对话语音" hidden>
-    <button type="button" id="voice-quick-input" class="voice-quick-toggle" aria-pressed="false">语音输入</button>
-    <button type="button" id="voice-quick-output" class="voice-quick-toggle" aria-pressed="false">语音输出</button>
-  </div>
-  <small class="hint" id="voice-live-status" role="status" hidden></small>
-  <button type="button" id="voice-stop" class="quiet" hidden>停止播放</button>`);
-const activeVoiceChat = () => page === 'projects' && state ? chat() : undefined;
-const pendingVoiceToggles = new Set();
-function renderVoiceToggles() {
-  const c = activeVoiceChat();
-  $('voice-quick-controls').hidden = !c || Boolean(c.disbandedAt || c.workflow);
-  for (const [channel, label, key] of [['input', '语音输入', 'inputEnabled'], ['output', '语音输出', 'enabled']]) {
-    const button = $('voice-quick-' + channel);
-    const enabled = c?.voice?.[key] === true;
-    button.setAttribute('aria-pressed', String(enabled));
-    button.title = (enabled ? '关闭' : '开启') + label;
-    button.disabled = pendingVoiceToggles.has(c?.id);
-    button.onclick = () => action(async () => {
-      if (!c || pendingVoiceToggles.has(c.id)) return;
-      if (channel === 'input' && !enabled && !voiceUI.confirmInput()) return;
-      pendingVoiceToggles.add(c.id);
-      renderVoiceToggles();
-      try { await api['chat-voice-toggle'](c.id, channel, !enabled); }
-      finally { pendingVoiceToggles.delete(c.id); renderVoiceToggles(); }
-    });
-  }
-}
-const voicePlayback = voiceUI.createPlayback({
-  api, activeChat: activeVoiceChat, notify: error => toast(uiError(error)),
-  update: playing => { $('voice-stop').hidden = !playing; },
-});
-api.on('voice-model-status', voiceUI.updateModelStatus);
-$('voice-stop').onclick = voicePlayback.stop;
-const liveVoiceUI = voiceUI.createLive({
-  api, activeChat: activeVoiceChat, notify: toast, beforePlayback: voicePlayback.stop,
-  paired: id => state.phoneLink?.chatId === id && state.phoneLink.connected,
-  status: value => {
-    const label = $('voice-live-status');
-    label.textContent = value;
-    label.hidden = !value || value === '语音输出已开启';
-  },
-});
-function syncVoice() {
-  renderVoiceToggles();
-  voicePlayback.sync();
-  liveVoiceUI.sync();
+function renderPhoneStatus() {
   if ($('phone-status')) $('phone-status').textContent = state.phoneLink?.connected ? '手机已连接' :
     state.phoneLink ? '等待 Android 手机连接' : '手机连接已关闭';
 }
@@ -373,7 +326,6 @@ function renderList() {
 }
 function showPage(next) {
   saveDraftNow(); roleModelPicker?.destroy(); roleModelPicker = undefined; page = next; query = '';
-  syncVoice();
   refreshPriorityView = undefined;
   if (page === 'settings') settingsSection = 'general';
   document.body.classList.toggle('editor-mode', page !== 'projects');
@@ -444,7 +396,6 @@ function refreshMessagePage() {
 }
 function activateChat() {
   skillCommands.close();
-  syncVoice();
   $('workflow-status')?.remove();
   const c = chat(); const has = Boolean(c); $('composer').hidden = !has || Boolean(c.disbandedAt); $('empty-chat').hidden = has; $('messages').hidden = !has;
   const workflowFilter = filter === 'workflow';
@@ -500,24 +451,6 @@ function renderMessages() {
       element.querySelector('.restore').onclick = () => {if(!chat()?.disbandedAt)restoreInput(c.id,m.id);};
       element.querySelector('.task-output').onclick = () => { activityMode=m.nativeTerminalId&&agentTerminals.some(t=>t.id===m.nativeTerminalId&&t.state!=='ended')?'interactive':'log';activityRoleId = m.roleId; activityRunId = m.id; activityFollow = false; action(() => openTools('activity')); };
       if (m.kind === 'assistant') {
-        const playVoice = document.createElement('button');
-        playVoice.type = 'button'; playVoice.className = 'quiet play-voice'; playVoice.textContent = '播放语音'; playVoice.hidden = true;
-        playVoice.onclick = () => {
-          if (chat()?.voice?.inputEnabled) {
-            toast('语音输入已开启。请先在聊天底栏关闭语音输入，再播放单条回复。');
-            return;
-          }
-          if (state.phoneLink?.connected && state.phoneLink.chatId === c.id) {
-            toast('语音正在由手机接收。请先关闭手机连接，再在电脑上播放单条回复。');
-            return;
-          }
-          if (liveVoiceUI.busy()) {
-            toast('当前语音回复尚未结束，请稍后播放单条回复。');
-            return;
-          }
-          voicePlayback.replay(c.id, m.id);
-        };
-        element.querySelector('.message-footer').append(playVoice);
         const login = document.createElement('button'); login.type = 'button'; login.className = 'quiet native-login'; login.textContent = '登录此角色'; login.hidden = true;
         login.onclick = () => action(() => loginRole(m.roleId)); element.querySelector('.message-footer').append(login);
         const model = document.createElement('button'); model.type = 'button'; model.className = 'quiet select-task-model'; model.textContent = '选择本对话模型'; model.hidden = true;
@@ -527,7 +460,6 @@ function renderMessages() {
       list.append(element); bindChatRoleAvatars();
     }
     if (m.kind==='user')element.querySelector('.restore').hidden=Boolean(c.disbandedAt);
-    if (m.kind === 'assistant') element.querySelector('.play-voice').hidden = !voiceUI.playable(c, m);
     if(m.branchContext){
       element.querySelector('.message-meta b').textContent='分支上下文';
       element.querySelector('.message-meta span').hidden=true;
@@ -846,7 +778,7 @@ function openChatRole(id) {
     <label>角色设定<textarea id="chat-role-persona-text" maxlength="30000" rows="4"></textarea></label>
     <label>发言风格示例<textarea id="chat-role-examples" maxlength="30000" rows="4"></textarea></label>
     <button type="button" class="quiet" id="chat-role-copy-persona">从系统设定重新复制</button>
-    </details>${voiceUI.roleFields()}`;
+    </details>`;
   function bindRoleFields() {
     $('chat-role-persona-text').value = r.persona || '';
     $('chat-role-examples').value = r.examples || '';
@@ -854,8 +786,7 @@ function openChatRole(id) {
       $('chat-role-persona-text').value = role(id)?.persona || '';
       $('chat-role-examples').value = role(id)?.examples || '';
     };
-    const readVoice = voiceUI.bindRole(c, id, { $, api, options, action });
-    return () => ({ persona: $('chat-role-persona-text').value, examples: $('chat-role-examples').value, voice: readVoice() });
+    return () => ({ persona: $('chat-role-persona-text').value, examples: $('chat-role-examples').value });
   }
   let readRole;
   if (r.engine === geminiWebEngine) {
@@ -1673,11 +1604,7 @@ function openChat(c, preferredRole) {
   $('dialog').classList.add('role-selection-dialog');
   if(c)addChatActions(c);
   if (c) {
-    $('chat-handoff').insertAdjacentHTML('afterend', '<button type="button" id="chat-voice-settings-open">对话语音</button><button type="button" id="chat-phone-link">手机连接</button>');
-    $('chat-voice-settings-open').onclick = () => {
-      $('dialog').close();
-      voiceUI.openSettings(c, { $, api, dialog, options, action, whenPlaybackIdle: voicePlayback.whenIdle });
-    };
+    $('chat-handoff').insertAdjacentHTML('afterend', '<button type="button" id="chat-phone-link">手机连接</button>');
     $('chat-phone-link').onclick = () => action(async () => {
       $('dialog').close();
       await openPhoneLink(c);
@@ -2308,7 +2235,7 @@ api.on('state', value => {
   }
   const previousChat = chatId;
   if (!chat()) chatId = chats()[0]?.id;
-  syncVoice();
+  renderPhoneStatus();
   renderList();
   refreshPriorityView?.();
   if (page === 'projects') {
