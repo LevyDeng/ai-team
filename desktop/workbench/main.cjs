@@ -12,6 +12,7 @@ const { Store, messagePreview } = require('./store.cjs');
 const { messageData, messageView, readMessageDetail } = require('./workspace-db.cjs');
 const { isDeepStrictEqual } = require('node:util');
 const { Vault, Locations } = require('./locations.cjs');
+const { setupSshKey } = require('./ssh-key-setup.cjs');
 const { Agents, findExecutable } = require('./agents.cjs');
 const { ClaudeUpdater } = require('./claude-update.cjs');
 const { Avatars } = require('./avatars.cjs');
@@ -191,7 +192,7 @@ handle('chat-runs', id => store.get('chats', id).messages.filter(message => mess
   .map(({id, roleId, roleName, at, status, errorCode, workflowAttemptId}) => ({id, roleId, roleName, at, status, errorCode, workflowAttemptId, kind:'assistant'})));
 handle('skill-get',id=>skills.read(id));
 handle('skill-sources-save',async value=>{await skills.system.saveSources(value);emit();return skills.system.sources();});
-handle('skill-system-enabled',(id,enabled)=>{skills.system.setEnabled(skills.get(id),enabled);emit();return true;});
+handle('skill-enabled',(id,enabled)=>{skills.setEnabled(id,enabled);emit();return true;});
 handle('skill-models',(value,options)=>skills.models(value,options));
 handle('skill-save',value=>{const result=skills.save(value);emit();return result;});
 handle('skill-delete',id=>{skills.remove(id);emit();});
@@ -271,6 +272,56 @@ handle('location-delete', id => {
   locations.disconnect(id); store.state.locations = store.state.locations.filter(l => l.id !== id); vault.remove('ssh:' + id); vault.remove('mcp:' + id); store.save(); emit();
 });
 handle('location-test', async id => { await locations.connect(id); const location = store.get('locations', id); if (location.type === 'ssh') return await locations.exec(id, location.os === 'linux' ? 'uname -s; command -v python3; command -v claude || true; command -v codex || true; command -v opencode || true' : 'ver'); return 'Local connection ready.'; });
+const pendingSshSetups = new Set();
+handle('location-setup-ssh-key', async (value, password) => {
+  let draft;
+  try {
+    draft = store.prepareLocation(value);
+  } catch (error) {
+    throw new Error('请检查位置名称、主机地址、SSH 用户和端口。', { cause: error });
+  }
+  if (draft.managed || draft.os !== 'linux' || draft.type !== 'ssh') {
+    throw new Error('此功能适用于手动添加的 Linux SSH 位置。');
+  }
+  if (password !== undefined && (typeof password !== 'string' || !password || password.length > 4096)) {
+    throw new Error('请输入有效的 SSH 登录密码。');
+  }
+  const endpoint = JSON.stringify([draft.host.toLowerCase(), draft.port, draft.username]);
+  if (pendingSshSetups.has(endpoint)) throw new Error('此 SSH 账号正在配置免密登录，请稍候。');
+  const previous = value.id ? store.get('locations', value.id) : undefined;
+  const credentialId = 'ssh:' + draft.id;
+  const newPassphrase = draft.keyPath && typeof value.passphrase === 'string' ? value.passphrase : '';
+  const savedPassphrase = draft.keyPath && draft.keyPath === previous?.keyPath ? vault.get(credentialId) : '';
+  if (newPassphrase && !safeStorage.isEncryptionAvailable()) {
+    throw new Error('系统凭据加密不可用，无法保存私钥口令。');
+  }
+  pendingSshSetups.add(endpoint);
+  try {
+    const result = await setupSshKey(locations, draft, { passphrase: newPassphrase || savedPassphrase || undefined, password });
+    if (result.needsPassword) return result;
+    if (previous && !store.state.locations.includes(previous)) {
+      throw new Error('位置已被修改，请重新打开位置并测试连接。');
+    }
+    const next = { ...draft, keyPath: result.keyPath };
+    const previousPassphrase = vault.get(credentialId);
+    const nextPassphrase = newPassphrase || savedPassphrase;
+    const updatePassphrase = passphrase => passphrase ? vault.set(credentialId, passphrase) : vault.remove(credentialId);
+    if (nextPassphrase !== previousPassphrase) updatePassphrase(nextPassphrase);
+    try {
+      store.commitLocation(next);
+    } catch (error) {
+      if (nextPassphrase !== previousPassphrase) updatePassphrase(previousPassphrase);
+      throw error;
+    }
+    if (previous && (newPassphrase || ['host', 'port', 'username', 'keyPath'].some(key => previous[key] !== next[key]))) {
+      locations.disconnect(next.id);
+    }
+    emit();
+    return { location: next };
+  } finally {
+    pendingSshSetups.delete(endpoint);
+  }
+});
 handle('project-save', value => { const result = store.saveProject(value); emit(); return result; });
 handle('project-move', (id, offset) => { if (![-1, 1].includes(offset)) return; const p = store.get('projects', id); const index = store.state.projects.indexOf(p); const target = index + offset; if (target >= 0 && target < store.state.projects.length) { store.state.projects.splice(index, 1); store.state.projects.splice(target, 0, p); store.save(); emit(); } });
 handle('project-delete', async id => {
@@ -581,7 +632,7 @@ function requireEnabledRoles(ids) {
 function prepareInput(value, queued=false){
   const chat=activeChat(value.chatId),project=store.get('projects',chat.projectId);
   if(chat.workflow)throw new Error('Use the workflow controls for this run.');
-  const invocation=value.summary||value.plain?null:require('./skills.cjs').parseCommand(value.text,skills.list());
+  const invocation=value.summary||value.plain?null:require('./skills.cjs').parseCommand(value.text,skills.list(),{rejectDisabled:true});
   if(value.roleIds!==undefined&&(!Array.isArray(value.roleIds)||!value.roleIds.length||
     value.roleIds.length>chat.roleIds.length+project.roleIds.length||value.roleIds.some(id=>typeof id!=='string')))throw new Error('请选择发言角色。');
   const available = chat.roleIds.filter(id => store.state.roles.some(role => role.id === id && role.enabled !== false));

@@ -37,6 +37,8 @@ id_dsa*
 
 # Runtime data, transcripts, and generated artifacts
 .runtime/
+/.tmp/
+/promo-video/
 logs/
 *.log
 *.log.*

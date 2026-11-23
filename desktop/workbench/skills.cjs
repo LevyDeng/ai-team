@@ -5,10 +5,18 @@ const {handoffTargets,prepareHandoff}=require('./chat-branch.cjs');
 const {SystemSkills}=require('./system-skills.cjs');
 const slug=/^[a-z][a-z0-9-]{0,62}$/;
 function endpoint(value){const url=new URL(String(value));if(url.username||url.password||url.search||url.hash||!['https:','http:'].includes(url.protocol)||url.protocol==='http:'&&!['localhost','127.0.0.1','[::1]'].includes(url.hostname))throw new Error('Use an HTTPS API base URL, or HTTP on localhost.');return url.href.replace(/\/+$/,'');}
-function parseCommand(text,skills){const match=/^\s*\/([^\s/]+)(?:\s+([\s\S]*))?$/.exec(text||'');if(!match)return null;const skill=skills.find(s=>s.enabled&&s.userInvocable!==false&&(s.command===match[1]||!s.source&&s.name===match[1]));return skill?{skill,prompt:(match[2]||'').trim()}:null;}
+function parseCommand(text, skills, { rejectDisabled = false } = {}) {
+  const match = /^\s*\/([^\s/]+)(?:\s+([\s\S]*))?$/.exec(text || '');
+  if (!match) return null;
+  const skill = skills.find(s => s.command === match[1] || !s.source && s.name === match[1]);
+  if (skill?.enabled === false && rejectDisabled) {
+    throw new Error('技能「' + skill.name + '」已停用，请在技能设置中启用后再试。');
+  }
+  return skill?.enabled && skill.userInvocable !== false ? { skill, prompt: (match[2] || '').trim() } : null;
+}
 function body(markdown){return markdown.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/,'').trim();}
 class Skills{
-  constructor({store,vault,network,fetch:request=fetch,nativeImage,emit=()=>{},systemDirectories,locations}){Object.assign(this,{store,vault,network,request,nativeImage,emit});this.root=path.join(store.directory,'skills');this.outputs=path.join(store.directory,'skill-output');this.modelCatalogs=new imageModels.ImageModelCatalogs(store.directory);this.tasks=new Map();this.jobs=new Map();this.retries=new Map();this.closed=false;store.state.skills||=[];
+  constructor({store,vault,network,fetch:request=fetch,nativeImage,emit=()=>{},systemDirectories,locations,readAvailability}){Object.assign(this,{store,vault,network,request,nativeImage,emit,readAvailability});this.root=path.join(store.directory,'skills');this.outputs=path.join(store.directory,'skill-output');this.modelCatalogs=new imageModels.ImageModelCatalogs(store.directory);this.tasks=new Map();this.jobs=new Map();this.retries=new Map();this.closed=false;store.state.skills||=[];
     this.system=new SystemSkills(store,systemDirectories,locations);
     if(!store.state.skillsInitialized){const markdown=fs.readFileSync(path.join(__dirname,'skills/image/SKILL.md'),'utf8');this.save({command:'image',name:'生图',description:'按文字要求生成图片，结果保存在本机。',kind:'image',enabled:true,instructions:body(markdown),provider:'openai',baseUrl:'https://api.openai.com/v1',model:'',proxyMode:'inherit'});store.state.skillsInitialized=true;store.save();}
     if(!store.state.handoffSkillInitialized){
@@ -23,7 +31,15 @@ class Skills{
       store.save();
     }
   }
-  list(){return [...this.store.state.skills.map(s=>({...s,hasKey:this.vault.has('skill:'+s.id),ready:s.kind==='prompt'||this.vault.has('skill:'+s.id)})),...this.system.list(this.store.state.skills)];}
+  list() {
+    const availability = this.readAvailability?.();
+    const appSkills = this.store.state.skills.map(skill => {
+      const hasKey = this.vault.has('skill:' + skill.id);
+      const enabled = availability ? availability.enabledAppSkills.has(skill.id) : skill.enabled !== false;
+      return { ...skill, enabled, hasKey, ready: skill.kind === 'prompt' || hasKey };
+    });
+    return [...appSkills, ...this.system.list(appSkills, availability?.disabledSystemSkills)];
+  }
   get(id){const skill=this.list().find(s=>s.id===id);if(!skill)throw new Error('Skill not found.');return skill;}
   read(id){
     const skill=this.get(id);
@@ -54,20 +70,42 @@ class Skills{
     const record={id,command,name,description:String(value.description||'').trim().slice(0,300),kind:value.kind,enabled:value.enabled!==false,provider:value.provider==='gemini'?'gemini':'openai',baseUrl:endpoint(value.baseUrl||(value.provider==='gemini'?'https://generativelanguage.googleapis.com/v1beta':'https://api.openai.com/v1')),model:String(value.model||'').trim().slice(0,200),proxyMode:['inherit','direct','proxy'].includes(value.proxyMode)?value.proxyMode:'inherit'};
     if(/[\r\n\0]/.test(record.model))throw new Error('Invalid image model ID.');
     if(key)this.vault.set('skill:'+id,key);else if(value.clearKey===true)this.vault.remove('skill:'+id);
-    const directory=path.join(this.root,id);fs.mkdirSync(directory,{recursive:true});const temporary=path.join(directory,crypto.randomUUID()+'.tmp');fs.writeFileSync(temporary,'---\nname: '+command+'\ndescription: '+JSON.stringify(record.description||name)+'\n---\n\n'+instructions+'\n',{mode:0o600});fs.renameSync(temporary,path.join(directory,'SKILL.md'));
+    const directory=path.join(this.root,id), filename=path.join(directory,'SKILL.md');
+    const markdown='---\nname: '+command+'\ndescription: '+JSON.stringify(record.description||name)+'\n---\n\n'+instructions+'\n';
+    if (!fs.existsSync(filename) || fs.readFileSync(filename, 'utf8') !== markdown) {
+      fs.mkdirSync(directory,{recursive:true});
+      const temporary=path.join(directory,crypto.randomUUID()+'.tmp');
+      fs.writeFileSync(temporary,markdown,{mode:0o600});
+      fs.renameSync(temporary,filename);
+    }
     if(previous)Object.assign(previous,record);else this.store.state.skills.push(record);this.store.save();return this.read(id);
+  }
+  setEnabled(id, enabled) {
+    if (typeof enabled !== 'boolean') throw new Error('请选择是否启用此技能。');
+    const skill = this.get(id);
+    if (skill.source) return this.system.setEnabled(skill, enabled);
+    const record = this.store.state.skills.find(item => item.id === id);
+    const previous = record.enabled;
+    if (previous === enabled) return;
+    record.enabled = enabled;
+    try {
+      this.store.save();
+    } catch (error) {
+      record.enabled = previous;
+      throw error;
+    }
   }
   remove(id){if(this.get(id).source)throw new Error('System skills are managed at their source.');if([...this.jobs.values()].some(j=>j.skillId===id))throw new Error('Wait for this skill to finish before deleting it.');this.store.state.skills=this.store.state.skills.filter(s=>s.id!==id);this.vault.remove('skill:'+id);this.store.save();}
   begin(taskId){if(!this.tasks.has(taskId))this.tasks.set(taskId,{used:0,active:0,at:Date.now()});return this.tasks.get(taskId);}
   scope(chatId,roleId,taskId){return {chatId,roleId,taskId,depth:0};}
-  handoffSkill(){return this.store.state.skills.find(skill=>skill.id===this.store.state.handoffSkillId&&skill.enabled&&skill.kind==='prompt');}
+  handoffSkill(list=this.list()){return list.find(skill=>skill.id===this.store.state.handoffSkillId&&skill.enabled&&skill.kind==='prompt');}
   tools(){
     const list=this.list().filter(s=>s.enabled&&s.modelInvocable!==false);if(!list.length)return [];
     const tools=[
       {name:'skill_read',description:'Read a global ai-team skill before using it. Available skills: '+list.map(s=>s.command+' ('+s.description+')').join('; '),inputSchema:{type:'object',properties:{skill:{type:'string',enum:list.map(s=>s.command)}},required:['skill'],additionalProperties:false}},
       {name:'skill_run',description:'Execute an enabled ai-team skill. Images run on the App machine with encrypted credentials; return paths, never image bytes. The shared user-task budget is 3 calls, including retries. Executors cannot recursively invoke another skill. Use the same requestId to retry an uncertain submission.',inputSchema:{type:'object',properties:{skill:{type:'string',enum:list.map(s=>s.command)},prompt:{type:'string',maxLength:16000},requestId:{type:'string',maxLength:100}},required:['skill','prompt'],additionalProperties:false}}
     ];
-    const handoff=this.handoffSkill();
+    const handoff=this.handoffSkill(list);
     if(handoff)tools.push(
       {name:'skill_handoff_targets',description:'When the user asks to hand off a task, find destination conversations and their participant IDs. Returns only names and IDs. Read the '+handoff.command+' skill for instructions.',
         inputSchema:{type:'object',properties:{query:{type:'string',maxLength:100}},additionalProperties:false}},

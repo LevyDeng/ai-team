@@ -249,4 +249,18 @@ class WorkspaceDatabase {
   }
 }
 
-module.exports = { WorkspaceDatabase, messageData, messageView, readMessageDetail };
+function readSkillAvailability(file) {
+  const db = new DatabaseSync(file, { readOnly: true, timeout: 1500 });
+  try {
+    const row = db.prepare('SELECT data FROM workspace WHERE id = 1').get();
+    const workspace = JSON.parse(row.data);
+    return {
+      enabledAppSkills: new Set((workspace.skills || []).filter(skill => skill.enabled !== false).map(skill => skill.id)),
+      disabledSystemSkills: workspace.settings?.disabledSystemSkills || [],
+    };
+  } finally {
+    db.close();
+  }
+}
+
+module.exports = { WorkspaceDatabase, messageData, messageView, readMessageDetail, readSkillAvailability };

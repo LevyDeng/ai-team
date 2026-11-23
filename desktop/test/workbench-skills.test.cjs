@@ -1,5 +1,6 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),os=require('node:os'),net=require('node:net');
 const {Store}=require('../workbench/store.cjs');
+const {readSkillAvailability}=require('../workbench/workspace-db.cjs');
 const {Skills,parseCommand}=require('../workbench/skills.cjs');
 const {createTools}=require('../workbench/mcp-tools.cjs');
 const {expose,route}=require('../reverse-routes.cjs');
@@ -21,6 +22,30 @@ test('Global skill definitions persist without plaintext keys, and commands cann
   assert.throws(()=>f.service.save({name:'Image',command:'image',kind:'prompt',instructions:'Duplicate'}),/already used/);
   f.service.save({...f.service.read(saved.id),clearKey:true});assert.equal(f.service.list()[0].hasKey,false);
 });
+test('A skill toggle preserves its definition and blocks a running executor with an older workspace snapshot', async t => {
+  const f = fixture(t);
+  const skill = f.prompt();
+  const filename = path.join(f.service.root, skill.id, 'SKILL.md');
+  fs.utimesSync(filename, new Date(1000000), new Date(1000000));
+  const original = fs.readFileSync(filename);
+  const originalMtime = fs.statSync(filename).mtimeMs;
+  const executor = new Skills({
+    store: { directory: f.directory, state: structuredClone(f.store.state) },
+    vault: f.vault, nativeImage: {}, readAvailability: () => readSkillAvailability(f.store.file),
+  });
+  t.after(() => executor.close());
+  const scope = executor.scope(f.chat.id, 'fixture-role', 'fixture-task');
+  assert.equal((await executor.call(scope, 'skill_read', { skill: skill.command })).command, skill.command);
+  f.service.setEnabled(skill.id, false);
+  assert.deepEqual(fs.readFileSync(filename), original);
+  assert.equal(fs.statSync(filename).mtimeMs, originalMtime);
+  assert.throws(() => parseCommand('/review Example', f.service.list(), { rejectDisabled: true }), /已停用/);
+  assert(!executor.tools().some(tool => tool.inputSchema.properties.skill?.enum.includes(skill.command)));
+  await assert.rejects(executor.call(scope, 'skill_run', { skill: skill.command, prompt: 'Example' }), /unavailable/);
+  f.service.setEnabled(skill.id, true);
+  assert.equal((await executor.call(scope, 'skill_read', { skill: skill.command })).command, skill.command);
+});
+
 test('Each user task shares the three-call budget across roles and rounds; read is free, recursion is blocked',async t=>{
   const f=fixture(t),skill=f.prompt();const a=f.service.scope(f.chat.id,'first','task'),b=f.service.scope(f.chat.id,'second','task');
   for(let n=0;n<6;n++)await f.service.call(a,'skill_read',{skill:skill.command});

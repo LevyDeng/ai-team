@@ -10,6 +10,7 @@ const { Backend } = require('../backend.cjs');
 const { ProxyRouter } = require('./proxy.cjs');
 const { Agents } = require('./agents.cjs');
 const { Skills } = require('./skills.cjs');
+const { readSkillAvailability } = require('./workspace-db.cjs');
 
 function launch(directory) {
   const workspace = path.dirname(path.dirname(directory));
@@ -43,7 +44,10 @@ function launch(directory) {
     const network = new ProxyRouter(store, electron);
     const fetch = (input, options) => net.fetch(input, options);
     const agents = new Agents(store, vault, locations, save, {fetch, network});
-    const skills = new Skills({store, vault, network, nativeImage, locations, fetch, emit:save});
+    const skills = new Skills({
+      store, vault, network, nativeImage, locations, fetch, emit:save,
+      readAvailability: () => readSkillAvailability(path.join(workspace, 'workspace.sqlite')),
+    });
     agents.skills = skills;
     skills.begin(id);
     try {

@@ -175,9 +175,9 @@ class SystemSkills {
     }));
   }
 
-  list(appSkills) {
+  list(appSkills, disabledIds = this.store.state.settings.disabledSystemSkills) {
     const used = new Set(appSkills.flatMap(skill => [skill.command, skill.name]));
-    const disabled = new Set(this.store.state.settings.disabledSystemSkills || []);
+    const disabled = new Set(disabledIds || []);
     return this.sources().flatMap(source => {
       const cached = this.catalog.get(source.id);
       if (!source.enabled || !source.locationName || cached?.locationId !== source.locationId || cached.directory !== source.directory) return [];
@@ -203,11 +203,17 @@ class SystemSkills {
   setEnabled(skill, enabled) {
     this.read(skill);
     if (typeof enabled !== 'boolean') throw new Error('Choose whether to enable this skill.');
-    const disabled = new Set(this.store.state.settings.disabledSystemSkills || []);
+    const previous = this.store.state.settings.disabledSystemSkills;
+    const disabled = new Set(previous || []);
     if (enabled) disabled.delete(skill.id);
     else disabled.add(skill.id);
     this.store.state.settings.disabledSystemSkills = [...disabled];
-    this.store.save();
+    try {
+      this.store.save();
+    } catch (error) {
+      this.store.state.settings.disabledSystemSkills = previous;
+      throw error;
+    }
   }
 }
 

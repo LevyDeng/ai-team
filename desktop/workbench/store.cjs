@@ -247,7 +247,7 @@ class Store {
     catch (error) { this.state.roles[index] = previous; throw error; }
     return next;
   }
-  saveLocation(value) {
+  prepareLocation(value) {
     if (value.id === 'local') throw new Error('The built-in local location cannot be edited.');
     const previous = value.id ? this.get('locations', value.id) : { id: id() };
     if (!text(value.name) || !/^[a-zA-Z0-9._:-]+$/.test(value.host || '') || !/^[a-zA-Z0-9._-]+$/.test(value.username || '') || !Number.isInteger(value.port) || value.port < 1 || value.port > 65535) throw new Error('Enter a name, SSH host, user, and valid port.');
@@ -259,10 +259,23 @@ class Store {
     }
     // A managed location is bound to the original .env, never silently retarget it.
     if (previous.managed && ['host', 'username', 'port', 'keyPath'].some(k => next[k] !== previous[k])) throw new Error('Edit the original Relay server connection from the classic interface. Add a new location for another server.');
-    const index = this.state.locations.findIndex(l => l.id === next.id);
     next.proxy = proxySettings(value.proxy ?? previous.proxy);
+    return next;
+  }
+  saveLocation(value) {
+    return this.commitLocation(this.prepareLocation(value));
+  }
+  commitLocation(next) {
+    const index = this.state.locations.findIndex(l => l.id === next.id);
+    const previous = this.state.locations[index];
     if (index < 0) this.state.locations.push(next); else this.state.locations[index] = next;
-    this.save(); return next;
+    try {
+      this.save();
+    } catch (error) {
+      if (index < 0) this.state.locations.pop(); else this.state.locations[index] = previous;
+      throw error;
+    }
+    return next;
   }
   saveLocationProxy(id, value) { const location = this.get('locations', id); location.proxy = proxySettings(value); this.save(); return location; }
   saveProject(value) {

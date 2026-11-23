@@ -866,10 +866,10 @@ function openGroupOrder() {
 async function editSkill(id){
   const version=++skillEditorVersion;skillId=id;const draft=id?await api['skill-get'](id):{name:'',command:'',description:'',kind:'prompt',enabled:true,instructions:'',provider:'openai'};if(page!=='skills'||version!==skillEditorVersion)return;renderList();
   if(draft.source){
-    window.deskSkills.system($('editor-view'),draft,enabled=>action(()=>api['skill-system-enabled'](id,enabled)));
+    window.deskSkills.system($('editor-view'),draft,enabled=>action(()=>api['skill-enabled'](id,enabled)));
     return;
   }
-  window.deskSkills.editor($('editor-view'),draft,{error:error=>toast(uiError(error)),models:(value,options)=>api['skill-models'](value,options),save:async value=>{const saved=await api['skill-save'](value);state=await api.snapshot();renderSidebar();await editSkill(saved.id);toast('技能已保存');},remove:async id=>{await api['skill-delete'](id);state=await api.snapshot();skillId=state.skills[0]?.id;renderSidebar();await editSkill(skillId);}});
+  window.deskSkills.editor($('editor-view'),draft,{error:error=>toast(uiError(error)),setEnabled:enabled=>api['skill-enabled'](id,enabled),models:(value,options)=>api['skill-models'](value,options),save:async value=>{const saved=await api['skill-save'](value);state=await api.snapshot();renderSidebar();await editSkill(saved.id);toast('技能已保存');},remove:async id=>{await api['skill-delete'](id);state=await api.snapshot();skillId=state.skills[0]?.id;renderSidebar();await editSkill(skillId);}});
 }
 function openSkillSources(){
   const sources=state.skillSources||[];
@@ -1885,10 +1885,71 @@ function editLocation(l) {
   $('editor-view').innerHTML = `<form class="editor simple-form" id="location-form"><header><h1>${local ? '本机' : l ? '编辑位置' : '添加位置'}</h1><button type="submit" class="primary">保存位置</button></header><label class="field"><span>位置名称</span><input id="l-name" value="${esc(l?.name || '')}" ${local ? 'disabled' : 'required'} placeholder="例如：开发服务器"></label><div class="setting-card"><h3>1. 连接方式</h3><div class="form-grid"><label>连接方式<select disabled><option>${local ? '本地（内置）' : 'SSH'}</option></select></label><label>操作系统<select id="l-os" ${local || managed ? 'disabled' : ''}>${options([['linux','Linux'],['windows','Windows']],l?.os || 'linux')}</select></label>${!local ? `<label>主机地址<input id="l-host" value="${esc(l?.host || '')}" required ${managed ? 'disabled' : ''}></label><label>端口<input id="l-port" type="number" value="${l?.port || 22}" min="1" max="65535" required ${managed ? 'disabled' : ''}></label><label>SSH 用户<input id="l-user" value="${esc(l?.username || '')}" required ${managed ? 'disabled' : ''}></label><label>私钥口令（可选）<input id="l-passphrase" type="password" autocomplete="new-password" placeholder="留空保持不变"></label><label class="wide">私钥路径（留空使用 SSH Agent）<input id="l-key" value="${esc(l?.keyPath || '')}" ${managed ? 'disabled' : ''}></label>` : ''}</div>${managed ? '<p style="margin-top:15px">地址和密钥在原界面修改。共享 MCP／隧道时，请保持提供服务的界面运行。</p>' : ''}</div><div class="setting-card"><h3>2. Agent 操控方式</h3><p>SSH 用于命令、文件和终端；Windows-MCP 用于桌面操作。</p><label class="field"><span>操控方式</span><select id="l-control" ${local ? 'disabled' : ''}>${options(local ? [['ssh','本地命令 / 终端']] : [['ssh','SSH 命令与文件'],['windows-mcp','Windows-MCP 桌面操作']],l?.control || 'ssh')}</select></label>${!local ? `<label class="field"><span>Windows-MCP 地址（选择 MCP 时必填）</span><input id="l-mcp" value="${esc(l?.mcpUrl || '')}" placeholder="http://127.0.0.1:8111/mcp"></label><label class="field"><span>MCP 访问令牌</span><input id="l-token" type="password" autocomplete="new-password" placeholder="留空保持已保存值"></label>` : ''}<p>MCP 地址须能从 Agent 所在机器访问。</p></div><div class="setting-card"><h3>3. 模型服务代理</h3><p>角色默认使用此代理，可单独选择直连。</p><label class="field"><span>默认代理方式</span><select id="l-proxy-mode">${options([['system',local ? '跟随 Windows 系统代理' : '继承服务器代理环境变量'],['direct','不使用代理（直连）'],['custom','自定义 HTTP / HTTPS 代理']],l?.proxy?.mode || 'system')}</select></label><label class="field" id="l-proxy-address"><span>代理地址</span><input id="l-proxy-url" value="${esc(l?.proxy?.url || '')}" placeholder="http://127.0.0.1:7890"></label><p>${local ? '127.0.0.1 指当前电脑。' : '127.0.0.1 指服务器自身。'}支持 HTTP／HTTPS，无账号密码认证。</p></div><div id="location-test-result" class="hint"></div><div class="form-actions"><button type="button" id="location-test">${icon('refresh')}测试连接</button></div>${l&&!local&&!managed?`<section class="destructive-settings"><h3>危险操作</h3>${destructiveSetting('location-delete','删除位置','此位置将从列表移除。正在使用它的角色或项目需要先改用其他位置。')}</section>`:''}</form>`;
   const proxyValue = () => ({ mode: $('l-proxy-mode').value, url: $('l-proxy-url').value });
   $('l-proxy-mode').onchange = () => { $('l-proxy-address').hidden = $('l-proxy-mode').value !== 'custom'; }; $('l-proxy-mode').onchange();
-  const save = async () => local ? api['location-proxy-save'](l.id, proxyValue()) : api['location-save']({ id: l?.id, name: $('l-name').value, host: $('l-host').value, port: Number($('l-port').value), username: $('l-user').value, keyPath: $('l-key').value, passphrase: $('l-passphrase').value, os: $('l-os').value, control: $('l-control').value, mcpUrl: $('l-mcp').value, mcpToken: $('l-token').value, proxy: proxyValue() });
+  const locationValue = () => ({
+    id: l?.id, name: $('l-name').value, host: $('l-host').value.trim(), port: Number($('l-port').value),
+    username: $('l-user').value.trim(), keyPath: $('l-key').value, passphrase: $('l-passphrase').value,
+    os: $('l-os').value, control: $('l-control').value, mcpUrl: $('l-mcp').value,
+    mcpToken: $('l-token').value, proxy: proxyValue(),
+  });
+  const save = async () => local ? api['location-proxy-save'](l.id, proxyValue()) : api['location-save'](locationValue());
   $('location-form').onsubmit = e => { e.preventDefault(); action(async () => { const next = await save(); toast('位置已保存'); editLocation(locationOf(next.id)); }); };
   $('location-test').onclick = () => action(async () => { $('location-test-result').textContent = '正在连接…'; const next = await save(); const result = await api['location-test'](next.id); $('location-test-result').textContent = result; });
+  if (!local && !managed) bindSshKeySetup(locationValue);
   if ($('location-delete')) $('location-delete').onclick = () => action(async () => { if (confirm('删除这个位置？')) { await api['location-delete'](l.id); editLocation(state.locations[0]); } });
+}
+function bindSshKeySetup(locationValue) {
+  const form = $('location-form');
+  const status = $('location-test-result');
+  status.setAttribute('role', 'status');
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.id = 'location-setup-ssh-key';
+  button.textContent = '配置免密登录';
+  $('location-test').after(button);
+  const os = $('l-os');
+  const updateButton = () => { button.hidden = os.value !== 'linux'; };
+  os.addEventListener('change', updateButton);
+  updateButton();
+
+  async function setup(value, password) {
+    const controls = [...form.elements].filter(control => !control.disabled);
+    for (const control of controls) control.disabled = true;
+    status.textContent = password ? '正在配置并验证公钥登录…' : '正在检查本机 SSH 密钥…';
+    try {
+      const result = await api['location-setup-ssh-key'](value, password);
+      if (!form.isConnected) return;
+      if (result.needsPassword) {
+        status.textContent = '';
+        dialog(
+          '<h2>输入 SSH 登录密码</h2><p>' + esc(value.username + '@' + value.host + ':' + value.port) +
+          '</p><p>应用会用此密码登录一次，将公钥添加到这个账号。密码仅用于本次连接。</p>' +
+          '<label class="field">服务器登录密码<input id="ssh-setup-password" type="password" autocomplete="off" maxlength="4096" required autofocus></label>',
+          () => {
+            const field = $('ssh-setup-password');
+            const entered = field.value;
+            field.value = '';
+            $('dialog').close();
+            void setup(value, entered);
+            return false;
+          },
+          '配置免密登录',
+        );
+        const field = $('ssh-setup-password');
+        $('dialog').addEventListener('close', () => { field.value = ''; }, { once: true });
+        return;
+      }
+      editLocation(result.location);
+      toast('SSH 免密登录已配置并通过验证。');
+    } catch (error) {
+      if (form.isConnected) status.textContent = '配置免密登录失败。' + uiError(error);
+    } finally {
+      for (const control of controls) control.disabled = false;
+    }
+  }
+
+  button.onclick = () => {
+    if (form.reportValidity()) void setup(locationValue());
+  };
 }
 function renderAbout() {
   claudeUpdateView = undefined;

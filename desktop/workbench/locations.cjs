@@ -50,25 +50,50 @@ class Locations {
     this.pending.set(id, task); this.emit(); return task;
   }
   async open(location) {
-    const client = new Client(); const hostKey = `[${location.host}]:${location.port}`;
+    const credentials = location.keyPath ? { privateKey: fs.readFileSync(location.keyPath), passphrase: this.vault.get('ssh:' + location.id) || undefined } : { agent: sshAgent() };
+    const client = await this.openClient(location, credentials);
     client.on('tcp connection',(details,accept,reject)=>{if(!require('../reverse-routes.cjs').route(client,details,accept,reject))reject();});
-    let changed = false;
-    await new Promise((resolve, reject) => {
-      client.once('ready', resolve).once('error', reject);
-      const credentials = location.keyPath ? { privateKey: fs.readFileSync(location.keyPath), passphrase: this.vault.get('ssh:' + location.id) || undefined } : { agent: process.env.SSH_AUTH_SOCK || '\\\\.\\pipe\\openssh-ssh-agent' };
-      client.connect({ host: location.host, port: location.port, username: location.username, ...credentials, readyTimeout: 20000, keepaliveInterval: 15000, keepaliveCountMax: 3,
-        hostVerifier: (key, callback) => {
-          const fingerprint = 'SHA256:' + crypto.createHash('sha256').update(key).digest('base64').replace(/=+$/, '');
-          if (this.known[hostKey]) { changed = this.known[hostKey] !== fingerprint; callback(!changed); return; }
-          this.confirmHost(location, fingerprint).then(accepted => {
-            if (accepted) { this.known[hostKey] = fingerprint; atomic(this.knownFile, this.known); }
-            callback(accepted);
-          }).catch(() => callback(false));
-        } });
-    }).catch(error => { client.end(); throw new Error(changed ? 'SSH host key changed. Verify the new fingerprint before reconnecting.' : error.message); });
     this.clients.set(location.id, client);
     client.on('close', () => { if (this.clients.get(location.id) === client) this.clients.delete(location.id); this.emit(); });
-    client.on('error', () => {}); this.emit(); return client;
+    this.emit(); return client;
+  }
+  async openClient(location, credentials, configure = () => {}) {
+    const client = new Client();
+    const hostKey = '[' + location.host + ']:' + location.port;
+    let hostError;
+    configure(client);
+    try {
+      await new Promise((resolve, reject) => {
+        client.once('ready', resolve);
+        client.on('error', reject);
+        client.once('close', () => reject(new Error('SSH 连接在验证完成前已关闭。')));
+        client.connect({
+          host: location.host, port: location.port, username: location.username, ...credentials,
+          readyTimeout: 20000, keepaliveInterval: 15000, keepaliveCountMax: 3,
+          hostVerifier: (key, callback) => {
+            const fingerprint = 'SHA256:' + crypto.createHash('sha256').update(key).digest('base64').replace(/=+$/, '');
+            const verify = async () => {
+              if (!this.known[hostKey] && !await this.confirmHost(location, fingerprint)) {
+                throw new Error('已取消 SSH 主机指纹确认。');
+              }
+              if (this.known[hostKey] && this.known[hostKey] !== fingerprint) {
+                throw new Error('SSH 主机指纹已变化，请核实服务器身份。');
+              }
+              if (!this.known[hostKey]) {
+                const known = { ...this.known, [hostKey]: fingerprint };
+                atomic(this.knownFile, known);
+                this.known = known;
+              }
+            };
+            verify().then(() => callback(true), error => { hostError = error; callback(false); });
+          },
+        });
+      });
+      return client;
+    } catch (error) {
+      client.end();
+      throw hostError || error;
+    }
   }
   disconnect(id) { const client = this.clients.get(id); this.clients.delete(id); client?.end(); this.emit(); }
   async exec(id, command, timeout = 20000) {
@@ -143,4 +168,6 @@ class Locations {
   }
   close() { for (const id of this.clients.keys()) this.disconnect(id); }
 }
-module.exports = { Vault, Locations };
+function sshAgent() { return process.env.SSH_AUTH_SOCK || '\\\\.\\pipe\\openssh-ssh-agent'; }
+
+module.exports = { Vault, Locations, execOn, sshAgent };
