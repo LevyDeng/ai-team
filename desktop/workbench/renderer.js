@@ -2014,6 +2014,15 @@ function renderAbout() {
           <button type="button" id="about-repo-link" class="quiet about-repo-button">${icon('brand-github')}GitHub 仓库 · LevyDeng/ai-team${icon('external-link')}</button>
         </div>
       </div>
+      <div class="setting-card about-notice" aria-labelledby="about-notice-title">
+        <h3 id="about-notice-title" class="about-section-title">${icon('info-circle')}合规提示与免责声明</h3>
+        <ul class="about-notice-list">
+          <li><strong>仅作本地工作台</strong>：仅调用你自行安装的官方 CLI、官方协议入口（如 ACP）或官方 API；不内置、不代管、不转售账号，也不导出、复制或解密其他客户端登录凭据。</li>
+          <li><strong>订阅账号编排风险</strong>：部分厂商对个人订阅账号接入第三方编排、多轮自动讨论或工作流有严格限制（如 Google Antigravity、Anthropic Claude 等均已收紧条款与风控），存在被限流、拦截或账号受限的风险，使用前请自行核对各厂商最新条款。</li>
+          <li><strong>使用注意事项</strong>：多轮群聊、自动工作流或较高频率调用优先使用官方按量付费 API Key（或厂商允许的按量追加计费），谨慎用主力个人订阅跑重度自动编排；勿用于多人共享账号、号池轮询、商业转售或绕过限流；开启写文件、命令执行或桌面操控权限时请核对任务范围与目录。</li>
+        </ul>
+        <p class="hint">免责声明：本项目与 OpenAI、Anthropic、Google、Cursor、Moonshot、腾讯等任何模型或工具厂商均无官方合作、关联或背书。本软件按“现状”提供，用户需自行遵守所接入服务的条款及适用法律法规；因账号使用方式、额度消耗、API 计费、账号限流／封禁或命令执行产生的任何损失与后果，均由用户自行承担。</p>
+      </div>
       <div class="setting-card about-support">
         <h3 class="about-support-title">${icon('heart')}支持与打赏</h3>
         <p class="about-summary">这是一个开源免费的个人项目。如果它帮你省下了一些时间和折腾成本，欢迎请作者喝杯咖啡，感谢每一份支持。</p>

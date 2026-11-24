@@ -105,6 +105,8 @@ async function run({window, store, app, services, fixture, js, mode}) {
       await js(`document.querySelector('[data-settings-section="about"]').click()`);
       assert.equal(await js(`$('about-title').textContent`), '关于');
       assert.equal(await js(`document.querySelector('.about-intro .pill').textContent`), 'v' + require('../package.json').version);
+      assert.equal(await js(`$('about-notice-title').textContent.trim()`), '合规提示与免责声明');
+      assert.equal(await js(`document.querySelectorAll('.about-notice-list li').length`), 3);
       assert.deepEqual(await js(`Promise.all([...document.querySelectorAll('.support-code img')].map(img => img.complete ? Promise.resolve() : new Promise(resolve => { img.onload = resolve; img.onerror = resolve; }))).then(() => [...document.querySelectorAll('.support-code img')].map(img => img.naturalWidth > 0))`), [true, true]);
       await js(`$('about-github').click()`);
       await until(() => Boolean(opened));
