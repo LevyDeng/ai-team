@@ -79,9 +79,10 @@ const emit = () => {
 };
 const sendMessage = ({ chatId, message }) => {
   const chat = chatById(chatId);
-  if (!chat) return;
+  if (!chat || message.workflowInstruction) return;
   const value = { chatId, message: messageView(message), updatedAt: chat.updatedAt,
-    atEnd: chat.messages.at(-1)?.id === message.id, lastMessage: messagePreview(chat.messages.findLast(item => !item.moderatorTask)) };
+    atEnd: chat.messages.findLast(item=>!item.workflowInstruction)?.id === message.id,
+    lastMessage: messagePreview(chat.messages.findLast(item => !item.moderatorTask&&!item.workflowInstruction)) };
   for (const w of BrowserWindow.getAllWindows()) w.webContents.send('desk:message', value);
 };
 const publishMessage = event => {
@@ -104,9 +105,11 @@ const modelCatalogs = new ModelCatalogs({ directory: data, store, vault, locatio
 const accountUsage = new Usage({store,vault,agents,locations,backend,network,emit});
 const quotaConsole=new (require('./quota-console.cjs').QuotaConsole)({store,agents,network,spawn:(...args)=>require('node-pty').spawn(...args)});
 const interactiveStates=new Map();
-const interactiveAgents=new (require('./interactive-agent.cjs').InteractiveAgents)({store,vault,agents,locations,network,busy:id=>running.has(id)||inputQueue.dispatching.has(id),count:()=>running.size,spawn:(...args)=>require('node-pty').spawn(...args),message:sendMessage,completed:chatId=>notifications.complete(chatId),emit:event=>{for(const w of BrowserWindow.getAllWindows())w.webContents.send('desk:agent-terminal',event);if(event.type==='state'){const info=event.info,previous=interactiveStates.get(info.id);interactiveStates.set(info.id,info.taskState);if(['running','waiting'].includes(previous)&&['completed','interrupted','failed'].includes(info.taskState))inputQueue.settled(info.chatId,info.taskState==='completed'?'complete':info.taskState==='interrupted'?'paused':'failed');if(info.state==='ended')inputQueue.pause(info.chatId,'terminal_ended');inputQueue.kick(info.chatId);emit();updateBadges();}}});
+const interactiveAgents=new (require('./interactive-agent.cjs').InteractiveAgents)({store,vault,agents,locations,network,busy:id=>running.has(id)||inputQueue.dispatching.has(id)||Boolean(groupWorkflows.activeRun(chatById(id)))||chatById(id)?.workflowRuns?.some(run=>run.stopUnconfirmed),count:()=>running.size,spawn:(...args)=>require('node-pty').spawn(...args),message:sendMessage,completed:chatId=>notifications.complete(chatId),emit:event=>{for(const w of BrowserWindow.getAllWindows())w.webContents.send('desk:agent-terminal',event);if(event.type==='state'){const info=event.info,previous=interactiveStates.get(info.id);interactiveStates.set(info.id,info.taskState);if(['running','waiting'].includes(previous)&&['completed','interrupted','failed'].includes(info.taskState))inputQueue.settled(info.chatId,info.taskState==='completed'?'complete':info.taskState==='interrupted'?'paused':'failed');if(info.state==='ended')inputQueue.pause(info.chatId,'terminal_ended');inputQueue.kick(info.chatId);emit();updateBadges();}}});
 const skills=new (require('./skills.cjs').Skills)({store,vault,network,nativeImage,locations,fetch:providerFetch,emit:sendMessage});agents.skills=skills;
-function inputBusy(id){return running.has(id)||store.state.chats.some(chat=>chat.id===id&&chat.localTask?.stopUnconfirmed)||[...skills.jobs.values()].some(job=>job.chatId===id)||interactiveAgents.list().some(entry=>entry.chatId===id&&entry.state!=='ended'&&!(entry.state==='ready'&&entry.inputReady&&!['running','waiting'].includes(entry.taskState)));}
+function inputBusy(id, ignoreWorkflowQueue=false){return running.has(id)||store.state.chats.some(chat=>chat.id===id&&
+  (chat.localTask?.stopUnconfirmed||chat.workflowRuns?.some(run=>run.stopUnconfirmed||!ignoreWorkflowQueue&&run.status==='queued')))||
+  [...skills.jobs.values()].some(job=>job.chatId===id)||interactiveAgents.list().some(entry=>entry.chatId===id&&entry.state!=='ended'&&!(entry.state==='ready'&&entry.inputReady&&!['running','waiting'].includes(entry.taskState)));}
 function forceStopTarget(chat, terminals) {
   const job=running.get(chat.id);
   if(job?.forceStopId)return {id:job.forceStopId, stopping:Boolean(job.forceStopping)};
@@ -136,7 +139,7 @@ function snapshot() {
   const value = store.summary();
   value.phoneLink = phoneLink.status();
   value.roles = value.roles.map(r => ({ ...r, avatarId: r.avatarId || avatars.defaultId(r.engine), avatarUrl: avatars.get(r.avatarId || avatars.defaultId(r.engine)), hasKey: vault.has('api:' + r.id), available: r.engine === geminiWebEngine || r.locationId !== 'local' || (() => { try { findExecutable(r); return true; } catch { return false; } })() }));
-  value.connectionStatus = locations.status(); value.running = Object.fromEntries([...running].map(([id, job]) => [id, { roleId: job.roleId, round: job.round, rounds: job.rounds, phase:job.phase||'participant', stopping: job.controller.signal.aborted }]));
+  value.connectionStatus = locations.status(); value.running = Object.fromEntries([...running].map(([id, job]) => [id, { roleId: job.roleId, round: job.round, rounds: job.rounds, phase:job.phase||'participant', stopping: job.controller.signal.aborted, workflowRunId:job.workflowRunId }]));
   value.inputBusy=Object.fromEntries(value.chats.map(chat=>[chat.id,inputBusy(chat.id)]));
   const terminals=interactiveAgents.list();
   value.forceStops=Object.fromEntries(value.chats.map(chat=>[chat.id,forceStopTarget(chat,terminals)]));
@@ -148,7 +151,7 @@ function snapshot() {
   value.appVersion = require('../package.json').version;
   return value;
 }
-const quitBlockedCommands = new Set(['workflow-create', 'workflow-resume', 'workflow-plan', 'terminal-open', 'role-login']);
+const quitBlockedCommands = new Set(['workflow-create', 'workflow-resume', 'workflow-plan', 'workflow-group-start', 'workflow-group-resume', 'terminal-open', 'role-login']);
 function handle(name, fn, withSender=false) {
   ipcMain.handle('desk:' + name, async (event, ...args) => {
     if (event.senderFrame?.url !== pathToFileURL(path.join(__dirname, 'index.html')).href) throw new Error('Untrusted sender.');
@@ -357,6 +360,8 @@ const workflowEngine=require('./workflow.cjs');
 const generatedWorkflows=require('./generated-workflow.cjs');
 const workflowRatings=require('./workflow-ratings.js');
 const graphWorkflows=require('./graph-workflow.cjs');
+const structuredWorkflows=require('./structured-workflow.cjs');
+const groupWorkflows=require('./group-workflows.cjs');
 const engineForWorkflow = flow => flow.type === 'graph' ? graphWorkflows : flow.type === 'generated' ? generatedWorkflows : workflowEngine;
 handle('workflow-template-save', value=>{
   const template=graphWorkflows.validate(value);
@@ -379,7 +384,7 @@ function workflowProjectRoles(project, roles = project.roleIds.map(id => store.s
 }
 
 function workflowRoleIds(flow) {
-  if (flow.type==='graph') return [...new Set(flow.nodes.map(node=>node.roleId))];
+  if (flow.type==='graph') return [...new Set(structuredWorkflows.allNodes(flow).map(node=>node.roleId).filter(Boolean))];
   const ids = flow.type === 'generated' ? flow.nodes.flatMap(node => node.roleIds || []) : [...flow.teams.implement, ...flow.teams.review];
   if (flow.moderatorRoleId) ids.push(flow.moderatorRoleId);
   return [...new Set(ids)];
@@ -421,17 +426,23 @@ handle('workflow-plan-cancel',(projectId,requestId)=>{
 });
 function pumpWorkflows(){
   if(quitting||running.size+interactiveAgents.list().filter(entry=>entry.state!=='ended').length>=store.state.settings.maxJobs)return;
-  if([...running.values()].some(job=>job.workflow))return;
-  const chat=store.state.chats.filter(item=>item.workflow?.status==='queued'&&!item.disbandedAt&&!inputBusy(item.id))
-    .sort((a,b)=>a.workflow.createdAt-b.workflow.createdAt)[0];
-  if(!chat)return;
-  const flow=chat.workflow,controller=new AbortController();
+  const legacyBusy=[...running.values()].some(job=>job.workflow&&!job.workflowRunId);
+  const next=store.state.chats.filter(item=>!item.disbandedAt&&!inputBusy(item.id,true)&&!inputQueue.dispatching.has(item.id))
+    .map(chat=>({chat,flow:chat.workflow?(legacyBusy?undefined:chat.workflow):groupWorkflows.activeRun(chat)}))
+    .filter(({flow})=>flow?.status==='queued').sort((a,b)=>a.flow.createdAt-b.flow.createdAt)[0];
+  if(!next)return;
+  const {chat,flow}=next, controller=new AbortController();
+  const embedded=Boolean(flow.id);
+  const executionChat=embedded?{...chat,workflow:flow,
+    get messages(){return chat.messages.filter(message=>message.workflowRunId===flow.id);}}:chat;
   const generated = Array.isArray(flow.nodes);
-  const job={workflow:true,controller,forceStopId:randomUUID(),roleIds:chat.roleIds,round:generated?flow.nodeIndex+1:flow.round,rounds:generated?flow.nodes.length:flow.limit};
+  const job={workflow:true,workflowRunId:embedded?flow.id:undefined,controller,forceStopId:randomUUID(),
+    roleIds:embedded?workflowRoleIds(flow):chat.roleIds,round:generated?(flow.nodeIndex ?? 0)+1:flow.round,rounds:generated?flow.nodes.length:flow.limit};
   running.set(chat.id,job);
-  const save=()=>{store.save();emit();};
+  setImmediate(pumpWorkflows);
+  const save=()=>{if(!embedded||!groupWorkflows.publish(store,chat,flow))store.save();emit();};
   const currentProject = () => store.get('projects',chat.projectId);
-  engineForWorkflow(flow).run(chat,{
+  engineForWorkflow(flow).run(executionChat,{
     signal:controller.signal,save,
     roleEnabled: id => store.state.roles.some(role => role.id === id && role.enabled !== false),
     roles:() => workflowProjectRoles(currentProject()),
@@ -464,14 +475,14 @@ function pumpWorkflows(){
         message.status = 'failed'; message.note = error.message; message.text = '';
       }
     } : undefined,
-    async turn(attempt,prompt,signal) {
-      job.phase='participant';job.roleId=attempt.roleId;job.round=generated?attempt.nodeIndex+1:attempt.round;job.taskId=attempt.id;
+    async turn(attempt,prompt,signal,structuredNode) {
+      job.phase='participant';job.roleId=attempt.roleId;job.round=generated?(attempt.nodeIndex ?? flow.attempts.length-1)+1:attempt.round;job.taskId=attempt.id;
       const role=store.state.roles.find(r=>r.id===attempt.roleId);
       attempt.roleName=role?.name||attempt.roleId;
       if (role?.enabled === false) return {status:'failed',workflowSubmitted:false,errorCode:'ROLE_UNAVAILABLE',note:'角色「'+role.name+'」已禁用。'};
       if(!role||role.engine===geminiWebEngine)return {status:'failed',workflowSubmitted:false,errorCode:'ROLE_UNAVAILABLE',note:'Role unavailable for unattended execution.'};
       const project=currentProject();
-      if (flow.type==='graph' && flow.nodes[flow.nodeIndex].localOnly && role.locationId!=='local') {
+      if (flow.type==='graph' && (structuredNode || flow.nodes[flow.nodeIndex]).localOnly && role.locationId!=='local') {
         return {status:'failed',note:'本机验证节点需要本机角色。'};
       }
       if (generated && !workflowProjectRoles(project, flow.selection?.via === 'priority' ? [role] : undefined).some(candidate=>candidate.id===role.id)) {
@@ -480,24 +491,172 @@ function pumpWorkflows(){
       if (!project.directories.some(directory => directory.locationId === role.locationId)) {
         return {status:'failed',workflowSubmitted:false,errorCode:'ROLE_UNAVAILABLE',note:formatMissingProjectDirectories(project, [role], locationName)};
       }
-      if (!chat.roleIds.includes(role.id)) chat.roleIds.push(role.id);
-      store.message(chat.id,{kind:'user',text:prompt,status:'accepted',workflowAttemptId:attempt.id});
+      if (!embedded&&!chat.roleIds.includes(role.id)) chat.roleIds.push(role.id);
+      const path=attempt.path || (generated?[{title:flow.nodes[attempt.nodeIndex].title}]:
+        [{title:attempt.stage==='review'?'验收':'执行',round:attempt.round}]);
+      const step=embedded?{workflowRunId:flow.id,workflowTitle:flow.title,workflowPath:path}:{};
+      store.message(chat.id,{kind:'user',text:prompt,status:'accepted',workflowAttemptId:attempt.id,
+        ...step,...(embedded?{workflowInstruction:true}:{})});
       emit();
       const closeSkills = () => skills.closeTask(attempt.id);
       signal.addEventListener('abort', closeSkills, {once:true});
       try {
-        return await agents.run(chat.id,effectiveRole(chat,role),project,signal,false,{relayReplies:true,workflowAttemptId:attempt.id,taskId:attempt.id});
+        const context=embedded?{workflowContextRunId:flow.id,workflowTitle:flow.title,workflowPath:path,
+          messages:groupWorkflows.context(chat,flow,attempt.id),ignoreModeratorMemory:true,discussion:undefined}:{};
+        const receipt=await agents.run(chat.id,effectiveRole(chat,role),project,signal,false,{...context,relayReplies:true,workflowAttemptId:attempt.id,taskId:attempt.id});
+        if (embedded&&receipt.stopConfirmed===false&&receipt.status!=='complete'&&
+            (signal.aborted||flow.type==='graph'||!workflowEngine.unavailable(receipt))) flow.stopUnconfirmed=true;
+        return receipt;
       } finally {
         signal.removeEventListener('abort', closeSkills);
       }
     },
-  }).catch(error=>{flow.status='needs_check';flow.reason=error.message;}).finally(()=>{
+  }).catch(error=>{
+    if (!structuredWorkflows.publishedStatuses.has(flow.status)) {
+      flow.status='needs_check';flow.reason='工作流执行中断，请查看运行记录后重试。\n'+error.message;
+    }
+  }).finally(()=>{
     running.delete(chat.id);
-    if (quitting || !notifications.complete(chat.id,{workflow:true})) { emit();updateBadges(); }
-    store.save();
+    try {
+      if (!embedded||!groupWorkflows.publish(store,chat,flow))store.save();
+    } catch (error) {
+      console.error('Could not save workflow completion:',error);
+      if (!flow.publishedAt) {flow.status='needs_check';flow.reason='未能保存运行结果，请检查工作区存储后重试。';}
+    }
+    if (quitting || !notifications.complete(chat.id,{workflow:true,run:embedded?flow:undefined})) { emit();updateBadges(); }
+    if (embedded) inputQueue.kick(chat.id);
     setImmediate(pumpWorkflows);
   });
 }
+
+function groupWorkflowChat(id) {
+  const chat=activeChat(id);
+  if (chat.workflow) throw new Error('请在普通群聊的工作流面板中操作。');
+  return chat;
+}
+
+function groupWorkflowRun(id, runId) {
+  const chat=groupWorkflowChat(id), flow=chat.workflowRuns?.find(run=>run.id===runId);
+  if (!flow) throw new Error('找不到这次工作流运行，请重新选择。');
+  return {chat,flow};
+}
+
+function ensureWorkflowSlot(chat) {
+  if (groupWorkflows.activeRun(chat)||inputBusy(chat.id)||inputQueue.dispatching.has(chat.id)||interactiveAgents.active(chat.id)) {
+    throw new Error('请先结束此群聊正在运行的任务或交互终端。');
+  }
+}
+
+function configureGroupWorkflow(chat, value, goal, saving=false) {
+  const project=store.get('projects',chat.projectId);
+  if (value.type==='generated') return generatedConfiguration({...value,goal:goal||'Use the conversation at workflow start.'},project);
+  if (value.type==='teams') {
+    if (value.moderatorRoleId) workflowModerationRole(project,value.moderatorRoleId);
+    return {type:'teams',title:value.title,...workflowEngine.configure({...value,goal:goal||'Use the conversation at workflow start.'},
+      store.state.roles.filter(role=>workflowEngine.canModerate(role)&&project.directories.some(dir=>dir.locationId===role.locationId)))};
+  }
+  return saving?graphWorkflows.validate(value):graphWorkflows.configure({...value,goal},
+    workflowProjectRoles(project,store.state.roles),{optionalGoal:true});
+}
+
+handle('workflow-group-save',(id,definitionId,value)=>{
+  const chat=groupWorkflowChat(id);
+  const previous=chat.workflowDefinitions||[];
+  if (definitionId && !previous.some(item=>item.id===definitionId)) throw new Error('找不到要保存的工作流。');
+  if (definitionId && groupWorkflows.activeRun(chat)?.definitionId===definitionId) throw new Error('请停止工作流后再编辑。');
+  const configured=configureGroupWorkflow(chat,value,'',true);
+  const title=typeof configured.title==='string'&&configured.title.trim();
+  if (!title||title.length>100) throw new Error('请填写工作流名称（最多 100 字）。');
+  const idValue=definitionId||randomUUID();
+  let definition={...configured,id:idValue,title};
+  if (configured.type==='generated') {
+    const {nodes,reworkLimit,moderatorRoleId}=configured;
+    definition={id:idValue,type:'generated',title,nodes,reworkLimit,moderatorRoleId};
+  } else if (configured.type==='teams') {
+    const {teams,moderatorRoleId,criteria,limit}=configured;
+    definition={id:idValue,type:'teams',title,teams,moderatorRoleId,criteria,limit};
+  }
+  if (groupWorkflows.sourceIds(definition).some(source=>!store.state.chats.some(item=>item.id===source))) {
+    throw new Error('有来源群聊已删除，请重新选择。');
+  }
+  chat.workflowDefinitions=definitionId?previous.map(item=>item.id===definitionId?definition:item):[...previous,definition];
+  try { store.save(); } catch (error) { chat.workflowDefinitions=previous; throw error; }
+  emit();
+  return definition;
+});
+
+handle('workflow-group-start',(id,definitionId,goal='')=>{
+  const chat=groupWorkflowChat(id);
+  ensureWorkflowSlot(chat);
+  const definition=chat.workflowDefinitions?.find(item=>item.id===definitionId);
+  if (!definition) throw new Error('请先保存工作流。');
+  if (chat.workflowRuns?.some(run=>run.definitionId===definitionId&&groupWorkflows.resumableStatuses.has(run.status))) {
+    throw new Error('请先继续或结束这个工作流的上一次运行。');
+  }
+  if (typeof goal!=='string'||goal.length>16000) throw new Error('任务目标最多 16000 字。');
+  const flow=configureGroupWorkflow(chat,definition,goal.trim());
+  const at=Date.now();
+  const sourceSnapshots=Object.fromEntries(groupWorkflows.sourceIds(flow).map(source=>{
+    const sourceChat=store.state.chats.find(item=>item.id===source);
+    if (!sourceChat) throw new Error('有来源群聊已删除，请修改上文节点后重试。');
+    return [source, source===id?{name:chat.name,at}:groupWorkflows.freeze(sourceChat,at)];
+  }));
+  const previous=chat.workflowRuns||[];
+  Object.assign(flow,{id:randomUUID(),definitionId,sourceSnapshots,baseSnapshot:groupWorkflows.freeze(chat,at)});
+  chat.workflowRuns=[...previous,flow];
+  if (goal.trim()) {
+    const updatedAt=chat.updatedAt;
+    try { store.message(id,{kind:'user',text:goal.trim(),status:'accepted',workflowRunId:flow.id,workflowTitle:flow.title}); }
+    catch (error) { chat.workflowRuns=previous; chat.messages.pop();chat.updatedAt=updatedAt;throw error; }
+  } else {
+    try { store.save(); } catch (error) { chat.workflowRuns=previous; throw error; }
+  }
+  emit();setImmediate(pumpWorkflows);
+  return flow.id;
+});
+
+handle('workflow-group-stop',(id,runId)=>{
+  const {chat,flow}=groupWorkflowRun(id,runId);
+  if (flow.status==='queued') {
+    flow.status='paused';store.save();inputQueue.kick(chat.id);emit();
+  } else if (flow.status==='running'&&running.get(id)?.workflowRunId===flow.id) {
+    interruptChat(id);emit();
+  }
+});
+
+handle('workflow-group-resume',(id,runId,guidance='')=>{
+  const {chat,flow}=groupWorkflowRun(id,runId);
+  ensureWorkflowSlot(chat);
+  if (!groupWorkflows.resumableStatuses.has(flow.status)) throw new Error('这次运行当前无法继续。');
+  if (typeof guidance!=='string'||guidance.length>16000) throw new Error('补充说明最多 16000 字。');
+  if (guidance.trim()) store.message(id,{kind:'user',text:guidance.trim(),status:'accepted',workflowRunId:flow.id,workflowTitle:flow.title});
+  if (flow.type==='generated'||flow.type==='teams') {
+    delete flow.candidateOrder;
+    if (flow.selection?.via!=='priority'||flow.status==='unavailable'||!flow.selection.items.length) {
+      delete flow.selection;
+      flow.index=0;
+    }
+  }
+  flow.pending=null;flow.status='queued';flow.reason='';chat.unread=false;
+  store.save();emit();setImmediate(pumpWorkflows);
+});
+
+handle('workflow-group-finish',(id,runId)=>{
+  const {chat,flow}=groupWorkflowRun(id,runId);
+  if (!groupWorkflows.resumableStatuses.has(flow.status)||running.has(id)||flow.stopUnconfirmed) throw new Error('请等待当前步骤确认停止后再结束运行。');
+  const {status,reason}=flow;
+  flow.status='unresolved';
+  flow.reason=flow.reason?'手动结束运行。\n'+flow.reason:'手动结束运行。';
+  try { groupWorkflows.publish(store,chat,flow); }
+  catch (error) { Object.assign(flow,{status,reason});throw error; }
+  emit();inputQueue.kick(id);
+});
+
+handle('workflow-group-confirm-stop',(id,runId)=>{
+  const {flow}=groupWorkflowRun(id,runId);
+  if (running.has(id)||!flow.stopUnconfirmed) throw new Error('请核对这次运行的停止状态。');
+  delete flow.stopUnconfirmed;store.save();emit();inputQueue.kick(id);
+});
 function generatedConfiguration(value, project, stepOffset = 0) {
   const roles = workflowProjectRoles(project, store.state.roles);
   if (!roles.length) throw new Error('请先为已启用角色的运行位置配置项目目录。');
@@ -690,7 +849,8 @@ handle('queue-pause',id=>inputQueue.pause(id));
 handle('queue-remove',(id,entryId)=>inputQueue.remove(id,entryId));
 handle('queue-move',(id,entryId,offset)=>inputQueue.move(id,entryId,offset));
 handle('queue-now',(id,entryId)=>{
-  prepareInput(inputQueue.entry(id,entryId).entry.value,true);
+  const {chat}=prepareInput(inputQueue.entry(id,entryId).entry.value,true);
+  if (groupWorkflows.activeRun(chat)) throw new Error('请在工作流面板停止当前运行，待发送消息会保留。');
   return inputQueue.now(id,entryId);
 });
 handle('queue-restore',(id,entryId)=>{
@@ -1173,7 +1333,9 @@ async function requestQuit(restart = false) {
 
   quitting = true;
   try {
-    for (const chat of store.state.chats) if (chat.workflow?.status === 'queued') chat.workflow.status = 'paused';
+    for (const chat of store.state.chats) for (const flow of [chat.workflow,...(chat.workflowRuns||[])]) {
+      if (flow?.status === 'queued') flow.status = 'paused';
+    }
     try { inputQueue.close(); } catch (error) { console.error('Could not save the paused queue:', error); }
     for (const job of running.values()) if (!restart || !job.localExecutor) job.controller.abort();
     skills.close();
@@ -1194,13 +1356,13 @@ async function requestQuit(restart = false) {
   } catch (error) {
     console.error('Could not finish stopping workbench tasks:', error);
   } finally {
-    for (const chat of store.state.chats) {
-      const flow = chat.workflow;
+    for (const chat of store.state.chats) for (const flow of [chat.workflow,...(chat.workflowRuns||[])]) {
       if (flow?.status !== 'running') continue;
       flow.status = 'needs_check';
-      flow.reason = 'Interrupted with no confirmed result. Inspect the workspace before retrying.';
+      flow.reason = '应用退出时未确认节点结果，请检查工作区后重试。';
       const pending = flow.attempts.find(attempt => attempt.id === flow.pending);
       if (pending) Object.assign(pending, {status:'interrupted', reason:flow.reason});
+      if (flow.id && flow.pending) flow.stopUnconfirmed = true;
       flow.pending = null;
     }
     const cleanup = [() => store.close(), () => quotaConsole.close(), () => accountUsage.close(),
@@ -1227,7 +1389,18 @@ async function requestQuit(restart = false) {
   app.whenReady().then(() => {
     keepAwake.start(); Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: '文件', submenu: [{ id:'restart-workbench', label:'重启工作台', click:() => requestQuit(true).catch(error => console.error(error)) }, { role: 'quit', label: '退出' }] }, { label: '编辑', submenu: [{ label: '撤销', role: 'undo' }, { label: '重做', role: 'redo' }, { type: 'separator' }, { label: '剪切', role: 'cut' }, { label: '复制', role: 'copy' }, { label: '粘贴', role: 'paste' }, { label: '全选', role: 'selectAll' }] }, { label: '视图', submenu: [{ label: '重新加载', role: 'reload' }, { label: '开发者工具', role: 'toggleDevTools' }, { label: '重置缩放', role: 'resetZoom' }, { label: '放大', role: 'zoomIn' }, { label: '缩小', role: 'zoomOut' }] }]));
     const w = createWindow();
-    for(const chat of store.state.chats)if(chat.workflow)engineForWorkflow(chat.workflow).recover(chat);
+    for(const chat of store.state.chats) {
+      if(chat.workflow)engineForWorkflow(chat.workflow).recover(chat);
+      for(const flow of chat.workflowRuns||[]) {
+        const pending = flow.pending && chat.messages.find(message=>message.kind==='assistant'&&message.workflowAttemptId===flow.pending);
+        engineForWorkflow(flow).recover({...chat,workflow:flow});
+        if (pending?.workflowSubmitted && pending.status==='interrupted') {
+          flow.stopUnconfirmed=true;
+          flow.status='needs_check';
+        }
+        groupWorkflows.publish(store,chat,flow);
+      }
+    }
     for (const chat of store.state.chats) if (chat.localTask&&!chat.localTask.stopUnconfirmed) followLocalTask(chat, chat.localTask);
     store.save();
     const workflowTimer=setInterval(pumpWorkflows,3000);workflowTimer.unref();

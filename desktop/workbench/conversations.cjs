@@ -20,8 +20,17 @@ function initialize(chat, roles) {
   return chat;
 }
 function historyFor(chat, role, summary = false) {
-  const messages=chat.messages.filter(message => !message.moderatorTask&&['user', 'assistant','skill'].includes(message.kind) && (message.text||message.attachments?.length||message.note) && !['running','submitting','unconfirmed'].includes(message.status) &&
-    (summary || chat.relayReplies !== false || message.branchContext || message.kind === 'user' || message.kind==='skill'&&(!message.callerRoleId||message.callerRoleId===role.id)||message.roleId === role.id)).map(message=>message.kind==='skill'?{...message,kind:'assistant',roleName:'Skill /'+message.command,text:[message.text,message.note].filter(Boolean).join('\n')}:message);
+  const published = new Map(chat.workflowRuns?.filter(run => run.publishedAt).map(run => [run.id,run.publishedAt]));
+  const internal = chat.workflowContextRunId;
+  const messages=chat.messages.filter(message => !message.moderatorTask&&
+    (!message.workflowRunId || message.workflowRunId === internal ||
+      (published.has(message.workflowRunId) && !message.workflowInstruction)) &&
+    ['user', 'assistant','skill'].includes(message.kind) && (message.text||message.attachments?.length||message.note) && !['running','submitting','unconfirmed'].includes(message.status) &&
+    (summary || chat.relayReplies !== false || message.workflowRunId || message.branchContext || message.kind === 'user' || message.kind==='skill'&&(!message.callerRoleId||message.callerRoleId===role.id)||message.roleId === role.id)).map(message=>message.kind==='skill'?{...message,kind:'assistant',roleName:'Skill /'+message.command,text:[message.text,message.note].filter(Boolean).join('\n')}:message);
+  if (!internal && published.size) {
+    const time = message => published.get(message.workflowRunId) || message.at || 0;
+    messages.sort((a,b)=>time(a)-time(b));
+  }
   return chat.ignoreModeratorMemory?messages:require('./moderator.cjs').applyMemory(chat,messages);
 }
 function defaultReplies(value, roleIds, previous) {

@@ -24,7 +24,9 @@ function createHistory(messages){
 
 function prepare(role,project,chat,summary,buildPrompt){
   const messages=historyFor(chat,role,summary),data=messages.map(m=>({speaker:m.kind==='user'?'User':m.roleName||'Assistant',text:messageText(m)}));
-  const moderated=messages[0]?.moderatorMemory===true,paged=role.engine==='antigravity'&&Buffer.byteLength(JSON.stringify(data))>=threshold/2;
+  const moderated=messages[0]?.moderatorMemory===true;
+  const paged=(role.engine==='antigravity'||chat.workflowContextRunId||messages.some(message=>message.workflowRunId))&&
+    Buffer.byteLength(JSON.stringify(data))>=threshold/2;
   const resumed=Boolean(chat.sessionHistorySource);
   if(!moderated&&!paged&&!resumed)return {prompt:buildPrompt(role,project,chat,summary)};
   const originals=moderated||resumed?historyFor({... (chat.sessionHistorySource||chat),ignoreModeratorMemory:true},role,summary).map(m=>({speaker:m.kind==='user'?'User':m.roleName||'Assistant',text:messageText(m)})):data;
@@ -39,7 +41,9 @@ function prepare(role,project,chat,summary,buildPrompt){
     'Recent context, complete messages as JSON data:\n'+JSON.stringify(recent),
     'Answer the current user request above, applying any newer peer replies in recent context. Read the history tool before asserting that earlier details or the latest request are unavailable.'
   ].join('\n\n');
-  if(Buffer.byteLength(prompt)>threshold)throw new Error('The latest task and role instructions exceed ai-team\'s safe Antigravity transfer budget. Shorten this message or role instructions. The original message remains saved.');
+  if(Buffer.byteLength(prompt)>threshold)throw new Error(chat.workflowContextRunId||role.engine!=='antigravity'
+    ? '当前节点提示词或角色设定过长，请缩短后再启动。历史原文已保留。'
+    : 'The latest task and role instructions exceed ai-team\'s safe Antigravity transfer budget. Shorten this message or role instructions. The original message remains saved.');
   return {prompt,history,metadata:{mode:'paged',historyBytes:history.totalBytes,inlineBytes:Buffer.byteLength(prompt),messageCount:history.messageCount}};
 }
 module.exports={prepare,createHistory,threshold};

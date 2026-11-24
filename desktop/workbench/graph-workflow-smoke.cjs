@@ -13,7 +13,7 @@ async function eventually(check) {
 
 async function run({window,store,directory,services,fixture,js}) {
   const [role]=fixture.roles;
-  const open = `document.querySelector('[data-filter="workflow"]').click();$('chat-new').click();$('wf-graph-open').click();`;
+  const open = `document.querySelector('[data-filter="workflow"]').click();openWorkflow();$('wf-graph-open').click();`;
   await js(open);
   assert.equal(await js(`$('graph-template-save').parentElement===document.querySelector('.dialog-header')`),true);
   await js(`$('graph-starter').click()`);
@@ -48,7 +48,7 @@ async function run({window,store,directory,services,fixture,js}) {
   fs.writeFileSync(path.join(directory,'graph-workflow-editor.png'),(await window.webContents.capturePage()).toPNG());
   await js(`$('dialog').close()`);
   await wait(80);
-  await js(`$('chat-new').click();$('wf-graph-open').click();
+  await js(`openWorkflow();$('wf-graph-open').click();
     $('graph-template-select').value=${JSON.stringify(persisted.id)};
     $('graph-template-select').dispatchEvent(new Event('change'));$('graph-template-load').click()`);
   assert.equal(await js(`$('graph-goal').value`),'');

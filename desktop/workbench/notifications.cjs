@@ -11,11 +11,12 @@ class CompletionNotifications {
     this.render(count);
     return count;
   }
-  complete(chatId, {workflow = false} = {}) {
+  complete(chatId, {workflow = false, run} = {}) {
     // Only the owner of the submitted task may announce completion.
     if (this.busy(chatId)) return false;
     const chat = this.store.get('chats', chatId);
-    if (workflow !== Boolean(chat.workflow) || (workflow && !workflowNotificationStatuses.has(chat.workflow.status))) return false;
+    const flow = run || chat.workflow;
+    if (workflow !== Boolean(flow) || (workflow && !workflowNotificationStatuses.has(flow.status))) return false;
     chat.unread = true;
     this.store.scheduleSave();
     this.changed();

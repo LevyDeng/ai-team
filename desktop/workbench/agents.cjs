@@ -213,12 +213,14 @@ class Agents {
     const directory = project.directories.find(d => d.locationId === location.id);
     if (!directory) throw new Error(formatMissingProjectDirectories(project, [role], () => location.name || location.id));
     let nativeSession;
-    if(!moderation&&!summary){let executable='';if(location.type==='local')try{executable=findExecutable(role);}catch{}nativeSession=require('./native-sessions.cjs').plan({store:this.store,chatId,role,project,location,directory,executable,desktopHome:usesDesktopLogin(role)?this.desktopHome():'',env:location.type==='local'?this.environment(role):{},apiKey:role.provider!=='native'?this.vault.get('api:'+role.id)||'':'',relayReplies:context.relayReplies});}
+    if(!moderation&&!summary&&!context.workflowContextRunId){let executable='';if(location.type==='local')try{executable=findExecutable(role);}catch{}nativeSession=require('./native-sessions.cjs').plan({store:this.store,chatId,role,project,location,directory,executable,desktopHome:usesDesktopLogin(role)?this.desktopHome():'',env:location.type==='local'?this.environment(role):{},apiKey:role.provider!=='native'?this.vault.get('api:'+role.id)||'':'',relayReplies:context.relayReplies});}
     const makeTransfer=()=>{if(moderation)return {prompt:moderation.prompt,history:moderation.history};const base={...this.store.get('chats',chatId),...context};const value=require('./chat-context.cjs').prepare(role,project,nativeSession?nativeSession.context(base):base,summary,buildPrompt);if(nativeSession?.resumed)value.prompt+='\n\n'+nativeSession.instructions();return value;};
     let transfer=makeTransfer(),prompt=transfer.prompt;
     const jobId = crypto.randomUUID(); const runHome = path.join(this.store.directory, 'jobs', jobId); fs.mkdirSync(runHome, { recursive: true });
     const diagnostics=role.engine==='codex'&&!detached?require('./codex-diagnostics.cjs').create(this.store.directory,{traceId:jobId,chatId,roleId:role.id,provider:role.provider||'native',model:role.model,effort:role.effort,locationType:location.type,callKind:moderation?'moderator':summary?'summary':'chat'}):undefined;
     const fields = { kind: 'assistant', roleId: role.id, roleName: role.name, model: role.model, effort: role.effort,permission:role.permission||'workspace-write', locationId: role.locationId, text: '', status: 'running' };
+    if (context.workflowContextRunId) Object.assign(fields, {workflowRunId:context.workflowContextRunId,
+      workflowTitle:context.workflowTitle, workflowPath:context.workflowPath, workflowAttemptId:context.workflowAttemptId});
     const message = detached ? fields : this.store.message(chatId, fields);
     if(context.workflowAttemptId){message.workflowAttemptId=context.workflowAttemptId;message.workflowSubmitted=false;}
     const submitted=()=>{if(context.workflowAttemptId)message.workflowSubmitted=true;nativeSession?.submit();};
@@ -228,7 +230,7 @@ class Agents {
     if(transfer.metadata)message.contextTransfer=transfer.metadata;
     if (!detached) this.emit({ chatId, message });
     const state = { text: '', completed: false, error: '', activity: 'Starting agent' }; let transport; let bridge; let tools; let flushTimer;let skillBridge;let shutdownConfirmed=true;
-    const skillScope=this.skills&&!moderation?this.skills.scope(chatId,role.id,context.taskId||jobId):undefined;
+    const skillScope=this.skills&&!moderation?this.skills.scope(chatId,role.id,context.taskId||jobId,context.workflowContextRunId):undefined;
     terminal(state, '[Requested model] ' + (role.model || '(CLI default)') + '\r\n[Requested effort] ' + (role.effort || '(CLI default)') + '\r\n');
     const secrets = []; if (role.provider !== 'native') { const key = nativeSession?.apiKey||this.vault.get('api:' + role.id); if (key) secrets.push(key); }
     const redact = value => secrets.filter(Boolean).reduce((text, secret) => text.split(secret).join('[redacted]'), String(value || ''));
@@ -430,7 +432,18 @@ class Agents {
       if (!state.completed && !state.error) throw new Error('The CLI disconnected without a completion event. The partial reply is preserved.' + (state.warning ? ' ' + state.warning : ''));
       if (state.error) throw new Error(state.error);
       message.status = signal.aborted ? 'cancelled' : 'complete'; message.note = state.note || '';
-    } catch (error) {if(location.type!=='local'&&/^Not connected\.?$/i.test(error.message))error=connectionClosed();message.status = signal.aborted ? 'cancelled' : 'failed'; message.note = String(error.message).slice(0, 4000); if (['CODEX_LOGIN_REQUIRED','CODEX_LOGIN_CHECK_FAILED','CODEX_DESKTOP_LOGIN_REQUIRED','CODEX_DESKTOP_LOGIN_CHECK_FAILED','CODEX_MODEL_REQUIRED','VENDOR_LOGIN_REQUIRED','WORKBUDDY_DESKTOP_AUTH_UNAVAILABLE','REMOTE_CHANNEL_CLOSED','REMOTE_AGENT_KILLED','REMOTE_STOP_UNCONFIRMED','VENDOR_PROTOCOL_TIMEOUT','CLI_SHUTDOWN_STALLED'].includes(error.code)) message.errorCode = error.code; if(error.code==='NATIVE_SESSION_MISMATCH')message.errorCode=error.code; if(error.code==='VENDOR_PROTOCOL_TIMEOUT')message.protocolTimeout={method:error.method,timeoutMs:error.timeoutMs}; }
+    } catch (error) {
+      if(location.type!=='local'&&/^Not connected\.?$/i.test(error.message))error=connectionClosed();
+      message.status = signal.aborted ? 'cancelled' : 'failed';
+      message.note = String(error.message).slice(0, 4000);
+      if (['CODEX_LOGIN_REQUIRED','CODEX_LOGIN_CHECK_FAILED','CODEX_DESKTOP_LOGIN_REQUIRED','CODEX_DESKTOP_LOGIN_CHECK_FAILED',
+        'CODEX_MODEL_REQUIRED','VENDOR_LOGIN_REQUIRED','WORKBUDDY_DESKTOP_AUTH_UNAVAILABLE','REMOTE_CHANNEL_CLOSED',
+        'REMOTE_AGENT_KILLED','REMOTE_STOP_UNCONFIRMED','VENDOR_PROTOCOL_TIMEOUT','CLI_SHUTDOWN_STALLED',
+        'AGY_BACKGROUND_TIMEOUT','ETIMEDOUT','ECONNRESET','EPIPE','NATIVE_SESSION_MISMATCH'].includes(error.code)) {
+        message.errorCode = error.code;
+      }
+      if(error.code==='VENDOR_PROTOCOL_TIMEOUT')message.protocolTimeout={method:error.method,timeoutMs:error.timeoutMs};
+    }
     finally {
       if(signal.aborted||context.workflowAttemptId)message.stopConfirmed=shutdownConfirmed;
       if(context.workflowAttemptId&&state.rejectionText&&state.rejectionText===state.text)message.workflowRejectionOnly=true;

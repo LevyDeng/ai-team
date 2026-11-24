@@ -13,6 +13,10 @@ for(const name of ['gemini-web-open','gemini-web-link','gemini-web-open-turn','g
 api['chat-session-reset']=(...args)=>ipcRenderer.invoke('desk:chat-session-reset',...args);
 api['chat-disband']=(...args)=>ipcRenderer.invoke('desk:chat-disband',...args);
 for(const name of ['workflow-create','workflow-resume','workflow-teams','workflow-plan','workflow-plan-cancel','workflow-generated-update'])api[name]=(...args)=>ipcRenderer.invoke('desk:'+name,...args);
+for(const command of ['save','start','stop','resume','finish','confirm-stop']){
+  const name='workflow-group-'+command;
+  api[name]=(...args)=>ipcRenderer.invoke('desk:'+name,...args);
+}
 api['workflow-priority-save']=(...args)=>ipcRenderer.invoke('desk:workflow-priority-save',...args);
 api['workflow-template-save']=value=>ipcRenderer.invoke('desk:workflow-template-save',value);
 for(const name of ['chat-branch','chat-handoff'])api[name]=(...args)=>ipcRenderer.invoke('desk:'+name,...args);

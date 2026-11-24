@@ -1,5 +1,6 @@
 const { randomUUID } = require('node:crypto');
 const { StateGraph, Annotation, START, END } = require('@langchain/langgraph');
+const structured = require('./structured-workflow.cjs');
 
 const terminals = new Set(['complete', 'unresolved']);
 function field(value, max, error) {
@@ -7,7 +8,20 @@ function field(value, max, error) {
   return value.trim();
 }
 
+const position = value => Number.isFinite(value) ? Math.max(-10000, Math.min(10000,value)) : 0;
+function exitsFor(exits, ids, allowedTerminals) {
+  if (!Array.isArray(exits) || !exits.length || exits.length > 8) throw new Error('每个节点需要 1 到 8 个出口。');
+  const normalized = exits.map(exit => {
+    const label = field(exit?.label, 200, '请说明每个出口的判断条件（最多 200 字）。');
+    if (!ids.has(exit.to) && !allowedTerminals.has(exit.to)) throw new Error('请为每个出口选择目标。');
+    return {label, to:exit.to};
+  });
+  if (new Set(normalized.map(exit=>exit.label)).size !== normalized.length) throw new Error('同一节点的出口条件不能重复。');
+  return normalized;
+}
+
 function validate(value) {
+  if (value?.structured === true) return structured.validate(value, {field, position, exitsFor});
   const title = field(value?.title, 100, '请填写工作流名称（最多 100 字）。');
   if (!Array.isArray(value.nodes) || !value.nodes.length || value.nodes.length > 24) throw new Error('请设置 1 到 24 个节点。');
   const ids = new Set(value.nodes.map(node => node?.id));
@@ -18,14 +32,7 @@ function validate(value) {
     const title = field(node.title, 100, '请为每个节点填写名称（最多 100 字）。');
     const instruction = field(node.instruction, 4000, '请为每个节点填写任务与判断标准（最多 4000 字）。');
     if (!Number.isInteger(node.limit) || node.limit < 1 || node.limit > 50) throw new Error('每个节点的执行上限须为 1 到 50 次。');
-    if (!Array.isArray(node.exits) || !node.exits.length || node.exits.length > 8) throw new Error('每个节点需要 1 到 8 个出口。');
-    const exits = node.exits.map(exit => {
-      const label = field(exit?.label, 200, '请说明每个出口的判断条件（最多 200 字）。');
-      if (!ids.has(exit.to) && !terminals.has(exit.to)) throw new Error('请为每个出口选择目标。');
-      return { label, to:exit.to };
-    });
-    if (new Set(exits.map(exit=>exit.label)).size !== exits.length) throw new Error('同一节点的出口条件不能重复。');
-    const position = v => Number.isFinite(v) ? Math.max(-10000, Math.min(10000,v)) : 0;
+    const exits = exitsFor(node.exits, ids, terminals);
     return {id:node.id,title,instruction,roleId:typeof node.roleId === 'string' ? node.roleId : '',
       localOnly:node.localOnly === true, limit:node.limit, x:position(node.x), y:position(node.y), exits};
   });
@@ -38,24 +45,23 @@ function validate(value) {
   return {title, entry:value.entry, nodes};
 }
 
-function configure(value, roles) {
+function configure(value, roles, {optionalGoal = false} = {}) {
   const template = validate(value);
-  for (const node of template.nodes) {
+  for (const node of structured.allNodes(template)) {
+    if (node.kind === 'loop' || node.kind === 'context') continue;
     const role = roles.find(r=>r.id===node.roleId);
     if (!role || (node.localOnly && role.locationId !== 'local')) throw new Error('请为「'+node.title+'」选择可用的'+(node.localOnly?'本机':'项目')+'角色。');
   }
-  return {type:'graph', ...template, goal:field(value.goal,16000,'请填写本次任务目标（最多 16000 字）。'),
-    nodeIndex:template.nodes.findIndex(n=>n.id===template.entry), visits:{}, attempts:[], status:'queued', reason:'', createdAt:Date.now()};
+  const goal = optionalGoal && typeof value.goal === 'string' && !value.goal.trim()
+    ? '' : field(value.goal,16000,'请填写本次任务目标（最多 16000 字）。');
+  const cursor = template.structured ? {frames:[{nodeId:template.entry,round:0}],activeSources:[]}
+    : {nodeIndex:template.nodes.findIndex(n=>n.id===template.entry),visits:{}};
+  return {type:'graph', ...template, ...cursor, goal, attempts:[], status:'queued', reason:'', createdAt:Date.now()};
 }
 
-function settle(flow, attempt, receipt) {
-  flow.pending = null;
-  const node = flow.nodes[attempt.nodeIndex];
-  attempt.status = receipt?.status || 'interrupted';
+function decisionFor(node, receipt) {
   if (receipt?.status !== 'complete' || receipt.warningCode === 'CLAUDE_PERMISSION_DENIED') {
-    flow.status = 'needs_check';
-    flow.reason = '节点未取得已确认的结果，请查看运行记录后重试。';
-    return;
+    return {reason:'节点未取得已确认的结果，请查看运行记录后重试。'};
   }
   const lines = (receipt.text || '').trim().split(/\r?\n/);
   const signal = lines.pop()?.trim();
@@ -63,8 +69,20 @@ function settle(flow, attempt, receipt) {
   const exit = decision && node.exits[Number(decision[1])-1];
   const evidence = lines.join('\n').trim();
   if (!exit || !evidence) {
+    return {reason:signal === 'WORKFLOW: NEEDS_USER' ? '节点无法选择出口，请查看输出并补充说明。' : '结果缺少依据或有效的出口编号，请查看节点输出。'};
+  }
+  return {exit,evidence};
+}
+
+function settle(flow, attempt, receipt) {
+  flow.pending = null;
+  const node = flow.nodes[attempt.nodeIndex];
+  attempt.status = receipt?.status || 'interrupted';
+  const {exit, evidence, reason} = decisionFor(node, receipt);
+  if (!exit) {
     flow.status = 'needs_check';
-    flow.reason = signal === 'WORKFLOW: NEEDS_USER' ? '节点无法选择出口，请查看输出并补充说明。' : '结果缺少依据或有效的出口编号，请查看节点输出。';
+    flow.reason = reason;
+    if (flow.id && receipt?.stopConfirmed === false) flow.stopUnconfirmed = true;
     return;
   }
   attempt.outcome = exit.label;
@@ -87,6 +105,7 @@ function settle(flow, attempt, receipt) {
 
 function recover(chat) {
   const flow = chat.workflow;
+  if (flow.structured) return structured.recover(chat, decisionFor);
   if (flow.status !== 'running') return;
   flow.status = 'queued';
   if (!flow.pending) return;
@@ -111,7 +130,7 @@ function promptFor(chat, node) {
   }));
   const previous = flow.attempts.findLast(a=>a.outcome);
   const guidance = chat.messages.findLast(m=>m.kind==='user' && !m.workflowAttemptId)?.text;
-  return ['Task goal: '+flow.goal, 'Current node: '+node.title, node.instruction,
+  return ['Task goal: '+(flow.goal || 'Apply the current node to the conversation at workflow start.'), 'Current node: '+node.title, node.instruction,
     'Prior node reports: '+JSON.stringify(reports), previous && 'Incoming result: '+previous.evidence,
     guidance && 'Additional user guidance: '+guidance,
     'Perform this node now. Base the outcome on observed evidence. For local tests run the checks and report their commands, results or observed UI behavior. Never claim a pass for a skipped or unavailable check.',
@@ -121,6 +140,7 @@ function promptFor(chat, node) {
 
 async function run(chat,{turn,save,signal}) {
   const flow=chat.workflow;
+  if (flow.structured) return structured.run(chat, {turn,save,signal}, decisionFor);
   flow.status='running'; flow.reason=''; save();
   const builder=new StateGraph(Annotation.Root({next:Annotation()}));
   const destination = () => flow.status==='running' ? flow.nodes[flow.nodeIndex].id : END;

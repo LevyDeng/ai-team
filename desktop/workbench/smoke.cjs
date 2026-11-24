@@ -141,6 +141,12 @@ async function run(window,store,app,directory,services) {
     console.log('Graph workflow smoke checks passed.');
     app.exit(0);return;
   }
+  if(process.argv.includes('--group-workflow-only')){
+    await require('./group-workflow-smoke.cjs').run({store,services,fixture,js});
+    assert.deepEqual(errors,[]);
+    console.log('Group workflow smoke passed.');
+    app.exit(0);return;
+  }
   if(process.argv.includes('--workflow-only')){
     const [primary,backup]=fixture.roles;
     const planner=store.saveRole({...primary,id:undefined,name:'Antigravity planner fixture',engine:'antigravity'});
@@ -173,7 +179,7 @@ async function run(window,store,app,directory,services) {
       return store.message(chatId,{kind:'assistant',roleId:role.id,roleName:role.name,workflowAttemptId:context.workflowAttemptId,...result});
     };
     assert.equal(await js(`document.querySelector('[data-filter="workflow"]').textContent`),'\u5de5\u4f5c\u6d41');
-    await js(`document.querySelector('[data-filter="workflow"]').click();$('chat-new').click();$('wf-goal').value='Blocked';$('wf-criteria').value='Pass tests';[...$('wf-implement').querySelectorAll('button')].at(-1).click();$('dialog-form').requestSubmit()`);
+    await js(`document.querySelector('[data-filter="workflow"]').click();openWorkflow();$('wf-goal').value='Blocked';$('wf-criteria').value='Pass tests';[...$('wf-implement').querySelectorAll('button')].at(-1).click();$('dialog-form').requestSubmit()`);
     for(let i=0;i<80&&!calls.length;i++)await wait(50);
     assert.equal(calls.length,1);
     const chineseGoal='\u9a8c\u8bc1\u5de5\u4f5c\u6d41';
@@ -191,7 +197,7 @@ async function run(window,store,app,directory,services) {
     assert.ok(completed.messages.some(message=>message.kind==='user'&&message.text.includes(chineseGoal)&&message.text.includes(chineseCriteria)));
     assert.match(await js(`$('workflow-status').textContent`),/\u6267\u884c\u9636\u6bb5\u7684\u5019\u9009\u89d2\u8272\u5747\u4e0d\u53ef\u7528/);
 
-    await js(`$('chat-new').click();$('wf-goal').value='AI routing fixture';$('wf-criteria').value='Pass tests';$('wf-moderator').value=${JSON.stringify(primary.id)};$('wf-moderator').dispatchEvent(new Event('change'));$('wf-implement').querySelector(':scope > button').click();$('dialog-form').requestSubmit()`);
+    await js(`openWorkflow();$('wf-goal').value='AI routing fixture';$('wf-criteria').value='Pass tests';$('wf-moderator').value=${JSON.stringify(primary.id)};$('wf-moderator').dispatchEvent(new Event('change'));$('wf-implement').querySelector(':scope > button').click();$('dialog-form').requestSubmit()`);
     const routedWorkflow=()=>store.state.chats.find(chat=>chat.workflow?.goal==='AI routing fixture')?.workflow;
     for(let i=0;i<100&&routedWorkflow()?.status!=='complete';i++)await wait(50);
     for(let i=0;i<100&&await js(`!$('workflow-status')?.textContent.includes('AI \u4e3b\u6301') || !document.querySelector('#messages .moderator-message')`);i++)await wait(50);
@@ -223,7 +229,7 @@ async function run(window,store,app,directory,services) {
     await js(`$('priority-search').value='no-matching-rule';$('priority-search').dispatchEvent(new Event('input'));`);
     assert.equal(await js(`$('priority-empty').hidden`),false);
     const beforePlan=store.state.chats.length;
-    await js(`(async()=>{state=await api.snapshot();showPage('projects');$('chat-new').click();$('wf-goal').value='Generate a viewer workflow';$('wf-criteria').value='Preserve the existing behavior';$('wf-ai-plan').click();$('wf-plan-planner').value=${JSON.stringify(planner.id)};$('dialog-form').requestSubmit();})()`);
+    await js(`(async()=>{state=await api.snapshot();showPage('projects');openWorkflow();$('wf-goal').value='Generate a viewer workflow';$('wf-criteria').value='Preserve the existing behavior';$('wf-ai-plan').click();$('wf-plan-planner').value=${JSON.stringify(planner.id)};$('dialog-form').requestSubmit();})()`);
     for(let i=0;i<100&&await js(`$('wf-plan-preview').hidden`);i++)await wait(50);
     assert.equal(store.state.chats.length,beforePlan);
     assert.equal(store.get('projects',fixture.chat.projectId).roleIds.includes(planner.id),false);
@@ -257,7 +263,7 @@ async function run(window,store,app,directory,services) {
     assert.match(await js(`document.querySelector(${replySelector}+' .message-note').textContent`),/30/);
 
     require('electron').ipcMain.removeHandler('desk:workflow-create');
-    await js(`$('chat-new').click();$('wf-goal').value='Keep this goal';$('wf-criteria').value='Keep these criteria';$('dialog-form').requestSubmit()`);
+    await js(`openWorkflow();$('wf-goal').value='Keep this goal';$('wf-criteria').value='Keep these criteria';$('dialog-form').requestSubmit()`);
     for(let i=0;i<80&&await js(`$('wf-error').hidden`);i++)await wait(50);
     assert.match(await js(`$('wf-error').textContent`),/\u5b8c\u5168\u9000\u51fa AI \u5c0f\u961f/);
     assert.deepEqual(await js(`[$('dialog').open,$('wf-goal').value,$('wf-criteria').value]`),[true,'Keep this goal','Keep these criteria']);

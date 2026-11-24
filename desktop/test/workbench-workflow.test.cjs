@@ -45,17 +45,33 @@ test('Restart recovers confirmed results once and parks a missing receipt',async
   await run(saved,{signal,save(){},turn:async a=>{calls.push(a.roleId);return complete('Verified\nVERDICT: PASS');}});
   assert.deepEqual(calls,['reviewer']);
 });
-test('Confirmed quota failure hands completed work over without treating a lost remote channel as confirmed',async()=>{
+test('Backup roles take over after quota rejection and a lost remote channel with an unconfirmed stop',async()=>{
   const chat=fixture(),prompts=[];
   await run(chat,{signal,save(){},turn:async(a,prompt)=>{
     prompts.push(prompt);
     if(a.roleId==='developer')return {...rejected,stopConfirmed:true,activities:[{status:'complete',title:'Write patch'}]};
     if(a.roleId==='backup')return complete('Verified existing patch and finished the test.');
-    return {status:'failed',errorCode:'REMOTE_CHANNEL_CLOSED',stopConfirmed:false,note:'Lost remote connection'};
+    if(a.roleId==='reviewer')return {status:'failed',workflowSubmitted:true,errorCode:'REMOTE_CHANNEL_CLOSED',
+      stopConfirmed:false,text:'Checked the first case',note:'Lost remote connection'};
+    return complete('Verified both cases\nVERDICT: PASS');
   }});
   assert.match(prompts[1],/Inspect the current workspace/);
+  assert.match(prompts[3],/still have work in progress/);
+  assert.equal(chat.workflow.status,'complete');
+  assert.deepEqual(chat.workflow.attempts.map(a=>a.roleId),['developer','backup','reviewer','alternate']);
+  assert.equal(chat.workflow.attempts[2].reason,'shutdown unconfirmed');
+});
+
+test('Stopping manually during a runtime failure does not advance to a backup',async()=>{
+  const chat=fixture(),controller=new AbortController();
+  await run(chat,{signal:controller.signal,save(){},turn:async attempt=>{
+    assert.equal(attempt.roleId,'developer');
+    controller.abort();
+    return {status:'failed',workflowSubmitted:true,errorCode:'REMOTE_CHANNEL_CLOSED',stopConfirmed:false};
+  }});
+  assert.equal(chat.workflow.index,0);
   assert.equal(chat.workflow.status,'needs_check');
-  assert.deepEqual(chat.workflow.attempts.map(a=>a.roleId),['developer','backup','reviewer']);
+  assert.equal(chat.workflow.attempts.length,1);
 });
 
 test('A moderator chooses one candidate per stage and fallback keeps the original order until the next round',async()=>{

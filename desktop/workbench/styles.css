@@ -401,6 +401,26 @@ dialog { background:var(--canvas); }
 .graph-canvas .connection .main-path { stroke:var(--green);stroke-width:2; }
 .graph-canvas .connection .main-path.selected { stroke-width:4; }
 .graph-canvas .parent-drawflow { overflow:hidden; }
+.graph-node-fields { min-width:0;border:0;padding:0;margin:0; }
+.graph-breadcrumb { display:flex;flex-wrap:wrap;gap:4px;padding:5px 8px; }
+.graph-breadcrumb button { font-size:12px;padding:3px 7px; }
+.graph-canvas .drawflow-node.graph-running-node { border:2px solid var(--green);background:var(--selected); }
+#workflow-tools { min-height:0;overflow:auto;padding:0 12px 12px; }
+#workflow-tools label { display:grid;gap:4px;font-size:13px;min-width:0; }
+#workflow-tools input,#workflow-tools select { min-width:0; }
+#workflow-tools .workflow-tools-actions { display:flex;flex-wrap:wrap;align-items:end;gap:7px;margin:0 0 10px; }
+.workflow-tools-actions label { flex:1 1 130px;max-width:280px; }
+#group-workflow-form>label { margin-bottom:8px; }
+#group-workflow-state { white-space:pre-wrap;margin-bottom:8px; }
+#group-workflow-plan ol { padding:5px 0 8px 24px; }
+#group-workflow-plan [aria-current="step"] { color:var(--green-dark);font-weight:650; }
+#workflow-tools .graph-editor-host { grid-template-columns:minmax(0,1fr); }
+#workflow-tools .graph-canvas { height:300px; }
+#workflow-tools .graph-inspector { border-left:0;border-top:1px solid var(--border); }
+body.tools-wide #workflow-tools .graph-editor-host { grid-template-columns:minmax(0,1fr) minmax(230px,286px); }
+body.tools-wide #workflow-tools .graph-canvas { height:460px; }
+body.tools-wide #workflow-tools .graph-inspector { border-top:0;border-left:1px solid var(--border); }
+.workflow-message-label { margin-bottom:5px; }
 @media(max-width:700px) {
   .graph-editor-host { grid-template-columns:minmax(0,1fr); }
   .graph-canvas { height:320px; }

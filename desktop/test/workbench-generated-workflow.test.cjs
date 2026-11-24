@@ -154,6 +154,19 @@ test('A step asking for a decision does not advance or repeat automatically',asy
   assert.equal(chat.workflow.attempts.length,1);
 });
 
+test('A submitted step that times out hands off to its backup even with partial work',async()=>{
+  const chat=fixture([{...step,mode:'ordered',roleIds:['primary','backup']}]);
+  await workflows.run(chat,{signal,save(){},roles:()=>knownRoles,turn:async(attempt,prompt)=>{
+    if(attempt.roleId==='primary') return {status:'failed',workflowSubmitted:true,stopConfirmed:true,
+      note:'Agent request timed out.',text:'Started verification'};
+    assert.match(prompt,/verify the state of earlier actions before repeating them/);
+    return complete;
+  }});
+  assert.equal(chat.workflow.status,'complete');
+  assert.deepEqual(chat.workflow.attempts.map(attempt=>[attempt.roleId,attempt.reason]),
+    [['primary','connection unavailable'],['backup','']]);
+});
+
 test('Generated steps wait for the role and can still be stopped manually', async t => {
   const scheduled = t.mock.method(AbortSignal, 'timeout');
   const controller = new AbortController();

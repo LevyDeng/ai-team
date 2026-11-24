@@ -97,7 +97,7 @@ class Skills{
   }
   remove(id){if(this.get(id).source)throw new Error('System skills are managed at their source.');if([...this.jobs.values()].some(j=>j.skillId===id))throw new Error('Wait for this skill to finish before deleting it.');this.store.state.skills=this.store.state.skills.filter(s=>s.id!==id);this.vault.remove('skill:'+id);this.store.save();}
   begin(taskId){if(!this.tasks.has(taskId))this.tasks.set(taskId,{used:0,active:0,at:Date.now()});return this.tasks.get(taskId);}
-  scope(chatId,roleId,taskId){return {chatId,roleId,taskId,depth:0};}
+  scope(chatId,roleId,taskId,workflowRunId){return {chatId,roleId,taskId,workflowRunId,depth:0};}
   handoffSkill(list=this.list()){return list.find(skill=>skill.id===this.store.state.handoffSkillId&&skill.enabled&&skill.kind==='prompt');}
   tools(){
     const list=this.list().filter(s=>s.enabled&&s.modelInvocable!==false);if(!list.length)return [];
@@ -149,12 +149,12 @@ class Skills{
   }
   async execute(scope,skill,prompt,handoff){
     if(handoff){
-      const message=this.store.message(scope.chatId,{kind:'skill',skillId:skill.id,skillName:skill.name,command:skill.command,
+      const message=this.store.message(scope.chatId,{kind:'skill',skillId:skill.id,skillName:skill.name,command:skill.command,workflowRunId:scope.workflowRunId,
         callerRoleId:scope.roleId||null,text:'A task handoff is ready for user review.',request:prompt,status:'complete',handoff});
       this.emit({chatId:scope.chatId,message});
       return {messageId:message.id,status:'ready_for_review',...handoff};
     }
-    const message=this.store.message(scope.chatId,{kind:'skill',skillId:skill.id,skillName:skill.name,command:skill.command,callerRoleId:scope.roleId||null,text:'',request:prompt,status:'running',files:[]});const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),300000);this.jobs.set(message.id,{controller,skillId:skill.id,chatId:scope.chatId,taskId:scope.taskId});this.emit({chatId:scope.chatId,message});
+    const message=this.store.message(scope.chatId,{kind:'skill',skillId:skill.id,skillName:skill.name,command:skill.command,callerRoleId:scope.roleId||null,text:'',request:prompt,status:'running',files:[],workflowRunId:scope.workflowRunId});const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),300000);this.jobs.set(message.id,{controller,skillId:skill.id,chatId:scope.chatId,taskId:scope.taskId});this.emit({chatId:scope.chatId,message});
     try{let result;if(skill.kind==='prompt')result={instructions:this.instructions(skill.id),task:prompt};else result=await this.image(skill,prompt,controller.signal,message.id,model=>{message.model=model;this.store.save();this.emit({chatId:scope.chatId,message});});
       if(controller.signal.aborted)throw new Error('Skill cancelled.');message.status='complete';message.text=skill.kind==='prompt'?'已载入技能说明。':'已在本机生成图片。'+result.files.map(f=>f.path).join('\n');message.files=result.files||[];return {...result,...(result.files?{files:result.files.map(({thumbnail,...file})=>file)}:{})};
     }catch(error){message.status=controller.signal.aborted?'cancelled':'failed';

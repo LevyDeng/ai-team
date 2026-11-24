@@ -1,7 +1,7 @@
 const { randomUUID } = require('node:crypto');
 const { responseObject } = require('./moderator.cjs');
 const { label, findRule, weightedOrder } = require('./workflow-ratings.js');
-const { unavailable, routingTimeoutMs } = require('./workflow.cjs');
+const { unavailable, backupHandover, routingTimeoutMs } = require('./workflow.cjs');
 
 const maxNodes = 12;
 const maxCandidates = 100;
@@ -119,8 +119,8 @@ async function choose(chat, node, { roles, priorityRoles, priorities, route, sig
   }
 }
 
-function settle(flow, attempt, message) {
-  const failure = unavailable(message);
+function settle(flow, attempt, message, allowFallback = true) {
+  const failure = allowFallback && unavailable(message);
   attempt.status = message.status;
   attempt.reason = failure || message.note || '';
   flow.pending = null;
@@ -207,17 +207,17 @@ async function run(chat, {signal, save, turn, roles, priorityRoles = roles, prio
     const prompt = [
       'Workflow goal: ' + flow.goal,
       `Step ${flow.nodeIndex + 1} of ${flow.nodes.length}: ${node.title}\n${node.instruction}`,
-      flow.index ? 'A previous candidate was unavailable. Inspect existing work and continue only what can safely be verified.' : '',
+      flow.index ? backupHandover : '',
       flow.reworkFeedback && 'Findings from the step that requested rework:\n' + flow.reworkFeedback,
       node.reworkTo && `If you verify a problem requiring changes in step ${node.reworkTo}, report the evidence and actionable findings and end with WORKFLOW: REWORK. If you cannot perform the check, use WORKFLOW: NEEDS_USER.`,
       'Perform only the current step. Use prior results and any additional user guidance. Report in the user language. End with WORKFLOW: DONE when the step meets its completion criteria, or WORKFLOW: NEEDS_USER if it requires a decision or cannot safely proceed.',
     ].filter(Boolean).join('\n\n');
     let receipt;
     try { receipt = await turn(attempt, prompt, signal); }
-    catch (error) { receipt = {status:'failed', note:error.message}; }
+    catch (error) { receipt = {status:'failed', note:error.message, errorCode:error.code}; }
     if (signal.aborted && receipt.status === 'cancelled' && receipt.stopConfirmed === true) {
       attempt.status = 'cancelled'; flow.pending = null; flow.status = 'paused';
-    } else settle(flow, attempt, receipt);
+    } else settle(flow, attempt, receipt, !signal.aborted);
     if (signal.aborted && flow.status === 'running') flow.status = 'paused';
     save();
   }

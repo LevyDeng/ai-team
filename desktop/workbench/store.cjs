@@ -81,12 +81,14 @@ class Store {
   summary() {
     const { chats, ...workspace } = this.state;
     return structuredClone({ ...workspace, chats: chats.map(chat => {
-      const { messages, nativeSessions, interactiveTerminals, moderatorMemory, voice, roleVoices, ...metadata } = chat;
+      const { messages, nativeSessions, interactiveTerminals, moderatorMemory, voice, roleVoices, workflowRuns, ...metadata } = chat;
       return {
         ...metadata,
+        ...(workflowRuns?{workflowRuns:workflowRuns.map(({baseSnapshot,sourceSnapshots,visits,activeSources,attempts,...run})=>
+          ({...run,attempts:attempts.slice(-1)}))}:{}),
         historyVersion: this.database.historyVersion(chat.id),
         nativeSessions: nativeSessions && Object.fromEntries(Object.entries(nativeSessions).map(([id, {seen, ...record}]) => [id, record])),
-        lastMessage: messagePreview(messages.findLast(message => !message.moderatorTask)),
+        lastMessage: messagePreview(messages.findLast(message => !message.moderatorTask&&!message.workflowInstruction)),
       };
     }) });
   }
@@ -118,7 +120,7 @@ class Store {
     chat.draft = draft;
   }
   messagePage(chatId, { before, after, around } = {}) {
-    const { messages } = this.get('chats', chatId);
+    const messages = this.get('chats', chatId).messages.filter(message=>!message.workflowInstruction);
     const limit = 40;
     const last = Math.max(0, messages.length - limit);
     const anchor = before ?? after ?? around;
@@ -139,7 +141,7 @@ class Store {
     const needle = String(query).trim().slice(0, 300).toLowerCase();
     if (!needle) return [];
     return this.state.chats.filter(chat => chat.projectId === projectId &&
-      chat.messages.some(message => messageText(message).toLowerCase().includes(needle))).map(chat => chat.id);
+      chat.messages.some(message => !message.workflowInstruction&&messageText(message).toLowerCase().includes(needle))).map(chat => chat.id);
   }
   searchMessages(chatId, query, offset = 0) {
     const needle = String(query).trim().slice(0, 300).toLowerCase();
@@ -149,6 +151,7 @@ class Store {
     const { messages } = this.get('chats', chatId);
     if (needle) for (let position = messages.length - 1; position >= 0; position--) {
       const message = messages[position];
+      if (message.workflowInstruction) continue;
       const value = messageText(message);
       const index = value.toLowerCase().indexOf(needle);
       if (index < 0) continue;

@@ -74,12 +74,23 @@ function validCursor(flow) {
     (order == null || (Array.isArray(order) && order.length === team.length && new Set(order).size === order.length && order.every(id => team.includes(id))));
 }
 
+const backupHandover = 'You are taking over the current workflow step. Inspect the current workspace, previous attempts and verification evidence first. The previous candidate may have partially executed the task or still have work in progress. Continue the remaining work and verify the state of earlier actions before repeating them.';
+
 function unavailable(message) {
-  if (message.status !== 'failed' || message.stopConfirmed === false) return '';
-  if(message.workflowSubmitted!==false&&['REMOTE_CHANNEL_CLOSED','CLI_SHUTDOWN_STALLED','REMOTE_AGENT_KILLED'].includes(message.errorCode))return '';
+  if (message.status !== 'failed') return '';
+  const failure=message.diagnostics?.failure||inspect(message.note||'');
+  if (message.stopConfirmed === false || ['REMOTE_STOP_UNCONFIRMED','CLI_SHUTDOWN_STALLED'].includes(message.errorCode)) {
+    return 'shutdown unconfirmed';
+  }
+  if (message.errorCode === 'REMOTE_AGENT_KILLED') return 'agent process interrupted';
+  if (['REMOTE_CHANNEL_CLOSED','VENDOR_PROTOCOL_TIMEOUT','AGY_BACKGROUND_TIMEOUT','ETIMEDOUT','ECONNRESET','EPIPE'].includes(message.errorCode) ||
+      [408,504].includes(failure.httpStatus) ||
+      failure.codes?.some(code=>['httpconnectionfailed','responsestreamconnectionfailed','responsestreamdisconnected'].includes(code)) ||
+      /\b(?:ECONNRESET|ETIMEDOUT|EPIPE)\b|\btimed?\s*out\b|\btimeout\b|\b(?:connection|channel|stream|protocol|CLI)\b.{0,30}\b(?:closed|lost|reset|disconnected)\b|\b(?:closed|lost|reset)\b.{0,20}\b(?:connection|channel|stream)\b/i.test(message.note||'')) {
+    return 'connection unavailable';
+  }
   const partialWork=(message.text?.trim()&&!message.workflowRejectionOnly)||message.activities?.length;
   if (message.errorCode==='ROLE_UNAVAILABLE') return message.note;
-  const failure=message.diagnostics?.failure||inspect(message.note||'');
   const category=failure.category;
   if(partialWork && !(message.stopConfirmed===true && (failure.httpStatus===429||message.errorCode==='CODEX_CAPACITY') &&
       (message.activities||[]).every(activity=>activity.status==='complete')))return '';
@@ -88,13 +99,13 @@ function unavailable(message) {
   if (message.errorCode === 'CODEX_CAPACITY') return 'capacity';
   if (/LOGIN_REQUIRED|AUTH_UNAVAILABLE/.test(message.errorCode || '')) return 'authentication';
   if (message.workflowSubmitted === false && /CLI not found|executable does not exist|Save an API key|Install the official .+ agent runtime/i.test(message.note||''))return 'agent setup unavailable';
-  if (message.workflowSubmitted === false && (category === 'transport' || /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|handshake|not connected|connection refused/i.test(message.note || '') ||
-      ['VENDOR_PROTOCOL_TIMEOUT','REMOTE_CHANNEL_CLOSED'].includes(message.errorCode))) return 'connection unavailable';
+  if (message.workflowSubmitted === false && (category === 'transport' ||
+      /ECONNREFUSED|ENOTFOUND|handshake|not connected|connection refused/i.test(message.note || ''))) return 'connection unavailable';
   return '';
 }
 
-function settle(flow, attempt, message) {
-  const failure = unavailable(message);
+function settle(flow, attempt, message, allowFallback = true) {
+  const failure = allowFallback && unavailable(message);
   attempt.status = message.status;
   attempt.reason = failure || message.note || '';
   flow.pending = null;
@@ -173,15 +184,15 @@ async function run(chat,{turn,save,signal,route,describe = () => ({}),roleEnable
         ? 'Implement the goal. Use any preceding review feedback. Report changes and verification evidence.'
         : 'Review the actual work against every acceptance criterion. Give evidence and actionable feedback. End on a separate line with VERDICT: PASS, VERDICT: REWORK, or VERDICT: NEEDS_USER.';
       let message;
-      const handover=flow.index>0?'You are taking over this stage. Inspect the current workspace, previous attempts and verification evidence first. Continue only the remaining work; ask for a decision if a prior action cannot be verified.':'';
+      const handover=flow.index>0?backupHandover:'';
       const reportLanguage = 'Write your report in the language of the goal unless the user asks for a different language. Keep any required VERDICT line exactly as specified.';
       try { message=await turn(attempt,[instruction,reportLanguage,handover,'Goal: '+flow.goal,'Acceptance criteria: '+flow.criteria].filter(Boolean).join('\n\n'),signal); }
-      catch(error){message={status:'failed',note:error.message};}
+      catch(error){message={status:'failed',note:error.message,errorCode:error.code};}
       if (signal.aborted && message.status === 'cancelled' && message.stopConfirmed === true) {
         attempt.status = 'cancelled';
         flow.pending = null;
         flow.status = 'paused';
-      } else settle(flow,attempt,message);
+      } else settle(flow,attempt,message,!signal.aborted);
       if(signal.aborted && flow.status==='running')flow.status='paused';
       save();
       return {status:flow.status};
@@ -193,4 +204,4 @@ async function run(chat,{turn,save,signal,route,describe = () => ({}),roleEnable
   await graph.invoke({status:'running'},{recursionLimit:4+flow.limit*(flow.teams.implement.length+flow.teams.review.length)});
 }
 
-module.exports={canModerate,configure,recover,run,unavailable,routingTimeoutMs};
+module.exports={canModerate,configure,recover,run,unavailable,backupHandover,routingTimeoutMs};

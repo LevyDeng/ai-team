@@ -203,7 +203,7 @@ function renderSidebar() {
     $('chat-new').insertAdjacentHTML('beforebegin','<button data-filter="workflow">工作流</button>');
     $('sidebar-top').querySelector('[data-filter="workflow"]').classList.toggle('active',filter==='workflow');
     $('chat-new').title = filter === 'workflow' ? '新建工作流' : '新建对话';
-    $('project-edit').onclick = () => openProject(project()); $('project-new').onclick = () => openProject(); $('chat-new').onclick = () => filter==='workflow'?openWorkflow():openChat();
+    $('project-edit').onclick = () => openProject(project()); $('project-new').onclick = () => openProject(); $('chat-new').onclick = () => filter==='workflow'?openGroupWorkflowDestination():openChat();
     document.querySelectorAll('[data-filter]').forEach(b => { b.onclick = () => { saveDraftNow();filter = b.dataset.filter;
       if(filter==='workflow'&&!chat()?.workflow)chatId=chats().find(item=>item.workflow)?.id;
       renderSidebar();activateChat(); }; });
@@ -398,9 +398,11 @@ function activateChat() {
   skillCommands.close();
   $('workflow-status')?.remove();
   const c = chat(); const has = Boolean(c); $('composer').hidden = !has || Boolean(c.disbandedAt); $('empty-chat').hidden = has; $('messages').hidden = !has;
+  $('tool-workflow').hidden = !c || Boolean(c.workflow || c.disbandedAt);
+  if (toolMode==='workflow'&&!$('tools-panel').hidden) renderGroupWorkflows();
   const workflowFilter = filter === 'workflow';
   $('empty-chat').querySelector('h2').textContent = workflowFilter ? '还没有工作流' : '让想法在这里碰面';
-  $('empty-chat').querySelector('p').textContent = workflowFilter ? '填写任务目标和验收标准，选择执行和验收角色。' : '与一个角色深入交流，或邀请多个角色一起讨论。';
+  $('empty-chat').querySelector('p').textContent = workflowFilter ? '新工作流在群聊的右栏里保存和启动。' : '与一个角色深入交流，或邀请多个角色一起讨论。';
   $('empty-create').innerHTML = icon('plus') + (workflowFilter ? '新建工作流' : '新建对话');
   $('chat-settings').hidden = !has; $('participants').innerHTML = has && !c.disbandedAt ? c.roleIds.map(id => roleButton(id)).join('') : '';
   $('chat-avatar').innerHTML = has ? (c.roleIds.length > 1 ? group() : roleButton(c.roleIds[0])) : group();
@@ -430,7 +432,7 @@ function renderMessages() {
   const c = chat(); if (!c || page !== 'projects') return;
   refreshMessagePage();
   const view = historyView?.id === c.id ? historyView : null;
-  const messages = view?.messages || [];
+  const messages = (view?.messages || []).filter(message=>!message.workflowInstruction);
   const list = $('messages'); const shouldScroll = !view?.newer && (autoBottom || list.scrollHeight - list.scrollTop - list.clientHeight < 100);
   const ids = new Set(messages.map(message => 'msg-' + message.id));
   for (const element of [...list.children]) if (!ids.has(element.id)) {
@@ -445,7 +447,7 @@ function renderMessages() {
     if (!element) {
       element = document.createElement('article'); element.id = 'msg-' + m.id; element.className = 'message ' + m.kind;
       if (m.kind === 'system') { element.className = 'system-message'; element.textContent = m.text; list.append(element); continue; }
-      element.innerHTML = `${m.kind === 'user' ? `<img class="user-icon" src="icons/user.svg" alt="我">` : roleButton(m.roleId)}<div class="message-content">${m.kind === 'assistant' ? `<div class="message-meta"><b>${esc(m.roleName)}</b><span>${esc(engineLabel(role(m.roleId)?.engine))} · ${esc(locationOf(m.locationId)?.name || '')}${m.model ? ' · ' + esc(m.model) : ''}</span></div>` : ''}<div class="message-bubble"></div><div class="message-images" hidden></div><details class="message-reasoning" hidden><summary>思考摘要（CLI 提供）</summary><pre></pre></details><details class="message-tools" hidden><summary>工具活动</summary><ul></ul></details><div class="message-note" hidden></div><div class="message-footer"><time>${new Date(m.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time><span class="message-state"></span><button class="quiet task-output" ${m.kind !== 'assistant' ? 'hidden' : ''}>任务输出</button><button class="quiet copy-full">复制全文</button><button class="quiet restore" ${m.kind !== 'user' ? 'hidden' : ''}>恢复文字</button></div></div>`;
+      element.innerHTML = `${m.kind === 'user' ? `<img class="user-icon" src="icons/user.svg" alt="我">` : m.workflowResult ? group() : roleButton(m.roleId)}<div class="message-content">${m.kind === 'assistant' ? `<div class="message-meta"><b>${esc(m.roleName)}</b><span></span></div>` : ''}${m.workflowTitle&&!m.workflowResult?`<p class="workflow-message-label hint">${esc([m.workflowTitle,...(m.workflowPath||[]).map(step=>step.title+(step.round?' · 第 '+step.round+' 轮':''))].join(' / '))}</p>`:''}<div class="message-bubble"></div><div class="message-images" hidden></div><details class="message-reasoning" hidden><summary>思考摘要（CLI 提供）</summary><pre></pre></details><details class="message-tools" hidden><summary>工具活动</summary><ul></ul></details><div class="message-note" hidden></div><div class="message-footer"><time>${new Date(m.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time><span class="message-state"></span><button class="quiet task-output" ${m.kind !== 'assistant' || m.workflowResult ? 'hidden' : ''}>任务输出</button><button class="quiet copy-full">复制全文</button><button class="quiet restore" ${m.kind !== 'user' ? 'hidden' : ''}>恢复文字</button></div></div>`;
       element.querySelector('.copy-full').onclick = () => action(async () => { const current=visibleMessage(c.id,m.id)||m;await api.copy(window.deskAttachments.messageText(current)); toast('已复制整条消息'); });
       element.querySelector('.restore').textContent='恢复输入';
       element.querySelector('.restore').onclick = () => {if(!chat()?.disbandedAt)restoreInput(c.id,m.id);};
@@ -469,7 +471,7 @@ function renderMessages() {
     if (m.geminiWeb) renderGeminiWebTurn(element, c, m);
     const reasoning = element.querySelector('.message-reasoning'); reasoning.hidden = !m.thinking; if (reasoning.querySelector('pre').textContent !== (m.thinking || '')) reasoning.querySelector('pre').textContent = m.thinking || '';
     renderMessageTools(element.querySelector('.message-tools'), c.id, m);
-    if (m.kind === 'assistant') element.querySelector('.message-meta>span').textContent = engineLabel(role(m.roleId)?.engine) + ' · ' + (locationOf(m.locationId)?.name || '') + (m.model ? ' · ' + m.model : '');
+    if (m.kind === 'assistant'&&!m.workflowResult) element.querySelector('.message-meta>span').textContent = engineLabel(role(m.roleId)?.engine) + ' · ' + (locationOf(m.locationId)?.name || '') + (m.model ? ' · ' + m.model : '');
     if(m.kind==='assistant'&&m.nativeSession){const meta=element.querySelector('.message-meta');let badge=meta.querySelector('.native-session-label');if(!badge){badge=document.createElement('span');badge.className='native-session-label';meta.append(badge);}badge.textContent=m.nativeSession.mode==='resumed'?'沿用原生会话':m.nativeSession.mode==='compatibility'?'历史衔接（CLI 不支持恢复）':'新原生会话';badge.title=m.nativeSession.id||'等待 CLI 返回会话 ID';}
     const login = element.querySelector('.native-login'); if (login) { login.hidden = !['CODEX_LOGIN_REQUIRED','CODEX_LOGIN_CHECK_FAILED','CODEX_DESKTOP_LOGIN_REQUIRED','CODEX_DESKTOP_LOGIN_CHECK_FAILED','VENDOR_LOGIN_REQUIRED'].includes(m.errorCode); login.textContent = m.errorCode?.startsWith('CODEX_DESKTOP_') ? '检查桌面版登录' : '登录此角色'; }
     const modelChoice = element.querySelector('.select-task-model'); if (modelChoice) modelChoice.hidden = m.errorCode !== 'CODEX_MODEL_REQUIRED';
@@ -490,7 +492,13 @@ function renderMessages() {
       const note = element.querySelector('.message-note'); note.hidden = !m.note; note.textContent = m.errorCode === 'WORKBUDDY_DESKTOP_AUTH_UNAVAILABLE' ? '桌面版已登录不代表独立子进程能获得加密凭据。当前桌面账号兼容接入仍未完成；不会自动改用 API Key 或另一种计费方式。原提问已保留，无需重复输入。' : m.errorCode === 'CODEX_MODEL_REQUIRED' ? '对话模型留空时会跟随角色默认。两处均未设置，请点击“选择本对话模型”；复用登录不会自动采用桌面版的默认模型，原提问已保留。' : m.errorCode?.startsWith('CODEX_DESKTOP_LOGIN_') ? '此角色复用桌面版 Codex 的登录。请在桌面版完成登录后重试；无需在这里重复授权，原提问已保留。' : m.errorCode === 'CODEX_LOGIN_REQUIRED' ? '此角色尚未登录 Codex。点击“登录此角色”完成授权后，再发送消息。也可在角色设置中选择复用桌面版登录；原提问已保留在聊天记录中。' : m.errorCode === 'CODEX_LOGIN_CHECK_FAILED' ? '无法确认此角色的 Codex 登录状态。请点击“登录此角色”重新授权；原提问已保留在聊天记录中。' : m.note ? uiError(m.note) : '';
       if(m.warningCode==='CLAUDE_PERMISSION_DENIED'||m.note==='Some tools require approval. Use the project terminal or classic interface to approve them.')note.textContent=m.permission==='danger-full-access'?'本次已使用 Claude 完全权限，仍有工具被拒绝。请检查 Claude 管理策略、工具自身限制或 MCP 服务授权；容器和 Linux 用户权限不会自动提升。':'本次有工具需要审批。可在角色 → 连接配置 → Agent 运行权限中选择完全权限，保存后重新发送任务。已结束的请求无法在另一个终端补批；原提问和回复已保留。';
       if(m.note==='CLI submission was not confirmed. Restore this message to retry.')note.textContent='连接结束前尚未确认 CLI 收到消息。文字和附件已保留，可点击“恢复输入”重试。';
-      if(m.errorCode==='REMOTE_CHANNEL_CLOSED'){note.hidden=false;note.textContent='远程 SSH 通道中断，未收到退出状态；这条错误不能用于判断账号被停用。请重新连接后继续，已收到的回复和发送记录保留，任务没有自动重试。';}
+      if(m.errorCode==='REMOTE_CHANNEL_CLOSED'){
+        const flow=m.workflowRunId?c.workflowRuns?.find(run=>run.id===m.workflowRunId):c.workflow;
+        const backup=flow&&flow.type!=='graph'&&m.workflowAttemptId&&m.status==='failed';
+        note.hidden=false;
+        note.textContent=backup?'远程 SSH 通道中断，未收到退出状态。已保留收到的回复，工作流会尝试后续候选角色。':
+          '远程 SSH 通道中断，未收到退出状态；这条错误不能用于判断账号被停用。请重新连接后继续，已收到的回复和发送记录保留，任务没有自动重试。';
+      }
       if(m.status==='cancelled'&&m.stopConfirmed===false){note.hidden=false;note.textContent='任务尚未确认停止。请检查任务输出和进程后再继续。';}
       if(m.errorCode==='REMOTE_AGENT_KILLED'){note.hidden=false;note.textContent='远程进程被强制终止，可能涉及资源限制或外部结束操作，需要结合服务器记录判断。已收到的回复保留，任务没有自动重试。\n'+(m.note||'');}
       if(m.errorCode==='VENDOR_PROTOCOL_TIMEOUT'){note.hidden=false;const phase=m.protocolTimeout?.method==='initialize'?'协议握手':m.protocolTimeout?.method==='session/new'?'创建会话／初始化 MCP':'会话配置';note.textContent='原生 CLI 在'+phase+'阶段等待超时'+(m.protocolTimeout?.timeoutMs?'（'+Math.ceil(m.protocolTimeout.timeoutMs/1000)+' 秒）':'')+'，尚未提交聊天任务。原提问已保留，程序不会自动重试。请检查官方 CLI 登录、角色代理和 MCP 启动情况后再试。';}
@@ -518,10 +526,18 @@ function renderMessages() {
     child = current.nextElementSibling;
   }
   const busy = state.running[c.id], forceStop = state.forceStops?.[c.id];
+  const workflowRun=c.workflowRuns?.find(run=>run.id===busy?.workflowRunId||run.status==='queued');
   const terminalBusy=agentTerminals.some(t=>t.chatId===c.id&&t.state==='ready'&&['running','waiting'].includes(t.taskState));
-  $('chat-banner').hidden = !busy&&!terminalBusy&&!forceStop;
+  $('chat-banner').hidden = !busy&&!terminalBusy&&!forceStop&&!workflowRun;
   const forceButton=forceStop?`<button type="button" id="force-stop" ${forceStop.stopping?'disabled':''}>强制结束</button>`:'';
-  if (busy) {
+  if (workflowRun) {
+    const stage=workflowRun.status==='queued'?'排队中':busy?.stopping?'正在停止…':'运行中';
+    $('chat-banner').innerHTML=`<span>工作流 · ${esc(workflowRun.title)} · ${stage}</span>
+      <button type="button" id="view-running-workflow">查看画板</button>
+      <button type="button" id="stop-running-workflow" ${busy?.stopping?'disabled':''}>停止</button>${forceButton}`;
+    $('view-running-workflow').onclick=()=>action(()=>openTools('workflow',workflowRun.definitionId));
+    $('stop-running-workflow').onclick=()=>action(()=>invokeWorkflow('group-stop',c.id,workflowRun.id));
+  } else if (busy) {
     const current=messages.findLast(m=>m.kind==='assistant'&&m.roleId===busy.roleId&&m.status==='running');
     const finishing=['Finishing agent','Closing the finished agent process'].includes(current?.activity);
     const waiting=busy.phase==='web-reply'&&!busy.stopping;
@@ -540,11 +556,15 @@ function renderMessages() {
   renderWorkflowStatus(c);
   renderDiscussion();
   $('reply-flow').disabled = false; $('group-order').disabled = false;
-  renderSpeakingOrder(); if (toolMode === 'activity' && !$('tools-panel').hidden) renderActivity();
+  renderSpeakingOrder();
+  if (!$('tools-panel').hidden) {
+    if (toolMode === 'activity') renderActivity();
+    if (toolMode === 'workflow') renderGroupWorkflows();
+  }
   const inputBusy=Boolean(state.inputBusy?.[c.id]||busy),queued=Boolean(c.inputQueue?.length);
-  $('end-task').hidden = !busy&&!terminalBusy; $('end-task').disabled=Boolean(busy?.stopping||forceStop?.stopping);
+  $('end-task').hidden = Boolean(workflowRun)||!busy&&!terminalBusy; $('end-task').disabled=Boolean(busy?.stopping||forceStop?.stopping);
   $('send').hidden = false; $('send').innerHTML=icon(inputBusy||queued?'plus':'send')+(inputBusy||queued?'加入队列':'发送');
-  $('interrupt-send').hidden=!inputBusy&&!queued;if($('chat-summary'))$('chat-summary').disabled=Boolean(inputBusy||queued);
+  $('interrupt-send').hidden=Boolean(workflowRun)||!inputBusy&&!queued;if($('chat-summary'))$('chat-summary').disabled=Boolean(inputBusy||queued);
   renderInputQueue(c);
   if (shouldScroll) requestAnimationFrame(() => {
     if (historyView !== view || view?.newer) return;
@@ -1134,21 +1154,25 @@ function openPriorityRule(rule) {
     });
 }
 
-function openWorkflow(existing){
+function openWorkflow(existing,{groupTarget,definition}={}){
   const activeProject = project();
   if (!activeProject) { toast('请先创建或选择一个项目。'); return; }
   const roles=state.roles.filter(r=>r.enabled!==false&&r.engine!==geminiWebEngine&&activeProject.directories.some(d=>d.locationId===r.locationId));
-  if (!roles.length && !existing) { openGraphWorkflow(activeProject); return; }
+  if (!roles.length && !existing&&!groupTarget) { openGraphWorkflow(activeProject); return; }
   if(!roles.length){toast('当前项目没有可以运行工作流的角色。请先在项目设置中为角色的运行位置添加工作目录。');return;}
   const stages=['implement','review'];
   const teams={implement:[roles[0].id],review:[(roles[1]||roles[0]).id]};
-  if(existing)for(const stage of stages)teams[stage]=existing.workflow.teams[stage].filter(id=>roles.some(role=>role.id===id));
-  const moderatorId=existing?.workflow.moderatorRoleId||'';
+  const config=definition||existing?.workflow;
+  if(config)for(const stage of stages)teams[stage]=config.teams[stage].filter(id=>roles.some(role=>role.id===id));
+  const moderatorId=config?.moderatorRoleId||'';
   const moderationOptions=[['','按候选顺序'],...roles.map(role=>[role.id,`AI 主持 · ${role.name}`])];
   if(moderatorId&&!roles.some(role=>role.id===moderatorId))moderationOptions.push([moderatorId,'原主持角色不可用']);
-  const fields=existing?'':'<button type="button" id="wf-ai-plan">AI 生成工作流</button> <button type="button" id="wf-graph-open">编排工作流 / 使用模板</button><label>任务目标<textarea id="wf-goal" rows="3" maxlength="16000" required></textarea></label><label>验收标准<textarea id="wf-criteria" rows="3" maxlength="16000" required></textarea></label><label>最多轮数<input id="wf-limit" type="number" min="1" max="20" value="3" required></label>';
+  const fields=existing?'':groupTarget?`<label>工作流名称<input id="wf-title" maxlength="100" required value="${esc(definition?.title||'执行与验收')}"></label>
+    <label>验收标准<textarea id="wf-criteria" rows="3" maxlength="16000" required>${esc(definition?.criteria||'')}</textarea></label>
+    <label>最多轮数<input id="wf-limit" type="number" min="1" max="20" value="${definition?.limit||3}" required></label>`:
+    '<button type="button" id="wf-ai-plan">AI 生成工作流</button> <button type="button" id="wf-graph-open">编排工作流 / 使用模板</button><label>任务目标<textarea id="wf-goal" rows="3" maxlength="16000" required></textarea></label><label>验收标准<textarea id="wf-criteria" rows="3" maxlength="16000" required></textarea></label><label>最多轮数<input id="wf-limit" type="number" min="1" max="20" value="3" required></label>';
   const moderation=`<label>选人方式<select id="wf-moderator" aria-describedby="wf-moderator-hint">${options(moderationOptions,moderatorId)}</select></label><p id="wf-moderator-hint" class="hint" hidden>有多个候选时由主持人先选一位。该角色不可用时，按列表顺序尝试其余候选。</p>`;
-  const title=existing?'编辑工作流角色和主持人':'新建工作流';
+  const title=existing?'编辑工作流角色和主持人':groupTarget?'执行与验收工作流':'新建工作流';
   dialog(`<h2>${title}</h2>${fields}${moderation}${stages.map(stage=>`<section class="setting-card"><h3>${stage==='review'?'验收角色':'执行角色'}</h3><div id="wf-${stage}"></div></section>`).join('')}<p id="wf-error" class="message-note" role="alert" hidden></p>`,async()=>{
     const submit=$('dialog-submit');submit.disabled=true;
     const feedback = $('wf-error');
@@ -1156,6 +1180,11 @@ function openWorkflow(existing){
     try{
       const moderatorRoleId=$('wf-moderator').value;
       if(existing){await invokeWorkflow('teams',existing.id,teams,moderatorRoleId);return;}
+      if(groupTarget) {
+        await saveGroupWorkflow(groupTarget,definition?.id,{type:'teams',title:$('wf-title').value,
+          criteria:$('wf-criteria').value,limit:$('wf-limit').valueAsNumber,teams,moderatorRoleId});
+        return;
+      }
       const result=await invokeWorkflow('create',{projectId:activeProject.id,goal:$('wf-goal').value,criteria:$('wf-criteria').value,limit:Number($('wf-limit').value),teams,moderatorRoleId});
       await openConversationResult(result);filter='workflow';renderSidebar();
     }catch(error){
@@ -1164,7 +1193,7 @@ function openWorkflow(existing){
       feedback.scrollIntoView({block:'nearest'});
       return false;
     }finally{submit.disabled=false;}
-  },existing?'保存设置':'创建并排队');
+  },existing||groupTarget?'保存工作流':'创建并排队');
   function render(stage){
     const group=$('wf-'+stage),team=teams[stage];
     group.replaceChildren();
@@ -1190,12 +1219,12 @@ function openWorkflow(existing){
   }
   const refresh=()=>{$('wf-moderator-hint').hidden=!$('wf-moderator').value;stages.forEach(render);};
   $('wf-moderator').onchange=refresh;
-  if (!existing) $('wf-ai-plan').onclick=()=>{
+  if (!existing&&!groupTarget) $('wf-ai-plan').onclick=()=>{
     const criteria=$('wf-criteria').value.trim();
     const goal=[$('wf-goal').value.trim(),criteria&&`验收标准\n${criteria}`].filter(Boolean).join('\n\n');
     openGeneratedWorkflow(activeProject,{goal});
   };
-  if (!existing) $('wf-graph-open').onclick=()=>{
+  if (!existing&&!groupTarget) $('wf-graph-open').onclick=()=>{
     const goal=[$('wf-goal').value.trim(),$('wf-criteria').value.trim()].filter(Boolean).join('\n\n');
     openGraphWorkflow(activeProject,{goal});
   };
@@ -1286,20 +1315,20 @@ function openGraphWorkflow(activeProject,{goal='',draft}={}) {
   mount(draft);
 }
 
-function openGeneratedWorkflow(activeProject,{goal='',existing,rerun=false}={}) {
+function openGeneratedWorkflow(activeProject,{goal='',existing,rerun=false,groupTarget,definition}={}) {
   const eligible=state.roles.filter(r=>{
     if (!r||r.enabled===false||r.engine===geminiWebEngine||!activeProject.directories.some(d=>d.locationId===r.locationId)) return false;
     const location=locationOf(r.locationId);
     return location?.type==='local'||(location?.os==='linux'&&r.provider==='native');
   });
   if (!eligible.length) {toast('请先在项目设置中加入一位已启用且能自动运行的角色，并配置对应的工作目录。');return;}
-  const flow=existing?.workflow;
+  const flow=definition||existing?.workflow;
   const editing=existing&&!rerun;
-  const title=editing?'编辑工作流步骤':rerun?'再次运行工作流':'AI 生成工作流';
+  const title=editing||definition?.id?'编辑工作流步骤':rerun?'再次运行工作流':'AI 生成工作流';
   const projectRoles = activeProject.roleIds.map(id => eligible.find(role => role.id === id)).filter(Boolean);
   const hostOptions=eligible.map(r=>[r.id,`${r.name} · ${locationOf(r.locationId)?.name||''}`]);
-  const fields=`<label>任务目标<textarea id="wf-plan-goal" rows="4" maxlength="16000" required ${existing?'readonly':''}>${esc(flow?.goal||goal)}</textarea></label>`;
-  const planning=existing?'':`<label id="wf-plan-planner-field">生成角色<select id="wf-plan-planner">${options(hostOptions,projectRoles[0]?.id || eligible[0].id)}</select></label>`;
+  const fields=`<label ${definition?'hidden':''}>任务目标<textarea id="wf-plan-goal" rows="4" maxlength="16000" ${definition?'':'required'} ${existing||definition?'readonly':''}>${esc(flow?.goal||goal)}</textarea></label>`;
+  const planning=flow?'':`<label id="wf-plan-planner-field">生成角色<select id="wf-plan-planner">${options(hostOptions,projectRoles[0]?.id || eligible[0].id)}</select></label>`;
   const preview=`<section id="wf-plan-preview" hidden><label>工作流名称<input id="wf-plan-title" maxlength="100" ${editing?'readonly':''}></label><label>未匹配规则时的主持人<select id="wf-plan-moderator">${options([['','不指定主持人'],...hostOptions],flow?.moderatorRoleId||'')}</select></label><p class="hint">每一步开始时读取角色优先级表。未匹配规则时，由这里选定的主持人选人。</p><label>整个工作流最多返工次数<input id="wf-rework-limit" type="number" min="0" max="20" value="3" required ${editing?'readonly':''}></label><div id="wf-plan-nodes"></div></section>`;
   let readNodes, requestId, root, feedback, target, submit, goalInput, plannerField;
   dialog(`<h2>${title}</h2><div id="wf-plan-form">${fields}${planning}${preview}<p id="wf-plan-error" class="message-note" role="status" hidden></p></div>`,async()=>{
@@ -1314,7 +1343,8 @@ function openGeneratedWorkflow(activeProject,{goal='',existing,rerun=false}={}) 
         return false;
       }
       const value={type:'generated',projectId:activeProject.id,goal:goalInput.value,title:$('wf-plan-title').value,nodes:readNodes(),reworkLimit:$('wf-rework-limit').valueAsNumber,moderatorRoleId:$('wf-plan-moderator').value};
-      if (editing) await invokeWorkflow('generated-update',existing.id,value);
+      if (groupTarget) await saveGroupWorkflow(groupTarget,definition?.id,value);
+      else if (editing) await invokeWorkflow('generated-update',existing.id,value);
       else {
         const result=await invokeWorkflow('create',value);
         await openConversationResult(result);filter='workflow';renderSidebar();
@@ -1339,9 +1369,9 @@ function openGeneratedWorkflow(activeProject,{goal='',existing,rerun=false}={}) 
     const orderedIds = new Set(plan.nodes.flatMap(node => node.roleIds || []));
     const currentRoles=[...projectRoles,...eligible.filter(item=>!activeProject.roleIds.includes(item.id) && (item.id===moderatorId || orderedIds.has(item.id)))];
     readNodes=window.deskWorkflowUI.editPlan($('wf-plan-nodes'),plan.nodes,currentRoles,state.workflowPriorities || [],editing?flow.nodeIndex:0,eligible);
-    submit.textContent=editing?'保存设置':'创建并排队';
+    submit.textContent=editing?'保存设置':groupTarget?'保存工作流':'创建并排队';
   }
-  if (existing) showPreview(flow,flow.moderatorRoleId);
+  if (flow) showPreview(flow,flow.moderatorRoleId);
   target.addEventListener('close',()=>{
     if (requestId) invokeWorkflow('plan-cancel',activeProject.id,requestId).catch(()=>{});
   },{once:true});
@@ -1394,6 +1424,8 @@ const workflowMessages = new Map([
   ['authentication', '身份验证失败'],
   ['agent setup unavailable', '角色运行环境不可用'],
   ['connection unavailable', '连接不可用'],
+  ['shutdown unconfirmed', '上一角色的进程停止尚未确认'],
+  ['agent process interrupted', '角色进程意外中断'],
 ]);
 
 async function invokeWorkflow(command, ...args) {
@@ -1431,6 +1463,7 @@ function renderGraphWorkflow(panel, c) {
     element.type='button';element.textContent=label;element.onclick=click;panel.append(element);
   };
   button('打开流程副本',()=>openGraphWorkflow(project(),{goal:flow.goal,draft:flow}));
+  button('将副本保存到群聊',()=>openGroupWorkflowDestination(flow));
   if (['paused','needs_check'].includes(flow.status)) {
     const guidance=document.createElement('textarea');
     guidance.rows=2;guidance.maxLength=16000;guidance.placeholder='为当前节点补充说明（可选）';
@@ -1572,7 +1605,7 @@ async function openPhoneLink(c) {
   });
   $('phone-copy').onclick = () => action(() => api.copy($('phone-code').value));
 }
-function openChat(c, preferredRole) {
+function openChat(c, preferredRole, onCreated) {
   if(c?.disbandedAt){
     dialog('<h2>群聊已解散</h2><p>聊天记录仍可查看。</p><button type="button" class="quiet" id="remove-disbanded-chat">移出列表并存入归档</button>',()=>{},'关闭');
     addChatActions(c);
@@ -1598,6 +1631,10 @@ function openChat(c, preferredRole) {
       const result = await api['chat-add'](value);
       state = await api.snapshot();
       chatId = result.id;
+      if (onCreated) {
+        filter='all';
+        onCreated(chat());
+      }
     }
     renderSidebar(); activateChat();
   }, c ? '保存' : '创建对话');
@@ -2007,7 +2044,199 @@ function renderSettings() {
   for (const name of ['check','update']) $('cli-' + name).onclick = () => action(async () => { cliResult.textContent = name === 'check' ? '正在检查…' : '正在升级托管 CLI…'; const result = await api['cli-' + name](); cliResult.textContent = result.message || JSON.stringify(result); });
 }
 function renderToolDirectory() { const select = $('tool-directory'); const previous = select.value; select.innerHTML = options((project()?.directories || []).map((d,i) => [i, (locationOf(d.locationId)?.name || d.locationId) + ' · ' + d.path]), previous || 0); }
-async function openTools(mode, directoryIndex) { if (!project()) return; toolMode = mode; $('tools-panel').hidden = false; $('tools-rail').hidden = true; $('terminal-tools').hidden = mode !== 'terminal'; $('file-tools').hidden = mode !== 'files'; $('activity-tools').hidden = mode !== 'activity'; $('tool-directory').hidden = mode === 'activity'; $('tools-title').textContent = ({ terminal:'项目终端', files:'项目文件', activity:'对话任务输出' })[mode]; renderToolDirectory(); if (mode === 'files') { if (directoryIndex !== undefined) $('tool-directory').value = String(directoryIndex); await loadFiles(); } else if (mode === 'activity') {agentTerminals=await api['agent-terminals']();renderActivity();} else { await refreshTerminals(); if (!terminals.some(t => t.projectId === projectId)) toast('点击加号打开此项目的共享终端'); fitTerminal(); } }
+let groupWorkflowEditor;
+const groupWorkflowSelection = new Map();
+
+async function saveGroupWorkflow(c,id,value) {
+  const saved=await invokeWorkflow('group-save',c.id,id,value);
+  groupWorkflowSelection.set(c.id,saved.id);
+  state=await api.snapshot();
+  if (chat()?.id===c.id) renderGroupWorkflows();
+  toast('已保存工作流「'+saved.title+'」。');
+  return saved;
+}
+
+function openGroupWorkflowDestination(graph) {
+  const candidates=chats().filter(item=>!item.workflow&&!item.disbandedAt);
+  const open=async target=>{
+    await openConversationResult(target);
+    if (graph) groupWorkflowSelection.set(target.id,'');
+    await openTools('workflow');
+    if (graph) mountGroupWorkflow(target,groupWorkflowEditor.key,graph,false);
+  };
+  if (!candidates.length) {
+    openChat(undefined,undefined,target=>action(()=>open(target)));
+    return;
+  }
+  if (candidates.length===1) {action(()=>open(candidates[0]));return;}
+  dialog(`<h2>选择工作流所在群聊</h2><label>群聊<select id="group-workflow-destination">${options(candidates.map(item=>[item.id,item.name]))}</select></label>`,
+    ()=>open(candidates.find(item=>item.id===$('group-workflow-destination').value)),'打开画板');
+}
+
+function mountGroupWorkflow(c, key, draft, readOnly) {
+  const board=$('group-workflow-board');
+  const p=project();
+  const roles=state.roles.filter(role=>{
+    const location=locationOf(role.locationId);
+    return role.enabled!==false&&role.engine!==geminiWebEngine&&p.directories.some(dir=>dir.locationId===role.locationId)&&
+      (location?.type==='local'||location?.os==='linux'&&role.provider==='native');
+  }).map(role=>({...role,location:locationOf(role.locationId).name,local:role.locationId==='local'}));
+  const chats=state.chats.map(item=>({id:item.id,name:item.id===c.id?'本群 · '+item.name:
+    (state.projects.find(project=>project.id===item.projectId)?.name||'')+' / '+item.name}));
+  board.innerHTML=`<div class="graph-workspace"><div class="graph-toolbar">
+    <button type="button" class="graph-add">添加角色</button>
+    <button type="button" class="graph-fit">适应画布</button>
+    <button type="button" class="graph-zoom-out" aria-label="缩小画布">−</button>
+    <button type="button" class="graph-zoom-in" aria-label="放大画布">+</button>
+  </div><div class="graph-canvas" aria-label="工作流画布"></div></div><div class="graph-inspector"></div>`;
+  const read=window.deskGraphWorkflow.mount(board,roles,draft,{chats,readOnly});
+  board.querySelector('.graph-fit').onclick=read.fit;
+  $('group-workflow-title').value=draft.title||'';
+  groupWorkflowEditor={key,read};
+  requestAnimationFrame(()=>{if(groupWorkflowEditor?.read===read&&!board.closest('[hidden]')) read.fit();});
+}
+
+function renderGroupWorkflows() {
+  const c=chat(), section=$('workflow-tools'), picker=$('group-workflow-select');
+  const available=c&&!c.workflow&&!c.disbandedAt;
+  for (const element of section.children) element.hidden=!available;
+  if (!available) {
+    $('tools-title').textContent='工作流 · 请打开群聊';
+    return;
+  }
+  $('tools-title').textContent='群聊工作流';
+  const definitions=c.workflowDefinitions||[];
+  const active=c.workflowRuns?.find(run=>['queued','running'].includes(run.status));
+  const id=groupWorkflowSelection.get(c.id)??active?.definitionId??definitions[0]?.id??'';
+  const definition=definitions.find(item=>item.id===id);
+  const run=definition&&c.workflowRuns?.findLast(item=>item.definitionId===definition.id);
+  const readOnly=Boolean(active&&run===active);
+  const resumable=run&&['paused','needs_check','unavailable'].includes(run.status);
+  const isGraph=!definition||!['generated','teams'].includes(definition.type);
+  const templatePicker=$('group-workflow-template');
+  const updateOptions=(element,items,value)=>{
+    const content=options(items,value);
+    if (element._options!==content) {
+      element.innerHTML=content;
+      element._options=content;
+    }
+    element.value=value;
+  };
+  updateOptions(picker,[['','新工作流'],...definitions.map(item=>[item.id,item.title])],definition?.id||'');
+  const templates=(state.workflowTemplates||[]).map(item=>[item.id,item.title]);
+  updateOptions(templatePicker,[['','选择模板'],...templates],templates.some(([id])=>id===templatePicker.value)?templatePicker.value:'');
+  $('group-workflow-load').disabled=!templatePicker.value;
+  const key=JSON.stringify([c.id,definition?.id,readOnly?run.id:null]);
+  $('group-workflow-board').hidden=!isGraph;
+  const plan=$('group-workflow-plan');
+  plan.hidden=isGraph;
+  if (isGraph&&groupWorkflowEditor?.key!==key) mountGroupWorkflow(c,key,readOnly?run:definition||{structured:true},readOnly);
+  const progress=readOnly&&run.frames?.length?run.frames:readOnly&&run.nodes?.[run.nodeIndex]?[{nodeId:run.nodes[run.nodeIndex].id}]:[];
+  if (isGraph) groupWorkflowEditor.read.setProgress(progress);
+  else {
+    $('group-workflow-title').value=definition.title;
+    const shown=readOnly?run:definition;
+    const steps=shown.type==='generated'?shown.nodes.map(node=>node.title):[
+      '执行 · '+shown.teams.implement.map(id=>role(id)?.name||'原角色不可用').join('、'),
+      '验收 · '+shown.teams.review.map(id=>role(id)?.name||'原角色不可用').join('、'),
+    ];
+    const current=readOnly?(shown.type==='generated'?shown.nodeIndex:Number(shown.stage==='review')):-1;
+    plan.innerHTML=`<ol>${steps.map((title,index)=>`<li ${index===current?'aria-current="step"':''}>${esc(title)}</li>`).join('')}</ol>
+      <button type="button" ${readOnly?'disabled':''}>编辑工作流</button>`;
+    plan.querySelector('button').onclick=()=>shown.type==='generated'
+      ?openGeneratedWorkflow(project(),{groupTarget:c,definition})
+      :openWorkflow(undefined,{groupTarget:c,definition});
+  }
+  const labels={queued:'排队中',running:'运行中',paused:'已暂停',needs_check:'待检查',unavailable:'角色不可用',
+    complete:'已完成',unresolved:'未解决',round_limit:'已达轮次上限'};
+  const step=run?.attempts?.at(-1);
+  const path=step?.path?.map(node=>node.title+(node.round?' · 第 '+node.round+' 轮':'')).join(' / ');
+  const status=run?[state.running[c.id]?.stopping&&readOnly?'正在停止…':labels[run.status],path,
+    run.reason&&(workflowMessages.get(run.reason)||uiError(run.reason)),
+    run.stopUnconfirmed?'进程停止尚未确认。请先检查任务输出和相关进程。':''].filter(Boolean).join('\n'):
+    definition?'已保存，等待启动。':'填写节点和连线后保存，启动时再填写任务目标。';
+  $('group-workflow-state').textContent=[status,definition?.maxSteps?'最多 '+definition.maxSteps+' 个执行步骤':''].filter(Boolean).join('\n');
+  $('group-workflow-title').disabled=readOnly||!isGraph;
+  $('group-workflow-save').hidden=!isGraph;
+  $('group-workflow-template-save').hidden=!isGraph;
+  $('group-workflow-save').disabled=readOnly;
+  $('group-workflow-template-save').disabled=readOnly;
+  $('group-workflow-start').hidden=readOnly||Boolean(resumable);
+  $('group-workflow-start').disabled=!definition||Boolean(active||state.inputBusy[c.id]);
+  $('group-workflow-stop').hidden=!readOnly;
+  $('group-workflow-stop').disabled=Boolean(state.running[c.id]?.stopping);
+  $('group-workflow-resume').hidden=!resumable;
+  $('group-workflow-resume').disabled=Boolean(active||state.inputBusy[c.id]||run?.stopUnconfirmed);
+  $('group-workflow-finish').hidden=!resumable;
+  $('group-workflow-finish').disabled=Boolean(active||run?.stopUnconfirmed);
+  $('group-workflow-confirm').hidden=!run?.stopUnconfirmed;
+  const select = selected=>{
+    groupWorkflowSelection.set(c.id,selected);
+    groupWorkflowEditor=undefined;
+    renderGroupWorkflows();
+  };
+  picker.onchange=()=>select(picker.value);
+  $('group-workflow-new').onclick=()=>select('');
+  $('group-workflow-generate').onclick=()=>openGeneratedWorkflow(project(),{groupTarget:c});
+  $('group-workflow-teams').onclick=()=>openWorkflow(undefined,{groupTarget:c});
+  templatePicker.onchange=()=>{$('group-workflow-load').disabled=!templatePicker.value;};
+  $('group-workflow-load').onclick=()=>{
+    const template=(state.workflowTemplates||[]).find(item=>item.id===templatePicker.value);
+    if (!template) return;
+    select('');
+    mountGroupWorkflow(c,groupWorkflowEditor.key,template,false);
+  };
+  const value=()=>({...groupWorkflowEditor.read(),title:$('group-workflow-title').value});
+  $('group-workflow-save').onclick=()=>action(()=>saveGroupWorkflow(c,definition?.id,value()));
+  $('group-workflow-template-save').onclick=()=>action(async()=>{
+    const saved=await invokeWorkflow('template-save',value());
+    toast('已保存模板「'+saved.title+'」。');
+  });
+  $('group-workflow-start').onclick=()=>dialog(`<h2>启动工作流</h2>
+    <p class="hint">将运行已保存的版本并固定群聊上文。目标留空时使用本群上文。</p>
+    <label>本次任务目标<textarea id="group-workflow-goal" rows="4" maxlength="16000"></textarea></label>`,
+    ()=>invokeWorkflow('group-start',c.id,definition.id,$('group-workflow-goal').value),'启动');
+  $('group-workflow-stop').onclick=()=>action(()=>invokeWorkflow('group-stop',c.id,run.id));
+  $('group-workflow-resume').onclick=()=>dialog(`<h2>继续工作流</h2><p class="hint">沿用启动时的定义和群聊上文，继续当前节点。</p>
+    <label>补充说明（可选）<textarea id="group-workflow-guidance" rows="4" maxlength="16000"></textarea></label>`,
+    ()=>invokeWorkflow('group-resume',c.id,run.id,$('group-workflow-guidance').value),'继续');
+  $('group-workflow-finish').onclick=()=>{
+    if(confirm('将这次运行标记为未解决，并把步骤和结果纳入群聊上下文？')) action(()=>invokeWorkflow('group-finish',c.id,run.id));
+  };
+  $('group-workflow-confirm').onclick=()=>{
+    if(confirm('已检查并确认此节点的进程结束？')) action(()=>invokeWorkflow('group-confirm-stop',c.id,run.id));
+  };
+}
+
+async function openTools(mode, directoryIndex) {
+  if (!project()) return;
+  toolMode = mode;
+  $('tools-panel').hidden = false;
+  $('tools-rail').hidden = true;
+  $('terminal-tools').hidden = mode !== 'terminal';
+  $('file-tools').hidden = mode !== 'files';
+  $('activity-tools').hidden = mode !== 'activity';
+  $('workflow-tools').hidden = mode !== 'workflow';
+  $('tool-directory').hidden = mode === 'activity' || mode === 'workflow';
+  $('tools-title').textContent = ({terminal:'项目终端',files:'项目文件',activity:'对话任务输出',workflow:'群聊工作流'})[mode];
+  if (mode === 'workflow') {
+    if (directoryIndex && chat()) groupWorkflowSelection.set(chat().id,directoryIndex);
+    renderGroupWorkflows();
+    return;
+  }
+  renderToolDirectory();
+  if (mode === 'files') {
+    if (directoryIndex !== undefined) $('tool-directory').value = String(directoryIndex);
+    await loadFiles();
+  } else if (mode === 'activity') {
+    agentTerminals=await api['agent-terminals']();
+    renderActivity();
+  } else {
+    await refreshTerminals();
+    if (!terminals.some(t => t.projectId === projectId)) toast('点击加号打开此项目的共享终端');
+    fitTerminal();
+  }
+}
 let activityRuns, activityRequest = 0;
 async function renderActivity() {
   const c = chat();
@@ -2232,7 +2461,7 @@ async function restoreInput(id,messageId){
   try{const result=await api['attachment-restore'](id,messageId),current=state.chats.find(c=>c.id===id);if(current){current.draft=result.text;current.draftAttachments=result.attachments;}if(chatId===id){$('input').value=result.text;renderAttachments();mentions.close();quickSettings();renderSpeakingOrder();$('input').focus();}toast('已恢复文字和附件，请核对后发送');}catch(e){toast(attachmentError(e));}
 }
 document.querySelectorAll('[data-page]').forEach(b => { b.onclick = () => showPage(b.dataset.page); });
-$('empty-create').onclick = () => filter==='workflow'?openWorkflow():openChat(); $('chat-settings').onclick = () => openChat(chat());
+$('empty-create').onclick = () => filter==='workflow'?openGroupWorkflowDestination():openChat(); $('chat-settings').onclick = () => openChat(chat());
 $('dialog-cancel').onclick = $('dialog-close').onclick = () => $('dialog').close();
 $('dialog').addEventListener('close', () => { usageCenter?.destroy();usageCenter=undefined;chatModelPicker?.destroy(); chatModelPicker = undefined;markReadAtBottom(); });
 $('dialog-form').onsubmit = e => { e.preventDefault(); action(async () => { if (await dialogSubmit() !== false) $('dialog').close(); }); };
@@ -2258,6 +2487,8 @@ $('expand-input').onclick = () => { $('composer').classList.toggle('expanded'); 
 $('attach').onclick = () => action(chooseFiles); $('paste-image').onclick = () => action(pasteImage); api.onFiles(paths=>{action(()=>insertPaths(paths));},dragging=>$('composer').classList.toggle('file-drag-over',dragging&&page==='projects'&&Boolean(chat())));
 $('messages').onscroll = markReadAtBottom; window.addEventListener('focus', markReadAtBottom);
 $('toggle-tools').onclick = $('tool-terminal').onclick = () => action(() => openTools('terminal')); $('tool-files').onclick = () => action(() => openTools('files'));
+$('tools-panel').append($('workflow-tools'));
+$('tool-workflow').onclick = () => action(() => openTools('workflow'));
 $('tool-activity').onclick = () => { activityFollow = true; action(() => openTools('activity')); };
 $('activity-role').onchange = e => { activityRoleId = e.target.value; activityRunId = undefined; activityFollow = true; renderActivity(); };
 $('activity-mode').onchange=e=>{activityMode=e.target.value;renderActivity();};
@@ -2267,7 +2498,13 @@ $('activity-run').onchange = e => { activityRunId = e.target.value; activityFoll
 let activitySelection='';$('activity-copy').onpointerdown=()=>{const view=activityMode==='interactive'?agentTerminalViews.get(selectedAgentTerminal()?.id):activityView;activitySelection=view?.term.getSelection()||'';};
 $('activity-copy').onclick = () => action(async () => {const view=activityMode==='interactive'?agentTerminalViews.get(selectedAgentTerminal()?.id):activityView;await api.copy(activitySelection || view?.term.getSelection() || (view?window.relayTerminalUI.text(view.term):'') || '');activitySelection=''; toast('已复制任务输出'); });
 $('tools-close').onclick = () => { $('tools-panel').hidden = true; $('tools-rail').hidden = false; document.body.classList.remove('tools-wide'); $('tools-wide').textContent = '展开'; };
-$('tools-wide').onclick = () => { document.body.classList.toggle('tools-wide'); $('tools-wide').textContent = document.body.classList.contains('tools-wide') ? '还原' : '展开'; fitTerminal(); };
+$('tools-wide').onclick = () => {
+  document.body.classList.toggle('tools-wide');
+  $('tools-wide').textContent = document.body.classList.contains('tools-wide') ? '还原' : '展开';
+  if (toolMode==='workflow'&&!$('group-workflow-board').hidden&&groupWorkflowEditor) {
+    requestAnimationFrame(()=>groupWorkflowEditor?.read.fit());
+  } else fitTerminal();
+};
 $('tool-directory').onchange = () => { if (toolMode === 'files') action(loadFiles); };
 $('terminal-new').onclick = () => action(async () => { terminalId = await api['terminal-open'](projectId,Number($('tool-directory').value)); await refreshTerminals(); });
 $('terminal-list').onchange = e => { terminalId = e.target.value; refreshTerminalTabs(); terminalViews.get(terminalId)?.term.focus(); };
