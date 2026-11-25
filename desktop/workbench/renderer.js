@@ -2199,8 +2199,73 @@ function renderUpdateBadges() {
     badge.closest('button').setAttribute('aria-label', count ? label + '，' + count + ' 个 CLI 有可用更新' : label);
   }
 }
+let appUpdate = { status: 'idle' };
+function renderAppUpdate() {
+  const status = $('app-update-status');
+  if (!status) return;
+  const version = appUpdate.version;
+  status.textContent = appUpdate.error || {
+    checking: '正在检查应用更新…',
+    available: appUpdate.direct ? `发现新版 v${version}，可在应用内下载并安装。` : `发现新版 v${version}，可手动下载 ZIP。`,
+    current: '目前没有可用的应用更新。',
+    'no-release': 'GitHub 上暂无正式发布版本。',
+    'no-package': '最新发布暂未提供 Windows x64 下载包。',
+    downloading: '正在下载并校验更新包，请保持应用开启…',
+    ready: `新版 v${version} 已准备好。安装时会保存数据、退出并重新启动。`,
+    installing: '正在保存并退出，安装完成后将自动重新启动…',
+    installed: `已更新到 v${version}。`,
+    'rolled-back': `v${version} 未能安装，已恢复原版本。可以重新检查更新。`,
+  }[appUpdate.status] || '';
+  const busy = ['checking', 'downloading', 'installing'].includes(appUpdate.status);
+  $('app-update-check').disabled = busy;
+  $('app-update-download').hidden = appUpdate.status !== 'available';
+  $('app-update-download').textContent = appUpdate.direct ? '下载更新' : '在浏览器中下载新版';
+  $('app-update-install').hidden = appUpdate.status !== 'ready';
+}
+
 function renderUpdateCenter() {
-  $('editor-view').innerHTML = `<div class="editor simple-form cli-updates-page"><header><h1>更新中心</h1></header><div id="cli-updates"></div><div id="claude-updater"></div><p class="hint">包括 Claude Code、OpenCode、Cursor Agent、WorkBuddy 以及自定义 ACP 角色正在使用的 CLI，可在此检查并安装可用更新。</p></div>`;
+  $('editor-view').innerHTML = `<div class="editor simple-form cli-updates-page"><header><h1>更新中心</h1></header>
+    <section class="setting-card" aria-labelledby="app-update-title">
+      <h3 id="app-update-title">应用更新</h3>
+      <p>当前版本 v${esc(state.appVersion)}</p>
+      <div class="cli-update-actions">
+        <button type="button" id="app-update-check">检查应用更新</button>
+        <button type="button" id="app-update-download" hidden>下载更新</button>
+        <button type="button" id="app-update-install" hidden>更新并重启</button>
+      </div>
+      <p class="hint" id="app-update-status" role="status"></p>
+    </section>
+    <div id="cli-updates"></div><div id="claude-updater"></div><p class="hint">包括 Claude Code、OpenCode、Cursor Agent、WorkBuddy 以及自定义 ACP 角色正在使用的 CLI，可在此检查并安装可用更新。</p></div>`;
+  $('app-update-check').onclick = async () => {
+    appUpdate = { status: 'checking' };
+    renderAppUpdate();
+    try { appUpdate = await api['app-update-check'](); }
+    catch (error) { appUpdate = { status: 'idle', error: uiError(error) }; }
+    renderAppUpdate();
+  };
+  $('app-update-download').onclick = async () => {
+    if (!appUpdate.direct) { await action(() => api['app-update-download']()); return; }
+    appUpdate = { ...appUpdate, status: 'downloading', error: '' };
+    renderAppUpdate();
+    try { await api['app-update-prepare'](); appUpdate.status = 'ready'; }
+    catch (error) { appUpdate.status = 'available'; appUpdate.error = uiError(error); }
+    renderAppUpdate();
+  };
+  $('app-update-install').onclick = async () => {
+    appUpdate = { ...appUpdate, status: 'installing', error: '' };
+    renderAppUpdate();
+    try {
+      if (!await api['app-update-install']()) appUpdate.status = 'ready';
+    } catch (error) { appUpdate.status = 'ready'; appUpdate.error = uiError(error); }
+    renderAppUpdate();
+  };
+  renderAppUpdate();
+  if (appUpdate.status === 'idle' && !appUpdate.error) api['app-update-status']().then(({ result, version }) => {
+    if (result && appUpdate.status === 'idle' && !appUpdate.error) {
+      appUpdate = { status: result, version };
+      renderAppUpdate();
+    }
+  }).catch(() => {});
   cliUpdatesView = window.createCliUpdatesView($('cli-updates'), {
     request: (verb, ...args) => api['cli-update-' + verb](...args),
     error: problem => toast(problem.message),
@@ -2756,4 +2821,5 @@ action(async () => {
   chatId = chats()[0]?.id;
   renderSidebar();
   activateChat();
+  await api['app-update-ready']();
 });

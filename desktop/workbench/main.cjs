@@ -16,6 +16,7 @@ const { setupSshKey } = require('./ssh-key-setup.cjs');
 const { Agents, findExecutable } = require('./agents.cjs');
 const { ClaudeUpdater } = require('./claude-update.cjs');
 const { CliUpdates } = require('./cli-updates.cjs');
+const { AppReleaseUpdate, portableRoot, portableBoot } = require('./app-release-update.cjs');
 const { Avatars } = require('./avatars.cjs');
 const { ModelCatalogs } = require('./model-catalogs.cjs');
 const { Usage } = require('./usage.cjs');
@@ -42,13 +43,20 @@ const root = path.resolve(__dirname, '../..');
 const smoke = process.argv.includes('--workbench-smoke');
 const smokeRun=smoke&&/^[0-9]{1,12}$/.test(process.env.RELAY_SMOKE_RUN||'')?'-'+process.env.RELAY_SMOKE_RUN:'';
 const data = smoke ? path.join(root, '.runtime/workbench-smoke'+smokeRun) : path.join(root, '.runtime/workbench');
+const portable = portableRoot(root, app);
+const updateBoot = portableBoot(portable);
+if (updateBoot.recovery) {
+  dialog.showErrorBox('AI 小队正在更新', '请等更新完成后再打开。若更新意外中断，请运行以下文件恢复：\n\n' + updateBoot.recovery);
+  app.exit(1);
+  return;
+}
 require('../windows-launch.cjs').configureWindowsLaunch(app,{root,disabled:smoke});app.setPath('userData', path.join(data, 'browser'));
 if (!smoke && !app.requestSingleInstanceLock()) app.quit(); else {
 let store;
 try { store = new Store(data, root, { keepOpen: true }); }
 catch (error) {
   console.error('Could not open the workspace:', error);
-  dialog.showErrorBox('无法打开 AI 小队工作区', '无法读取或迁移本机工作区。请检查目录权限和磁盘空间。\n\n' + data + '\n' + error.message);
+  if (!updateBoot.job) dialog.showErrorBox('无法打开 AI 小队工作区', '无法读取或迁移本机工作区。请检查目录权限和磁盘空间。\n\n' + data + '\n' + error.message);
   app.exit(1);
   return;
 }
@@ -108,6 +116,9 @@ const imageSource={read:()=>readClipboardImage(clipboard,nativeImage)};
 const messageImages=new (require('./message-images.cjs').MessageImages)({store,nativeImage});
 const keepAwake = new KeepAwake(root, { enabled: store.state.settings.keepAwake, disabled: smoke, changed: emit, log: () => {} });
 const claudeUpdater = new ClaudeUpdater(root, store, backend, locations, emit);
+const appReleaseUpdate = new AppReleaseUpdate({
+  version: require('../package.json').version, request: providerFetch, open: url => shell.openExternal(url), directory: portable,
+});
 const updateNetworkRole = { locationId: 'local', baseUrl: 'https://registry.npmjs.org' };
 const cliUpdates = new CliUpdates({
   store, file: path.join(data, 'cli-updates.json'), resolveExecutable: localExecutable,
@@ -246,6 +257,15 @@ handle('claude-cli', async action => {
   }
 });
 handle('cli-update-preference', (key, value) => cliUpdates.savePreference(key, value));
+handle('app-update-check', () => appReleaseUpdate.check());
+handle('app-update-download', () => appReleaseUpdate.download());
+handle('app-update-status', () => appReleaseUpdate.status());
+handle('app-update-prepare', () => appReleaseUpdate.prepare());
+handle('app-update-install', () => requestQuit(false, true));
+let updateAccepted = false;
+handle('app-update-ready', () => {
+  if (updateBoot.job && !updateAccepted) fs.writeFileSync(path.join(updateBoot.job, 'ready'), String(process.pid));
+});
 handle('cli-update-check', engine => engine === undefined ? cliUpdates.runBatch('check') : cliUpdates.check(engine));
 handle('cli-update-install', engine => {
   if (quitting || confirmingQuit) throw new Error('工作台正在退出，请稍后重试。');
@@ -1412,7 +1432,7 @@ async function openLocalRoleLogin(role, opened) {
   ipcMain.on('login:input', input); window.on('closed', () => { ipcMain.removeListener('login:input', input); try { pty.kill(); } catch {} });
 }
 function createWindow() {
-  const w = new BrowserWindow({ width: 1488, height: 1000, minWidth: 1000, minHeight: 650, show: !smoke, backgroundColor: themeBackground(), title: 'AI 小队', autoHideMenuBar: true, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: !smoke } });
+  const w = new BrowserWindow({ width: 1488, height: 1000, minWidth: 1000, minHeight: 650, show: !smoke && (!updateBoot.job || updateAccepted), backgroundColor: themeBackground(), title: 'AI 小队', autoHideMenuBar: true, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: !smoke } });
   workbenchWindow = w;
   w.on('close', event => {
     if (quitReady) return;
@@ -1494,10 +1514,17 @@ async function confirmRestart() {
   return false;
 }
 
-async function requestQuit(restart = false) {
+async function requestQuit(restart = false, applyUpdate = false) {
   if (quitting || confirmingQuit) return;
   confirmingQuit = true;
   try {
+    if (applyUpdate && (running.size || skills.jobs.size || inputQueue.dispatching.size || interactiveAgents.active() ||
+      localLogins.size || antigravitySetups.size || cliUpdates.installing() ||
+      store.state.chats.some(chat => chat.localTask) ||
+      [...terminalManagers.values()].some(manager => manager.list().some(terminal => terminal.state !== 'ended')))) {
+      await showQuitDialog({ type:'info', title:'安装应用更新', message:'请等待任务和 CLI 更新结束，并关闭已连接的终端后重试。', buttons:['确定'], noLink:true });
+      return;
+    }
     if (cliUpdates.installing()) {
       await showQuitDialog({ type:'info', title:'CLI 正在更新', message:'请等待本机 CLI 更新完成后再退出或重启。', buttons:['确定'], noLink:true });
       return;
@@ -1521,6 +1548,10 @@ async function requestQuit(restart = false) {
   }
 
   quitting = true;
+  if (applyUpdate) {
+    try { await appReleaseUpdate.handOff(); }
+    catch (error) { quitting = false; throw error; }
+  }
   try {
     for (const chat of store.state.chats) for (const flow of [chat.workflow,...(chat.workflowRuns||[])]) {
       if (flow?.status === 'queued') flow.status = 'paused';
@@ -1559,12 +1590,15 @@ async function requestQuit(restart = false) {
     for (const close of cleanup) {
       try { close(); } catch (error) { console.error('Workbench exit cleanup failed:', error); }
     }
+    try { await appReleaseUpdate.close(); }
+    catch (error) { console.error('Could not clean up the staged app update:', error); }
     quitReady = true;
     if (restart) {
       try { app.relaunch(); } catch (error) { console.error('Could not restart the workbench:', error); }
     }
     app.quit();
   }
+  return true;
 }
   handle('workbench-restart', () => requestQuit(true));
   handle('workbench-quit', () => requestQuit());
@@ -1574,10 +1608,18 @@ async function requestQuit(restart = false) {
     try { await shell.openExternal(supportUrl); }
     catch { throw new Error('无法在浏览器中打开 GitHub 仓库。'); }
   });
-  app.on('second-instance', () => { if (quitting) return; const w = workbenchWindow || createWindow(); w.show(); w.focus(); });
-  app.whenReady().then(() => {
-    keepAwake.start(); Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: '文件', submenu: [{ id:'restart-workbench', label:'重启工作台', click:() => requestQuit(true).catch(error => console.error(error)) }, { role: 'quit', label: '退出' }] }, { label: '编辑', submenu: [{ label: '撤销', role: 'undo' }, { label: '重做', role: 'redo' }, { type: 'separator' }, { label: '剪切', role: 'cut' }, { label: '复制', role: 'copy' }, { label: '粘贴', role: 'paste' }, { label: '全选', role: 'selectAll' }] }, { label: '视图', submenu: [{ label: '重新加载', role: 'reload' }, { label: '开发者工具', role: 'toggleDevTools' }, { label: '重置缩放', role: 'resetZoom' }, { label: '放大', role: 'zoomIn' }, { label: '缩小', role: 'zoomOut' }] }]));
+  app.on('second-instance', () => { if (quitting || updateBoot.job && !updateAccepted) return; const w = workbenchWindow || createWindow(); w.show(); w.focus(); });
+  app.whenReady().then(async () => {
     const w = createWindow();
+    if (updateBoot.job) {
+      const deadline = Date.now() + 55000;
+      // The worker can clean up the accepted marker after publishing its result.
+      while (Date.now() < deadline && !updateBoot.accepted()) await delay(100);
+      if (!updateBoot.accepted()) { app.exit(1); return; }
+      updateAccepted = true;
+      w.show();
+    }
+    keepAwake.start(); Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: '文件', submenu: [{ id:'restart-workbench', label:'重启工作台', click:() => requestQuit(true).catch(error => console.error(error)) }, { role: 'quit', label: '退出' }] }, { label: '编辑', submenu: [{ label: '撤销', role: 'undo' }, { label: '重做', role: 'redo' }, { type: 'separator' }, { label: '剪切', role: 'cut' }, { label: '复制', role: 'copy' }, { label: '粘贴', role: 'paste' }, { label: '全选', role: 'selectAll' }] }, { label: '视图', submenu: [{ label: '重新加载', role: 'reload' }, { label: '开发者工具', role: 'toggleDevTools' }, { label: '重置缩放', role: 'resetZoom' }, { label: '放大', role: 'zoomIn' }, { label: '缩小', role: 'zoomOut' }] }]));
     for(const chat of store.state.chats) {
       if(chat.workflow)engineForWorkflow(chat.workflow).recover(chat);
       for(const flow of chat.workflowRuns||[]) {
@@ -1600,6 +1642,9 @@ async function requestQuit(restart = false) {
     }
     if (skills.system.sources().some(source=>source.enabled&&source.locationId!=='local')) skills.system.refresh().then(emit);
     if (smoke) require('./smoke.cjs').run(w, store, app, data, { agents, running, inputQueue, notifications, backend, claudeUpdater, cliUpdates, avatars, dialog, modelCatalogs, providerFetch, network, accountUsage,imageSource,quotaConsole,interactiveAgents,skills,shell,clipboard }).catch(error => { console.error(error); app.exit(1); });
+  }).catch(error => {
+    console.error('The workbench could not finish starting:', error);
+    app.exit(1);
   });
   app.on('window-all-closed', () => app.quit());
   app.on('before-quit', event => {
