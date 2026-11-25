@@ -13,7 +13,13 @@ async function run({window,store,app,directory,services,fixture,js,errors}){
     await until(async()=>await js(`Boolean(document.querySelector(${JSON.stringify(selector+' img')})?.naturalWidth)`));
     assert.equal(await js(`document.querySelectorAll(${JSON.stringify(selector+' img')}).length`),1);
     assert(!(JSON.stringify(store.get('chats',fixture.chat.id).messages.find(m=>m.id===message.id))).includes('base64'));
-    await js(`document.querySelector(${JSON.stringify(selector+' .message-image-view')}).click()`);await until(async()=>opened.length>0);assert.equal(opened.at(-1),fs.realpathSync(output));
+    await js(`document.querySelector(${JSON.stringify(selector+' .message-image-view')}).click()`);
+    await until(()=>js("$('message-image-dialog').open && $('message-image-full').naturalWidth === 1200"));
+    assert.equal(opened.length,0);
+    await js("$('message-image-size').click()");
+    assert.equal(await js("$('message-image-size').getAttribute('aria-pressed')"),'true');
+    await js("$('message-image-open').click()");await until(()=>opened.length>0);assert.equal(opened.at(-1),fs.realpathSync(output));
+    await js("$('message-image-close').click()");
     await js(`document.querySelector(${JSON.stringify(selector+' figcaption button:last-child')}).click()`);await until(async()=>copied.length>0);assert.equal(copied.at(-1),output);
     await js('activateChat()');await until(async()=>await js(`Boolean(document.querySelector(${JSON.stringify(selector+' img')})?.naturalWidth)`));
     await js(`document.querySelector(${JSON.stringify('#msg-'+message.id)}).scrollIntoView({block:'center'})`);await wait(100);fs.writeFileSync(path.join(directory,'message-images.png'),(await window.webContents.capturePage()).toPNG());
@@ -22,8 +28,16 @@ async function run({window,store,app,directory,services,fixture,js,errors}){
     await js('(async()=>{state=await api.snapshot();activateChat();})()');await until(async()=>await js(`Boolean(document.querySelector('#msg-${explicit.id} .message-images img')?.naturalWidth)`));
     await wait(100);assert.equal(await js(`document.querySelectorAll('#msg-${remote.id} img[src*="fixture.invalid"]').length`),0);
     assert.equal(await js(`document.querySelectorAll('#msg-${remote.id} .message-images img').length`),0);
+    const thumbnail=await js(`$('msg-${explicit.id}').querySelector('.message-images img').src`);
+    fs.unlinkSync(output);
+    await js(`$('msg-${explicit.id}').querySelector('.message-image-view').click()`);
+    await until(()=>js("$('message-image-dialog').open && $('message-image-status').textContent.includes('\u7f29\u7565\u56fe')"));
+    assert.equal(await js("$('message-image-full').src"),thumbnail);
+    assert.equal(await js("$('message-image-open').disabled"),true);
+    assert.equal(await js("$('dialog').open"),false);
+    await js("$('message-image-close').click()");
     assert.equal(errors.length,0,errors.join('\n'));
-    fs.writeFileSync(path.join(directory,'message-images-checks.json'),JSON.stringify({passed:true,at:Date.now(),checks:['historical copy-output recovery','native decoded thumbnail through IPC','duplicate image merged','no image bytes in saved history','open original','copy path','reopen history without regeneration','Markdown image path with spaces and hash','remote image is not fetched'],consoleErrors:errors},null,2));
+    fs.writeFileSync(path.join(directory,'message-images-checks.json'),JSON.stringify({passed:true,at:Date.now(),checks:['historical copy-output recovery','native decoded thumbnail through IPC','duplicate image merged','no image bytes in saved history','in-app original-size preview','thumbnail fallback after the file is removed','open original','copy path','reopen history without regeneration','Markdown image path with spaces and hash','remote image is not fetched'],consoleErrors:errors},null,2));
   }finally{services.shell.openPath=originalOpen;services.clipboard.writeText=originalCopy;}
   app.exit(0);
 }

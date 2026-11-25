@@ -27,20 +27,22 @@ function project(raw,control,final=false){
   if(final&&!prefix.includes(frame.open)&&!suffix.trim())try{const value=JSON.parse(raw.slice(index+frame.open.length,end));if(value&&decisions.has(value.decision)&&typeof value.reason==='string'&&value.reason.trim()&&value.reason.length<=500&&Object.keys(value).every(key=>['decision','reason'].includes(key)))vote={decision:value.decision,reason:value.reason.trim()};}catch{}
   return {text:project(prefix,control).text.trimEnd()+suffix,vote};
 }
-async function run({roleIds,rounds,autoStop,signal,runTurn,onTurn=()=>{},beforeRound,reviewRound}){
+async function run({roleIds,rounds,autoStop,signal,runTurn,onTurn=()=>{},beforeRound,reviewRound,singleTurnRoles=new Set(),continueAfterFailure=()=>false}){
   limit(rounds);let completed=0;
   for(let round=1;round<=rounds;round++){
     if(signal.aborted)return {state:'paused',rounds:completed,maxRounds:rounds};
     if(beforeRound){const prepared=await beforeRound(round);if(signal.aborted||prepared?.status==='cancelled')return {state:'paused',rounds:completed,maxRounds:rounds};if(prepared?.status==='failed')return {state:'moderator_failed',rounds:completed,maxRounds:rounds};if(prepared?.status==='budget')return {state:'moderator_budget',rounds:completed,maxRounds:rounds};}
     const votes=[];
-    for(const [index,roleId] of roleIds.entries()){
+    const participants = round === 1 ? roleIds : roleIds.filter(id => !singleTurnRoles.has(id));
+    for(const [index,roleId] of participants.entries()){
       if(signal.aborted)return {state:'paused',rounds:completed,maxRounds:rounds};
-      const control=autoStop&&round<rounds&&!reviewRound?{token:crypto.randomBytes(16).toString('hex'),round,maxRounds:rounds,position:index+1,participants:roleIds.length}:null;
+      const singleTurn = singleTurnRoles.has(roleId);
+      const control=autoStop&&round<rounds&&!reviewRound&&!singleTurn?{token:crypto.randomBytes(16).toString('hex'),round,maxRounds:rounds,position:index+1,participants:participants.length}:null;
       onTurn(round,roleId);
       const result=await runTurn(roleId,control);
       if(signal.aborted||result.status==='cancelled')return {state:'paused',rounds:completed,maxRounds:rounds};
-      if(result.status!=='complete')return {state:'failed',rounds:completed,maxRounds:rounds};
-      votes.push(result.discussionVote);
+      if(result.status!=='complete'&&!continueAfterFailure(roleId,result))return {state:'failed',rounds:completed,maxRounds:rounds};
+      if(!singleTurn)votes.push(result.discussionVote);
     }
     completed=round;
     if(round===rounds)return {state:'limit',rounds:completed,maxRounds:rounds};

@@ -21,6 +21,53 @@ async function run(window,store,app,directory,services) {
   assert.equal(await js('document.querySelector("#messages").scrollHeight-document.querySelector("#messages").scrollTop-document.querySelector("#messages").clientHeight<50'),true);
   const status=await js('(async()=> (await window.desk.snapshot()).connectionStatus)()');
   assert(!Object.entries(status).some(([id,state])=>id!=='local'&&state==='ready'));
+  if (process.argv.includes('--cli-updates-only')) {
+    const updates = services.cliUpdates;
+    const executable = path.join(directory, 'fixture-codex.exe');
+    fs.writeFileSync(executable, 'Fixture CLI entry');
+    const role = store.state.roles.find(item => item.engine === 'codex' && item.locationId === 'local');
+    role.executable = executable;
+    role.enabled = true;
+    for (const peer of store.state.roles) if (peer !== role) peer.enabled = false;
+    let installed = '1.9.0';
+    const calls = [];
+    updates.fetchLocal = async () => () => { throw new Error('Unexpected network'); };
+    updates.npmEnvironment = async () => ({});
+    updates.local = {
+      codex: {
+        managed: () => executable,
+        installed: () => installed,
+        latest: async () => { calls.push('check'); return '1.10.0'; },
+        install: async ({ expected }) => { calls.push('install'); installed = expected; return { version: installed, executable }; },
+      },
+    };
+    await updates.startup();
+    const expect = async (expression, value) => {
+      for (let i = 0; i < 40; i++) {
+        if (await js(expression) === value) return;
+        await wait(25);
+      }
+      assert.equal(await js(expression), value);
+    };
+    await expect('document.querySelector("#cli-nav-badge").textContent', '1');
+    await js('document.querySelector("[data-page=settings]").click();document.querySelector("[data-settings-section=updates]").click()');
+    await expect('document.querySelector(".cli-update-notice").textContent', '1 个 CLI 有可用更新。');
+    await js('document.querySelector("[data-cli-preference=reminders]").click()');
+    await expect('window.desk.snapshot().then(value => value.cliUpdates.reminders)', false);
+    await expect('document.querySelector("#cli-nav-badge").hidden', true);
+    await expect('document.querySelector(".cli-update-notice").hidden', true);
+    await js('document.querySelector("[data-cli-preference=autoCheck]").click()');
+    await expect('window.desk.snapshot().then(value => value.cliUpdates.autoCheck)', false);
+    await js('document.querySelector("[data-cli-action=check]").click()');
+    await expect('document.querySelector(".cli-update-batch-status").textContent', '1 项已检查');
+    await js('document.querySelector("[data-cli-action=install]").click()');
+    await expect('document.querySelector(".cli-update-batch-status").textContent', '1 项已更新');
+    assert.deepEqual(calls, ['check', 'check', 'install']);
+    assert.deepEqual(errors, []);
+    console.log('CLI update center smoke checks passed.');
+    app.exit(0);
+    return;
+  }
   if(process.argv.includes('--workspace-only')){await require('./workspace-smoke.cjs').run({window,store,app,fixture,js,errors,services});return;}
   if (process.argv.includes('--cursor-model-only')) {
     const role = store.saveRole({ ...fixture.roles[0], id:undefined, engine:'cursor', provider:'native', name:'Cursor fixture',
@@ -485,6 +532,7 @@ async function run(window,store,app,directory,services) {
   await js('document.querySelector("#l-proxy-mode").value="system";document.querySelector("#location-form").requestSubmit()');await wait(140);
   await js('document.querySelector("[data-page=settings]").click()');await wait(100);
   assert.equal(await js('document.querySelector("#s-limit").value'),'3');
+  await js('document.querySelector("[data-settings-section=updates]").click()');
   const versionCalls=[];
   services.claudeUpdater.request=async operation=>{
     versionCalls.push(operation);
@@ -705,7 +753,18 @@ async function run(window,store,app,directory,services) {
   await new Promise(resolve=>{window.webContents.once('did-finish-load',resolve);window.webContents.reload();});await wait(250);
   assert.equal(await js('document.documentElement.dataset.theme'),'dark');
   assert.equal(await js('localStorage.getItem("relay-desk-theme")'),'dark');
-  await js('document.querySelector("[data-page=settings]").click();document.querySelector("#s-theme").value="light";document.querySelector("#s-theme").dispatchEvent(new Event("change"))');await wait(120);
+  await js('document.querySelector("[data-page=settings]").click();document.querySelector("[data-theme-choice=eyecare]").click()');await wait(150);
+  assert.equal(store.state.settings.theme,'eyecare');
+  assert.equal(await js('document.documentElement.dataset.theme'),'eyecare');
+  assert.equal(await js('document.documentElement.dataset.themeTone'),'light');
+  assert.equal(await js('getComputedStyle(document.body).backgroundColor'),'rgb(231, 240, 230)');
+  assert.equal(require('electron').nativeTheme.themeSource,'light');
+  fs.writeFileSync(path.join(directory,'theme-settings-eyecare.png'),(await window.webContents.capturePage()).toPNG());
+  await js('document.querySelector("#s-theme").value="forest-night";document.querySelector("#s-theme").dispatchEvent(new Event("change"))');await wait(120);
+  assert.equal(await js('document.documentElement.dataset.theme'),'forest-night');
+  assert.equal(await js('document.documentElement.dataset.themeTone'),'dark');
+  assert.equal(require('electron').nativeTheme.themeSource,'dark');
+  await js('document.querySelector("#s-theme").value="light";document.querySelector("#s-theme").dispatchEvent(new Event("change"))');await wait(120);
   assert.equal(await js('document.documentElement.dataset.theme'),'light');
   await js('document.querySelector("#s-theme").value="system";document.querySelector("#s-theme").dispatchEvent(new Event("change"))');await wait(120);
   assert.equal(require('electron').nativeTheme.themeSource,'system');

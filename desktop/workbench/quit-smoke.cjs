@@ -9,10 +9,10 @@ async function run({window, store, app, services, fixture, js, mode}) {
   const role = fixture.roles[0];
   const draft = 'Draft typed immediately before closing';
   const confirmations = [];
-  let answer, stopRequested = false, stopFinished = false, queuedWorkflow, relaunched = false, restartBlocked = false;
+  let answer, stopRequested = false, stopFinished = false, queuedWorkflow, relaunched = false, restartBlocked, detachedStopped = false;
   if (restart) app.relaunch = () => { relaunched = true; };
   services.dialog.showMessageBox = (_parent, options) => {
-    if (options.type === 'info') { restartBlocked = true; return Promise.resolve({response:0}); }
+    if (options.type === 'info') { restartBlocked = options; return Promise.resolve({response:0}); }
     return new Promise(resolve => {
       confirmations.push(options);
       answer = response => resolve({response});
@@ -48,6 +48,7 @@ async function run({window, store, app, services, fixture, js, mode}) {
 
     await fromFooter('restart');
     await until(() => restartBlocked);
+    assert(restartBlocked.detail.includes(chat.name));
     assert.equal(stopRequested, false);
     window.close();
     app.quit();
@@ -69,10 +70,11 @@ async function run({window, store, app, services, fixture, js, mode}) {
   app.once('will-quit', () => {
     clearTimeout(quitDeadline);
     try {
-      assert.equal(confirmations.length, active ? 2 : 0);
+      assert.equal(confirmations.length, restart ? 3 : active ? 2 : 0);
       assert.equal(relaunched, restart);
       assert.equal(stopRequested, active);
       assert.equal(stopFinished, mode === 'active');
+      assert.equal(detachedStopped, false);
       const saved = store.persisted();
       const savedChat = saved.chats.find(item => item.id === chat.id);
       assert.equal(savedChat.draft, draft);
@@ -101,7 +103,7 @@ async function run({window, store, app, services, fixture, js, mode}) {
     try {
       services.shell.openExternal = async url => { opened = url; };
       await js(`document.querySelector('[data-page="settings"]').click()`);
-      assert.equal(await js(`$('sidebar-list').firstElementChild.nextElementSibling.dataset.settingsSection`), 'about');
+      assert.deepEqual(await js(`[...document.querySelectorAll('#sidebar-list [data-settings-section]')].map(item => item.dataset.settingsSection)`), ['general', 'updates', 'about']);
       await js(`document.querySelector('[data-settings-section="about"]').click()`);
       assert.equal(await js(`$('about-title').textContent`), '关于');
       assert.equal(await js(`document.querySelector('.about-intro .pill').textContent`), 'v' + require('../package.json').version);
@@ -123,7 +125,33 @@ async function run({window, store, app, services, fixture, js, mode}) {
     await until(() => !store.state.settings.keepAwake);
     assert.equal(await js(`$('awake-toggle').getAttribute('aria-pressed')`),'false');
     await js(`$('input').focus();`);
+    const terminalId = await js(`api['terminal-open'](projectId, 0)`);
+    const detached = new AbortController();
+    detached.signal.addEventListener('abort', () => { detachedStopped = true; });
+    services.running.set(chat.id, { localExecutor:true, controller:detached, roleId:role.id, roleIds:[role.id] });
     await fromFooter('restart');
+    await until(() => confirmations.length === 1);
+    assert(confirmations[0].detail.includes(fixture.project.name));
+    assert(confirmations[0].detail.includes('Windows 1'));
+    assert.equal(confirmations[0].cancelId, 0);
+    answer(0);
+    await delay(50);
+    assert.equal(window.isDestroyed(), false);
+    assert(await js(`api.terminals().then(items=>items.some(item=>item.id===${JSON.stringify(terminalId)}&&item.state==='ready'))`));
+
+    await fromFooter('restart');
+    await until(() => confirmations.length === 2);
+    const otherChat = store.state.chats.find(item => item.id !== chat.id);
+    services.running.set(otherChat.id, { controller:new AbortController(), roleId:role.id, roleIds:[role.id] });
+    answer(1);
+    await until(() => restartBlocked);
+    assert(restartBlocked.detail.includes(otherChat.name));
+    assert.equal(window.isDestroyed(), false);
+    services.running.delete(otherChat.id);
+
+    await fromFooter('restart');
+    await until(() => confirmations.length === 3);
+    answer(1);
   } else {
     window.close();
   }

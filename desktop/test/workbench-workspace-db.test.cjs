@@ -117,3 +117,29 @@ test('project preferences survive reopening and search jumps across message page
   assert.equal(found.messages[3].id, 'm3');
   assert.equal(found.older, false);
 });
+
+test('searching other chats paginates across projects and excludes the current chat and workflow instructions', t => {
+  const directory = temporary(t);
+  const store = new Store(directory, directory);
+  const { projects: [project], roles: [role] } = store.state;
+  const otherProject = store.saveProject({ name: 'Other project', directories: project.directories });
+  const createChat = (projectId, messages, updatedAt) =>
+    store.createChat({ projectId, roleIds: [role.id] }, { messages, updatedAt });
+  const match = id => ({ id, kind: 'user', text: 'Literal [needle] match' });
+  const current = createChat(project.id, [match('current')], 1);
+  const nearby = createChat(project.id, Array.from({ length: 31 }, (_, index) => match('nearby-' + index)), 2);
+  const distant = createChat(otherProject.id, [match('distant'), { ...match('hidden'), workflowInstruction: true }], 3);
+  const loaded = new Store(directory, directory);
+
+  const first = loaded.searchOtherChats(current.id, ' [NEEDLE] ');
+  assert.equal(first.total, 32);
+  assert.equal(first.matches.length, 30);
+  assert.equal(first.matches[0].id, 'nearby-30');
+  assert.ok(first.matches.every(item => item.chatId === nearby.id && item.projectId === project.id));
+  const second = loaded.searchOtherChats(current.id, '[needle]', 30);
+  assert.deepEqual(second.matches.map(({ id, chatId, projectId }) => [id, chatId, projectId]), [
+    ['nearby-0', nearby.id, project.id],
+    ['distant', distant.id, otherProject.id],
+  ]);
+  assert.deepEqual(loaded.searchOtherChats(current.id, ' '), { matches: [], total: 0 });
+});

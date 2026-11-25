@@ -58,6 +58,13 @@ test('Native runtime discovery rejects GUI launchers and shell shims and finds b
   const launch=vendors.launch(entry,['acp'],{});assert.equal(launch.command,process.execPath);assert.equal(launch.env.ELECTRON_RUN_AS_NODE,'1');assert.deepEqual(launch.args,[entry,'acp']);
   const original=process.env.KIMI_CODE_HOME;process.env.KIMI_CODE_HOME=path.join(directory,'account-home');try{const env=vendors.environment({engine:'kimi'},cleanEnv(directory));assert.equal(env.KIMI_CODE_HOME,process.env.KIMI_CODE_HOME);assert(!fs.existsSync(env.KIMI_CODE_HOME));}finally{if(original===undefined)delete process.env.KIMI_CODE_HOME;else process.env.KIMI_CODE_HOME=original;}
 });
+test('DeepSeek Harness launches with standalone Node.js and does not inherit Electron RunAsNode', () => {
+  const entry=path.join(__dirname,'node_modules','@deepseek-ai','dsh','lib','bin.js');
+  const launch=vendors.launch(entry,['--profile','acp'],{ELECTRON_RUN_AS_NODE:'1',FIXTURE:'value'});
+  assert.match(path.basename(launch.command),/^node(?:\.exe)?$/i);
+  assert.deepEqual(launch.args,[entry,'--profile','acp']);
+  assert.deepEqual(launch.env,{FIXTURE:'value'});
+});
 test('Each native adapter completes a fixture job and model metadata uses ACP without a prompt',async t=>{
   const directory=fixture(t),store=new Store(directory,directory),project=store.state.projects[0],agents=new Agents(store,{get:()=>''},{},()=>{});t.after(()=>agents.close());
   for(const engine of Object.keys(vendors.catalog)){
@@ -134,6 +141,11 @@ test('Cursor applies the saved model parameter through ACP and reports the confi
   assert.match(state.terminal,/Cursor confirmed session model\] grok-4\.7\[reasoning_effort=low\]/);
   acp.role.model='grok-4.7[reasoning_effort=invalid]';
   await assert.rejects(acp.configure(session),/invalid/);
+});
+test('Cursor ask mode starts with the base model ID and leaves parameters to ACP',()=>{
+  const model='grok-4.7[context=256k,fast=true]';
+  assert.deepEqual(vendors.args({engine:'cursor',model,permission:'read-only'}),['--model','grok-4.7','--mode','ask','acp']);
+  assert.deepEqual(vendors.args({engine:'cursor',model,permission:'workspace-write'}),['--model',model,'acp']);
 });
 test('Antigravity workflow waits for every finite background command and verifies in the same session', {timeout:10000}, async t=>{
   const directory=fixture(t);

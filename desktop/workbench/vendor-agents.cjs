@@ -38,27 +38,46 @@ function customSettings(role) {
   }
   return { acpArgs: args, acpEnv: env };
 }
-function findCustom(command, directories) {
+function findCustom(command, directories, {home, local}) {
   command = String(command || '').trim();
   if (/\.bat$/i.test(command)) return '';
   if (path.isAbsolute(command)) return validEntry(command) ? command : '';
   if (!/^[a-z0-9_.-]+$/i.test(command)) return '';
+  if (command === 'hermes') {
+    const managed = path.join(managedRoot, 'hermes', ...(process.platform === 'win32' ? ['Scripts', 'hermes.exe'] : ['bin', 'hermes']));
+    const official = local && path.join(local, 'hermes', 'bin', 'hermes.exe');
+    if (validEntry(managed)) return managed;
+    if (validEntry(official)) return official;
+  }
+  if (command === 'pi-acp') {
+    const managed = packageBin(path.join(managedRoot, 'pi', 'node_modules', 'pi-acp'));
+    if (managed) return managed;
+  }
+  const npmPackage = command === 'dsh' ? '@deepseek-ai/dsh' : command === 'pi-acp' ? 'pi-acp' : '';
+  if (command === 'dsh') {
+    const managed = packageBin(path.join(managedRoot, 'dsh', 'node_modules', npmPackage));
+    if (managed) return managed;
+  }
   for (const directory of directories.filter(path.isAbsolute)) {
     for (const name of [command, ...(process.platform === 'win32' && !path.extname(command) ? [command + '.exe'] : [])]) {
       const file = path.join(directory, name);
       if (validEntry(file)) return file;
     }
-    if (command === 'pi-acp') {
-      const entry = packageBin(path.join(directory, 'node_modules', 'pi-acp'));
+    if (npmPackage) {
+      const entry = packageBin(path.join(directory, 'node_modules', npmPackage));
       if (entry) return entry;
     }
+  }
+  if (command === 'dsh') {
+    const dshHome = process.env.DSH_HOME || path.join(home, '.dsh');
+    if (path.isAbsolute(dshHome)) return packageBin(path.join(dshHome, 'profiles', 'web', 'node_modules', npmPackage));
   }
   return '';
 }
 function find(role, { home = os.homedir(), local = process.env.LOCALAPPDATA || '', programFiles = process.env.ProgramFiles || 'C:/Program Files', searchPath = process.env.PATH || '' } = {}) {
   if (!isVendor(role.engine)) return '';
   if (role.engine === 'custom-acp') {
-    return findCustom(role.executable, [...searchPath.split(path.delimiter), path.join(process.env.APPDATA || home, 'npm'), path.join(home, '.local', 'bin')]);
+    return findCustom(role.executable, [...searchPath.split(path.delimiter), path.join(process.env.APPDATA || home, 'npm'), path.join(home, '.local', 'bin')], {home, local});
   }
   if (role.executable) {
     if (!validEntry(role.executable)) throw new Error('Choose the official agent runtime, not a desktop window launcher or shell shim.');
@@ -79,6 +98,14 @@ function find(role, { home = os.homedir(), local = process.env.LOCALAPPDATA || '
 function launch(entry, args, env) {
   let script=/\.(?:mjs|cjs|js)$/i.test(entry);
   if(!path.extname(entry)){try{const fd=fs.openSync(entry,'r'),header=Buffer.alloc(150);try{fs.readSync(fd,header);}finally{fs.closeSync(fd);}script=/^#![^\r\n]*\bnode\b/.test(header.toString());}catch{}}
+  // DSH native addons distinguish Node.js from Electron even in RunAsNode mode.
+  if (script && /[\\/]@deepseek-ai[\\/]dsh[\\/]/i.test(entry)) {
+    const node = find({engine:'custom-acp', executable:'node'});
+    if (!node) throw new Error('DeepSeek Harness 需要 Node.js。请安装 Node.js 并确认 node 已加入 PATH。');
+    const launchEnv = {...env};
+    delete launchEnv.ELECTRON_RUN_AS_NODE;
+    return {command:node, args:[entry,...args], env:launchEnv};
+  }
   if (script) return { command:process.execPath,args:[entry,...args],env:{...env,ELECTRON_RUN_AS_NODE:'1'} };
   return { command:entry,args,env };
 }
@@ -107,6 +134,10 @@ function customEnvironment(role) {
     if (resolved) secrets.push(resolved);
     return [name, resolved];
   }));
+  if (role.executable?.trim() === 'pi-acp' && env.PI_ACP_PI_COMMAND === undefined && !process.env.PI_ACP_PI_COMMAND) {
+    const managedPi = path.join(managedRoot, 'pi', 'node_modules', '.bin', process.platform === 'win32' ? 'pi.cmd' : 'pi');
+    if (fs.existsSync(managedPi)) env.PI_ACP_PI_COMMAND = managedPi;
+  }
   return { env, secrets };
 }
 function args(role) {
@@ -114,7 +145,8 @@ function args(role) {
   if (role.engine === 'custom-acp') return customSettings(role).acpArgs;
   if(role.engine==='antigravity')return ['acp','--process-per-session',...(role.permission==='danger-full-access'?['--dangerously-skip-permissions']:[])];
   const result=[];
-  if(role.model)result.push('--model',role.model);
+  // Cursor ask mode rejects parameterized model IDs at startup; ACP applies the parameters after the session opens.
+  if(role.model)result.push('--model',role.engine==='cursor'&&role.permission==='read-only'?require('./chat-settings.js').parseCursorModel(role.model).id:role.model);
   if(role.effort && catalog[role.engine].effort)result.push('--effort',role.effort);
   if(role.engine==='kimi') {
     if(role.permission==='read-only')result.push('--plan');

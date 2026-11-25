@@ -12,7 +12,7 @@ async function eventually(check) {
 }
 
 async function run({store,services,fixture,js}) {
-  const [role,backup]=fixture.roles;
+  const [role,backup,another]=fixture.roles;
   const a=store.createChat({name:'Source fixture',projectId:fixture.project.id,roleIds:[role.id]});
   const b=store.createChat({name:'Receiver fixture',projectId:fixture.project.id,roleIds:[role.id]});
   const c=store.createChat({name:'Second source fixture',projectId:fixture.project.id,roleIds:[role.id]});
@@ -57,9 +57,14 @@ async function run({store,services,fixture,js}) {
   await invoke('template-save',bDefinition);
   assert.equal(store.persisted().workflowTemplates[0].nodes[1].body.nodes[0].body.entry,'n1');
   await open({id:b.id,projectId:b.projectId});
-  await js(`document.querySelectorAll('#group-workflow-board .graph-role')[1].ondblclick();
-    document.querySelector('#group-workflow-board [data-graph-body]').click();`);
+  await js(`document.querySelector('#group-workflow-board .graph-loop .graph-loop-open').click();
+    document.querySelector('#group-workflow-board .graph-loop .graph-loop-open').click();`);
   assert.match(await js(`document.querySelector('#group-workflow-board .graph-breadcrumb').textContent`),/Outer loop.*Inner loop/);
+  await js(`document.querySelector('#group-workflow-board .graph-back').click();`);
+  assert.match(await js(`document.querySelector('#group-workflow-board .graph-breadcrumb').textContent`),/Outer loop/);
+  assert.doesNotMatch(await js(`document.querySelector('#group-workflow-board .graph-breadcrumb').textContent`),/Inner loop/);
+  await js(`document.querySelector('#group-workflow-board .graph-back').click();`);
+  assert.equal(await js(`Boolean(document.querySelector('#group-workflow-board .graph-back'))`),false);
 
   let releaseSource, sourceAttempts=0, firstReceiverAttempts=0, blockInitialReceiver=true;
   const sourceGate=new Promise(resolve=>{releaseSource=resolve;});
@@ -89,6 +94,14 @@ async function run({store,services,fixture,js}) {
         assert.match(transfer.prompt,/Partial maintenance evidence/);
         assert.match(transfer.prompt,/still have work in progress/);
         Object.assign(message,{status:'complete',text:'Generated evidence\nWORKFLOW: DONE'});
+      }
+    } else if (context.workflowTitle==='Loop created on the canvas') {
+      if (context.workflowPath.length===1) {
+        Object.assign(message,{status:'complete',text:'Canvas evidence\nWORKFLOW: BLOCKED'});
+      } else if (participant.id===role.id) {
+        Object.assign(message,{status:'failed',errorCode:'CODEX_CAPACITY',note:'At capacity',stopConfirmed:true});
+      } else {
+        Object.assign(message,{status:'complete',text:'Canvas evidence'});
       }
     } else {
       transfers.push(transfer.prompt);
@@ -178,12 +191,30 @@ async function run({store,services,fixture,js}) {
     set('[data-exit-target="0"]','complete','change');
     document.querySelector('#group-workflow-board .graph-role').onkeydown(new KeyboardEvent('keydown',{key:'Enter'}));
     set('[data-exit-target="0"]','n2','change');
-    document.querySelectorAll('#group-workflow-board .graph-role')[1].ondblclick();
+    document.querySelector('#group-workflow-board .graph-loop-open').click();
     configureRole();
+    document.querySelector('#group-workflow-board [data-add-backup]').click();
+    set('[data-backup-role="0"]',${JSON.stringify(backup.id)},'change');
+    document.querySelector('#group-workflow-board [data-add-backup]').click();
+    document.querySelector('#group-workflow-board [data-backup-up="1"]').click();
+    document.querySelector('#group-workflow-board .graph-back').click();
     $('group-workflow-save').click();
   })()`);
   await eventually(()=>b.workflowDefinitions.some(item=>item.title==='Loop created on the canvas'));
-  assert.equal(b.workflowRuns.length,4);
+  const savedLoop=b.workflowDefinitions.find(item=>item.title==='Loop created on the canvas');
+  assert.deepEqual(savedLoop.nodes[1].body.nodes[0].backupRoleIds,[another.id,backup.id]);
+  const canvasRunId=await invoke('group-start',b.id,savedLoop.id);
+  const canvasRun=b.workflowRuns.find(run=>run.id===canvasRunId);
+  await eventually(()=>canvasRun.status==='needs_check' && canvasRun.attempts.length===1);
+  await eventually(()=>js(`api.snapshot().then(snapshot=>!snapshot.inputBusy[${JSON.stringify(b.id)}])`));
+  const priorReport=b.messages.find(message=>message.kind==='assistant' && message.workflowAttemptId===canvasRun.attempts[0].id);
+  priorReport.text='Canvas evidence\nWORKFLOW: NEEDS_USER';
+  store.save();
+  await invoke('group-resume',b.id,canvasRunId);
+  await eventually(()=>canvasRun.publishedAt);
+  assert.equal(canvasRun.status,'complete');
+  assert.deepEqual(canvasRun.attempts.map(attempt=>attempt.roleId),
+    [role.id,role.id,another.id,role.id,another.id,role.id,another.id]);
 }
 
 module.exports={run};

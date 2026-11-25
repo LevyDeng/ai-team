@@ -25,19 +25,26 @@ const agentTerminalViews=new Map();let agentTerminals=[],activityMode='log';
 const terminalConnectPending=new Set();
 const attachmentTasks=new Map(),sendingChats=new Set();
 const vendorKinds = { antigravity:'Antigravity（反重力）',workbuddy:'WorkBuddy（兼容测试）',kimi:'Kimi Code',cursor:'Cursor Agent',codebuddy:'CodeBuddy Code','custom-acp':'自定义 ACP' };
+const acpPresets = {
+  hermes: { label:'Hermes Agent', command:'hermes', args:['acp'] },
+  pi: { label:'Pi（pi-acp）', command:'pi-acp', args:[] },
+  dsh: { label:'DeepSeek Harness（dsh）', command:'dsh', args:['--profile','acp'] },
+};
 const geminiWebEngine = 'gemini-web';
-const engineChoices = [['codex','Codex CLI'],['claude','Claude Code CLI'],...Object.entries(vendorKinds),['opencode','OpenCode'],[geminiWebEngine,'Gemini 网页版']];
+const slackChatEngine = 'slack-chat';
+const slackChatLabel = 'Slack 私信（Dot / Grok Bot，试验）';
+const engineChoices = [['codex','Codex CLI'],['claude','Claude Code CLI'],...Object.entries(vendorKinds),['opencode','OpenCode'],[geminiWebEngine,'Gemini 网页版'],[slackChatEngine,slackChatLabel]];
 const workflowStages = { implement: '执行阶段', review: '验收阶段' };
 const workflowStatuses = {
   queued: '排队中', running: '运行中', paused: '已暂停', complete: '已完成',
   unavailable: '候选角色不可用', needs_check: '待人工确认', round_limit: '已达轮数上限',
   failed: '失败', interrupted: '已中断', cancelled: '已取消', unresolved: '未解决',
 };
-const {supportsEffort, modelOffering, modelDefault, parseCursorModel}=window.deskChatSettings;
+const {supportsEffort, usesExternalConversation, modelOffering, modelDefault, parseCursorModel}=window.deskChatSettings;
 const effortLabels={none:'无',minimal:'最低',low:'低',medium:'中',high:'高',xhigh:'很高',max:'最高',ultra:'Ultra'};
 const fallbackEfforts=['low','medium','high','xhigh'];
 const roleCatalogs=new Map();
-let claudeUpdateView, usageCenter, composerTargetKey, roleModelPicker, chatModelPicker, activityView, activityRoleId, activityRunId, activityFollow = true;
+let claudeUpdateView, cliUpdatesView, usageCenter, composerTargetKey, roleModelPicker, chatModelPicker, activityView, activityRoleId, activityRunId, activityFollow = true;
 let skillId,skillEditorVersion=0;
 function mentionableRoles() {
   const conversation = chat(), activeProject = project();
@@ -98,7 +105,7 @@ function rememberProject() {
     toast('无法记住当前项目。' + uiError(error));
   });
 }
-const engineLabel = engine => ({ codex:'Codex CLI', claude:'Claude Code', opencode:'OpenCode', [geminiWebEngine]:'Gemini 网页版', ...vendorKinds }[engine] || engine);
+const engineLabel = engine => engine === slackChatEngine ? slackChatLabel : ({ codex:'Codex CLI', claude:'Claude Code', opencode:'OpenCode', [geminiWebEngine]:'Gemini 网页版', ...vendorKinds }[engine] || engine);
 function toast(value) { $('toast').textContent = String(value); $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 6000); }
 function renderPhoneStatus() {
   if ($('phone-status')) $('phone-status').textContent = state.phoneLink?.connected ? '手机已连接' :
@@ -137,6 +144,7 @@ async function action(fn) { try { return await fn(); } catch (e) { toast(uiError
 async function loginRole(id) {
   if (role(id)?.engine === geminiWebEngine) return api['gemini-web-open']();
   const result = await api['role-login'](id);
+  if (result?.slackConnected) toast('Slack 私信授权已通过，可以在单聊中试发一条文字');
   if (result?.loginSource === 'desktop') toast('已确认桌面版 Codex 登录，可直接发送消息');
   if(result?.desktopOpened)toast('请在官方桌面版完成账号登录，再回到这里发送消息');
   if (result?.terminalId) { projectId = result.projectId; chatId = chats()[0]?.id; terminalId = result.terminalId; showPage('projects'); await openTools('terminal'); }
@@ -195,7 +203,7 @@ function renderProjectNotifications() {
 function renderSidebar() {
   if (!project()) projectId = orderedProjects()[0]?.id;
   if (page === 'projects') {
-    $('sidebar-top').innerHTML = `<div class="project-selector"><div class="project-select-wrap"><select id="project-select" aria-label="项目"></select><span id="project-unread" class="badge project-unread" role="img" aria-label="其他项目有新回复" hidden></span></div><button class="icon-button" id="project-edit" title="项目设置" aria-label="项目设置">${icon('dots')}</button><button class="icon-button" id="project-new" title="新项目" aria-label="新项目">${icon('plus')}</button></div><div class="project-order"><label for="project-order">????</label><select id="project-order">${options(projectOrders, projectOrder())}</select><button type="button" id="project-order-direction" class="icon-button" hidden></button></div>${searchMarkup('搜索会话、角色或消息')}<div class="tabs"><button data-filter="all" class="${filter === 'all' ? 'active' : ''}">全部</button><button data-filter="direct" class="${filter === 'direct' ? 'active' : ''}">单聊</button><button data-filter="group" class="${filter === 'group' ? 'active' : ''}">群聊</button><button id="chat-new" class="icon-button" title="新建对话">${icon('plus')}</button></div>`;
+    $('sidebar-top').innerHTML = `<div class="project-selector"><div class="project-select-wrap"><select id="project-select" aria-label="项目"></select><span id="project-unread" class="badge project-unread" role="img" aria-label="其他项目有新回复" hidden></span></div><button class="icon-button" id="project-edit" title="项目设置" aria-label="项目设置">${icon('dots')}</button><button class="icon-button" id="project-new" title="新项目" aria-label="新项目">${icon('plus')}</button></div><div class="project-order"><label for="project-order">项目排序</label><select id="project-order">${options(projectOrders, projectOrder())}</select><button type="button" id="project-order-direction" class="icon-button" hidden></button></div>${searchMarkup('搜索会话、角色或消息')}<div class="tabs"><button data-filter="all" class="${filter === 'all' ? 'active' : ''}">全部</button><button data-filter="direct" class="${filter === 'direct' ? 'active' : ''}">单聊</button><button data-filter="group" class="${filter === 'group' ? 'active' : ''}">群聊</button><button id="chat-new" class="icon-button" title="新建对话">${icon('plus')}</button></div>`;
     renderProjectOptions();
     $('project-select').onchange = e => { saveDraftNow(); projectId = e.target.value; chatId = chats()[0]?.id; renderSidebar(); activateChat(); refreshTerminalTabs(); };
     $('project-order').onchange = e => action(() => saveProjectOrder(e.target.value));
@@ -305,13 +313,14 @@ function renderList() {
   } else {
     const list = $('sidebar-list');
     if (!list.querySelector('[data-settings-section]')) {
-      list.innerHTML = `<button type="button" class="list-row" data-settings-section="general">${icon('settings')}通用设置</button><button type="button" class="list-row" data-settings-section="about">${icon('info-circle')}关于</button>`;
+      list.innerHTML = `<button type="button" class="list-row" data-settings-section="general">${icon('settings')}通用设置</button><button type="button" class="list-row" data-settings-section="updates">${icon('refresh')}更新中心<span id="cli-settings-badge" class="cli-update-badge" aria-hidden="true" hidden></span></button><button type="button" class="list-row" data-settings-section="about">${icon('info-circle')}关于</button>`;
       list.querySelectorAll('[data-settings-section]').forEach(button => {
         button.onclick = () => {
           const section = button.dataset.settingsSection;
           if (settingsSection === section) return;
           settingsSection = section;
           if (section === 'about') renderAbout();
+          else if (section === 'updates') renderUpdateCenter();
           else renderSettings();
           renderList();
         };
@@ -323,9 +332,11 @@ function renderList() {
       button.setAttribute('aria-current', active ? 'page' : 'false');
     });
   }
+  renderUpdateBadges();
 }
 function showPage(next) {
   saveDraftNow(); roleModelPicker?.destroy(); roleModelPicker = undefined; page = next; query = '';
+  cliUpdatesView = claudeUpdateView = undefined;
   refreshPriorityView = undefined;
   if (page === 'settings') settingsSection = 'general';
   document.body.classList.toggle('editor-mode', page !== 'projects');
@@ -338,6 +349,7 @@ function showPage(next) {
   else if (page === 'roles') editRole(role(roleId) || state.roles[0]);
   else if(page==='skills')action(()=>editSkill(state.skills?.some(skill=>skill.id===skillId)?skillId:state.skills?.[0]?.id));
   else if (page === 'locations') editLocation(locationOf(locationId) || state.locations[0]);
+  else if (settingsSection === 'updates') renderUpdateCenter();
   else renderSettings();
 }
 function saveDraftNow() { if (chatId && state?.chats.some(c => c.id === chatId) && !$('composer').hidden) { clearTimeout(draftTimer); const text = $('input').value; const current = state.chats.find(c => c.id === chatId); current.draft = text; return api.draft(chatId, text).catch(e => toast(e.message)); } }
@@ -374,8 +386,10 @@ async function loadMessagePage(cursor, { navigate = false, target } = {}) {
   renderMessages();
   if (target) {
     const node = $('msg-' + target);
-    node?.classList.add('message-search-match');
-    requestAnimationFrame(() => node?.scrollIntoView({ block: 'center' }));
+    if (node) {
+      node.classList.add('message-search-match');
+      requestAnimationFrame(() => node.scrollIntoView({ block: 'center' }));
+    } else toast('找不到这条消息，可能已被移除。');
   } else if (navigate && result.newer) {
     const list = $('messages');
     list.scrollTop = cursor?.before ? list.scrollHeight : 0;
@@ -394,7 +408,7 @@ function refreshMessagePage() {
     return action(() => loadMessagePage(historyView.cursor));
   }
 }
-function activateChat() {
+function activateChat({ targetMessageId } = {}) {
   skillCommands.close();
   $('workflow-status')?.remove();
   const c = chat(); const has = Boolean(c); $('composer').hidden = !has || Boolean(c.disbandedAt); $('empty-chat').hidden = has; $('messages').hidden = !has;
@@ -423,7 +437,10 @@ function activateChat() {
     historyView = c && { id: c.id, messages: [] };
     autoBottom = true;
     renderHistoryControls();
-    if (c) action(() => loadMessagePage());
+    if (c) {
+      if (targetMessageId) action(() => loadMessagePage({ around: targetMessageId }, { navigate: true, target: targetMessageId }));
+      else action(() => loadMessagePage());
+    }
   } else refreshMessagePage();
   renderMessages(); quickSettings(); renderToolDirectory();
   if (toolMode === 'files' && !$('tools-panel').hidden && fileView?.projectId !== projectId) action(loadFiles);
@@ -441,7 +458,7 @@ function renderMessages() {
   }
   for (const m of messages) {
     if(m.moderatorTask){renderModeratorMessage(list,c,m);continue;}
-    if(m.kind==='skill'){let element=document.getElementById('msg-'+m.id);if(!element){element=document.createElement('article');element.id='msg-'+m.id;list.append(element);}window.deskSkills.message(element,m,{caller:role(m.callerRoleId)?.name,open:file=>action(()=>openPathReference(file,c.projectId,{chatId:c.id,messageId:m.id})),copy:text=>action(()=>api.copy(text)),cancel:id=>action(()=>api['skill-cancel'](c.id,id)),review:()=>openHandoff(c,m.handoff,m.request)});continue;}
+    if(m.kind==='skill'){let element=document.getElementById('msg-'+m.id);if(!element){element=document.createElement('article');element.id='msg-'+m.id;list.append(element);}window.deskSkills.message(element,m,{caller:role(m.callerRoleId)?.name,preview:file=>action(()=>previewReplyImage(c,m,file)),open:file=>action(()=>openPathReference(file,c.projectId,{chatId:c.id,messageId:m.id})),copy:text=>action(()=>api.copy(text)),cancel:id=>action(()=>api['skill-cancel'](c.id,id)),review:()=>openHandoff(c,m.handoff,m.request)});continue;}
     if (m.kind === 'system' && document.getElementById('msg-' + m.id)) continue;
     let element = document.getElementById('msg-' + m.id);
     if (!element) {
@@ -476,7 +493,7 @@ function renderMessages() {
     const login = element.querySelector('.native-login'); if (login) { login.hidden = !['CODEX_LOGIN_REQUIRED','CODEX_LOGIN_CHECK_FAILED','CODEX_DESKTOP_LOGIN_REQUIRED','CODEX_DESKTOP_LOGIN_CHECK_FAILED','VENDOR_LOGIN_REQUIRED'].includes(m.errorCode); login.textContent = m.errorCode?.startsWith('CODEX_DESKTOP_') ? '检查桌面版登录' : '登录此角色'; }
     const modelChoice = element.querySelector('.select-task-model'); if (modelChoice) modelChoice.hidden = m.errorCode !== 'CODEX_MODEL_REQUIRED';
     const diagnostic=element.querySelector('.diagnostic-copy');if(diagnostic)diagnostic.hidden=!m.diagnostics||m.status==='running';
-    if(m.kind==='assistant')window.deskMessageImages.render(element.querySelector('.message-images'),m,{chatId:c.id,load:(id,messageId)=>api['message-images'](id,messageId),open:file=>openPathReference(file,c.projectId,{chatId:c.id,messageId:m.id}),copy:text=>api.copy(text),error:e=>toast(uiError(e)),layout:follow=>{if(chatId!==c.id)return false;if(follow==='before')return list.scrollHeight-list.scrollTop-list.clientHeight<100;if(follow)requestAnimationFrame(()=>{if(chatId===c.id)list.scrollTop=list.scrollHeight;});}});
+    if(m.kind==='assistant')window.deskMessageImages.render(element.querySelector('.message-images'),m,{chatId:c.id,load:(id,messageId)=>api['message-images'](id,messageId),preview:file=>previewReplyImage(c,m,file),open:file=>openPathReference(file,c.projectId,{chatId:c.id,messageId:m.id}),copy:text=>api.copy(text),error:e=>toast(uiError(e)),layout:follow=>{if(chatId!==c.id)return false;if(follow==='before')return list.scrollHeight-list.scrollTop-list.clientHeight<100;if(follow)requestAnimationFrame(()=>{if(chatId===c.id)list.scrollTop=list.scrollHeight;});}});
     const timedOut = isWorkflowStepTimeout(c, m);
     const key = m.text + '\0' + m.status + '\0' + m.activity + '\0' + m.note + '\0' + m.errorCode + '\0' + m.warningCode + '\0' + JSON.stringify(m.contextTransfer) + '\0' + JSON.stringify(m.cliShutdown) + '\0' + timedOut;
     if (element._key !== key) {
@@ -655,16 +672,36 @@ function renderModeratorMessage(list,c,m){
   const memory=element.querySelector('.moderator-memory');memory.hidden=!result?.summary;memory.querySelector('pre').textContent=result?.summary||'';
 }
 function markReadAtBottom() { const c = chat(); if (page === 'projects' && c?.unread && historyView?.id === c.id && historyView.revision !== undefined && !historyView.newer && !$('dialog').open && $('messages').scrollHeight - $('messages').scrollTop - $('messages').clientHeight < 50 && document.hasFocus()) { c.unread = false; api.read(c.id).catch(() => {}); renderList(); renderProjectNotifications(); } }
-let chatSearchTimer, chatSearchVersion = 0, chatSearchOffset = 0;
+let chatSearchTimer;
+const currentChatSearch = { channel: 'chat-search', version: 0, offset: 0 };
+const otherChatsSearch = { channel: 'other-chats-search', version: 0, offset: 0 };
+const searchControl = (view, name) => $(view.channel + '-' + name);
+function resetChatSearchResults(view) {
+  view.version++;
+  view.offset = 0;
+  searchControl(view, 'results').replaceChildren();
+  searchControl(view, 'status').textContent = '';
+  for (const name of ['prev', 'next']) {
+    const button = searchControl(view, name);
+    button.hidden = true;
+    button.disabled = false;
+  }
+}
+function setOtherChatsSearchOpen(open) {
+  $('other-chats-search').hidden = !open;
+  const toggle = $('other-chats-search-toggle');
+  toggle.setAttribute('aria-expanded', String(open));
+  toggle.textContent = open ? '收起其他会话和项目的结果' : '搜索其他会话和项目';
+  if (!open) resetChatSearchResults(otherChatsSearch);
+}
 function closeChatSearch() {
-  chatSearchVersion++;
   clearTimeout(chatSearchTimer);
   $('chat-search').hidden = true;
   $('chat-find').setAttribute('aria-expanded', 'false');
   $('chat-search-input').value = '';
-  $('chat-search-results').replaceChildren();
-  $('chat-search-status').textContent = '';
-  $('chat-search-prev').hidden = $('chat-search-next').hidden = true;
+  resetChatSearchResults(currentChatSearch);
+  setOtherChatsSearchOpen(false);
+  $('other-chats-search-toggle').hidden = true;
   document.querySelector('.message-search-match')?.classList.remove('message-search-match');
 }
 function openChatSearch() {
@@ -674,52 +711,108 @@ function openChatSearch() {
   $('chat-search-input').focus();
   $('chat-search-input').select();
 }
-async function runChatSearch(offset, version) {
+function openSearchMatch(match) {
+  if (!match.chatId) {
+    document.querySelector('.message-search-match')?.classList.remove('message-search-match');
+    return loadMessagePage({ around: match.id }, { navigate: true, target: match.id });
+  }
+  const destination = state.chats.find(item => item.id === match.chatId && item.projectId === match.projectId);
+  if (!destination || !state.projects.some(item => item.id === destination.projectId)) {
+    throw new Error('找不到该对话，可能已被删除。');
+  }
+  saveDraftNow();
+  projectId = destination.projectId;
+  chatId = destination.id;
+  filter = 'all';
+  query = '';
+  renderSidebar();
+  activateChat({ targetMessageId: match.id });
+  refreshTerminalTabs();
+  $('chat-find').focus();
+}
+async function runChatSearch(view, offset) {
   const c = chat();
   const text = $('chat-search-input').value.trim();
-  if (!c || !text || version !== chatSearchVersion) return;
-  const { matches, total } = await api['chat-search'](c.id, text, offset);
-  if (version !== chatSearchVersion || chat()?.id !== c.id) return;
-  chatSearchOffset = offset;
-  const results = $('chat-search-results');
+  if (!c || !text) return;
+  const version = ++view.version;
+  const isCurrent = () => version === view.version && chat()?.id === c.id;
+  const status = searchControl(view, 'status');
+  const prev = searchControl(view, 'prev');
+  const next = searchControl(view, 'next');
+  status.textContent = '正在搜索…';
+  prev.disabled = next.disabled = true;
+  let response;
+  try {
+    response = await api[view.channel](c.id, text, offset);
+  } catch {
+    if (isCurrent()) status.textContent = '搜索失败，请重试。';
+    return;
+  } finally {
+    if (isCurrent()) {
+      prev.disabled = next.disabled = false;
+      if (view === currentChatSearch) $('other-chats-search-toggle').hidden = false;
+    }
+  }
+  if (!isCurrent()) return;
+  const { matches, total } = response;
+  view.offset = offset;
+  const results = searchControl(view, 'results');
   results.replaceChildren();
   for (const match of matches) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'chat-search-result';
+    const context = document.createElement('span');
+    context.className = 'chat-search-context';
+    if (match.chatId) {
+      const resultChat = state.chats.find(item => item.id === match.chatId);
+      const resultProject = state.projects.find(item => item.id === match.projectId);
+      const source = document.createElement('small');
+      source.textContent = `${resultProject?.name || '项目'} / ${resultChat?.name || '对话'}`;
+      source.title = source.textContent;
+      context.append(source);
+    }
     const author = document.createElement('b');
     author.textContent = match.roleName || ({user:'我', system:'系统', skill:'技能'}[match.kind] || '角色');
     const excerpt = document.createElement('span');
     excerpt.textContent = match.excerpt;
-    button.append(author, excerpt);
-    button.onclick = () => action(async () => {
-      document.querySelector('.message-search-match')?.classList.remove('message-search-match');
-      await loadMessagePage({ around: match.id }, { navigate: true, target: match.id });
-    });
+    context.append(author, excerpt);
+    button.append(context);
+    button.onclick = () => action(() => openSearchMatch(match));
     results.append(button);
   }
-  $('chat-search-status').textContent = total ? `第 ${offset + 1}–${offset + matches.length} 条，共 ${total} 条匹配` : '没有匹配的消息。';
-  $('chat-search-prev').hidden = offset === 0;
-  $('chat-search-next').hidden = offset + matches.length >= total;
+  results.scrollTop = 0;
+  status.textContent = matches.length ? `第 ${offset + 1}–${offset + matches.length} 条，共 ${total} 条匹配` :
+    view === currentChatSearch ? '当前对话没有匹配的消息。' : '其他会话和项目没有匹配的消息。';
+  prev.hidden = offset === 0;
+  next.hidden = offset + matches.length >= total;
 }
 $('chat-find').onclick = openChatSearch;
 $('chat-search-close').onclick = () => { closeChatSearch(); $('chat-find').focus(); };
 $('chat-search-input').oninput = () => {
   clearTimeout(chatSearchTimer);
-  const version = ++chatSearchVersion;
-  const hasQuery = Boolean($('chat-search-input').value.trim());
-  $('chat-search-results').replaceChildren();
-  $('chat-search-status').textContent = hasQuery ? '正在搜索…' : '';
-  $('chat-search-prev').hidden = $('chat-search-next').hidden = true;
-  if (hasQuery) chatSearchTimer = setTimeout(() => action(() => runChatSearch(0, version)), 180);
+  resetChatSearchResults(currentChatSearch);
+  setOtherChatsSearchOpen(false);
+  $('other-chats-search-toggle').hidden = true;
+  if ($('chat-search-input').value.trim()) {
+    $('chat-search-status').textContent = '正在搜索…';
+    chatSearchTimer = setTimeout(() => runChatSearch(currentChatSearch, 0), 180);
+  }
 };
-$('chat-search-prev').onclick = () => action(() => runChatSearch(Math.max(0, chatSearchOffset - 30), ++chatSearchVersion));
-$('chat-search-next').onclick = () => action(() => runChatSearch(chatSearchOffset + 30, ++chatSearchVersion));
+$('other-chats-search-toggle').onclick = () => {
+  const open = $('other-chats-search').hidden;
+  setOtherChatsSearchOpen(open);
+  if (open) runChatSearch(otherChatsSearch, 0);
+};
+for (const view of [currentChatSearch, otherChatsSearch]) {
+  searchControl(view, 'prev').onclick = () => runChatSearch(view, Math.max(0, view.offset - 30));
+  searchControl(view, 'next').onclick = () => runChatSearch(view, view.offset + 30);
+}
 $('history-older').onclick = () => action(() => loadMessagePage({ before: historyView.messages[0]?.id }, { navigate: true }));
 $('history-newer').onclick = () => action(() => loadMessagePage({ after: historyView.messages.at(-1)?.id }, { navigate: true }));
 $('history-latest').onclick = () => action(() => loadMessagePage(undefined, { navigate: true }));
 document.addEventListener('keydown', event => {
-  if (page !== 'projects' || !state || !chat() || $('dialog').open) return;
+  if (page !== 'projects' || !state || !chat() || document.querySelector('dialog[open]')) return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
     event.preventDefault();
     openChatSearch();
@@ -771,7 +864,7 @@ function receiveRoleCatalog(id, models) {
 function quickSettings() {
   const r=quickRole(), ids=composerRecipients().roleIds;
   composerTargetKey=ids.join(',');
-  const hidden=!r || r.engine===geminiWebEngine;
+  const hidden=!r || usesExternalConversation(r.engine);
   $('quick-model').hidden=hidden;$('quick-effort').hidden=hidden||!supportsEffort(r?.engine);
   const saved=chat()?.roleSettings?.[r?.id];
   $('quick-model').value=r?.model||'';
@@ -809,6 +902,10 @@ function openChatRole(id) {
     return () => ({ persona: $('chat-role-persona-text').value, examples: $('chat-role-examples').value });
   }
   let readRole;
+  if (r.engine === slackChatEngine) {
+    dialog(`<h2>${esc(r.name)} · 本对话设置</h2><p class="hint">此角色可参加单聊或群聊。每次只发你本轮输入的正文到绑定的 Slack 私信。接力讨论中，后续角色可以看到它的回复。</p>`, null);
+    return;
+  }
   if (r.engine === geminiWebEngine) {
     const link = c.geminiWebChats?.[id] || '';
     dialog(`<h2>${esc(r.name)} · 本对话设置</h2><label>私有对话链接<input id="gemini-web-link" type="url" value="${esc(link)}" placeholder="https://gemini.google.com/app/…"></label><p class="hint">从地址栏复制链接。留空时打开 Gemini 首页。</p><button type="button" id="gemini-web-open">打开 Gemini</button>${roleFields}`,
@@ -921,7 +1018,7 @@ function openSkillSources(){
   },'应用并刷新');
 }
 async function saveQuick() {
-  const r=quickRole();if(!r||r.engine===geminiWebEngine)return;
+  const r=quickRole();if(!r||usesExternalConversation(r.engine))return;
   const model=$('quick-model').value.trim(), effort=$('quick-effort').value;
   assertEffort(quickOffering(r),effort||role(r.id)?.effort);
   if(r.model!==model || (chat()?.roleSettings?.[r.id]?.effort||'')!==effort)await api['chat-role-settings'](chatId,r.id,{model,effort});
@@ -965,6 +1062,12 @@ function dialog(html, submit, label = '保存') {
   else $('dialog-form').querySelector('.dialog-actions').append(button);
   modal.showModal();
   if (headerSave) modal.scrollTop = 0;
+}
+function previewReplyImage(chat, message, file) {
+  return window.deskMessageImages.showPreview(file, {
+    load: reference => api['message-image-original'](chat.id, message.id, reference),
+    open: reference => openPathReference(reference, chat.projectId, {chatId:chat.id,messageId:message.id}),
+  });
 }
 async function openPathReference(filename, targetProjectId, context) {
   const result = await api.open(filename, targetProjectId, context);
@@ -1079,7 +1182,8 @@ function destructiveSetting(id, label, warning) {
     <button type="button" class="danger" id="${id}" aria-describedby="${id}-warning">${esc(label)}</button></div>`;
 }
 function openProject(p) {
-  dialog(`<h2>${p ? '项目设置' : '新建项目'}</h2><label>项目名称<input id="p-name" value="${esc(p?.name || '')}" placeholder="例如：我的项目" required></label><label>项目工作目录<span class="hint">首个目录默认打开；请为角色的运行位置配置目录。</span></label><div id="directory-rows">${directoryRows(p?.directories || [{ locationId: 'local', path: '' }])}</div><button type="button" id="directory-add" class="quiet">${icon('plus')}添加目录</button><label>邀请角色</label><div class="checks">${state.roles.map(r => `<label><input type="checkbox" name="project-role" value="${r.id}" ${(!p || p.roleIds.includes(r.id)) ? 'checked' : ''}>${esc(r.name)}</label>`).join('')}</div><label class="project-mention-setting"><input type="checkbox" id="p-guest-mentions" aria-describedby="project-mention-hint" ${p?.allowGuestMentions!==false?'checked':''}>允许在群聊中 @ 未入群的项目角色</label><p id="project-mention-hint" class="hint">被点名的角色只参与这次任务，群聊成员名单保持原样。</p>`, async () => {
+  const inviteRoles = state.roles.filter(r => r.enabled !== false || p?.roleIds.includes(r.id));
+  dialog(`<h2>${p ? '项目设置' : '新建项目'}</h2><label>项目名称<input id="p-name" value="${esc(p?.name || '')}" placeholder="例如：我的项目" required></label><label>项目工作目录<span class="hint">首个目录默认打开；请为角色的运行位置配置目录。</span></label><div id="directory-rows">${directoryRows(p?.directories || [{ locationId: 'local', path: '' }])}</div><button type="button" id="directory-add" class="quiet">${icon('plus')}添加目录</button><label>邀请角色</label><div class="checks">${inviteRoles.map(r => `<label><input type="checkbox" name="project-role" value="${r.id}" ${(!p || p.roleIds.includes(r.id)) ? 'checked' : ''}>${esc(r.name)}${r.enabled === false ? '（已禁用）' : ''}</label>`).join('') || '<p class="hint">没有可邀请的启用角色。</p>'}</div><label class="project-mention-setting"><input type="checkbox" id="p-guest-mentions" aria-describedby="project-mention-hint" ${p?.allowGuestMentions!==false?'checked':''}>允许在群聊中 @ 未入群的项目角色</label><p id="project-mention-hint" class="hint">被点名的角色只参与这次任务，群聊成员名单保持原样。</p>`, async () => {
     const result = await api['project-save']({ id: p?.id, name: $('p-name').value, allowGuestMentions: $('p-guest-mentions').checked, directories: [...document.querySelectorAll('.directory-row')].map(row => ({ locationId: row.querySelector('select').value, path: row.querySelector('input').value })), roleIds: [...document.querySelectorAll('[name=project-role]:checked')].map(x => x.value) });
     state = await api.snapshot();
     projectId = result.id; if (chat()?.projectId !== result.id) chatId = chats()[0]?.id; renderSidebar(); activateChat();
@@ -1147,7 +1251,7 @@ function openPriorityRule(rule) {
     }
   }
   dialog(`<h2>${rule ? '编辑优先级规则' : '新增优先级规则'}</h2>`, () => save(read()), '保存规则');
-  const candidates = state.roles.filter(role => role.engine !== geminiWebEngine).toSorted((a,b) => Number(a.enabled===false)-Number(b.enabled===false));
+  const candidates = state.roles.filter(role => !usesExternalConversation(role.engine)).toSorted((a,b) => Number(a.enabled===false)-Number(b.enabled===false));
   read = window.deskWorkflowUI.editPriority($('dialog-body'), rule, candidates,
     window.deskWorkflowRatings.catalog(state.workflowPriorities || []), async () => {
       if (confirm('删除这条优先级规则？') && await save(null)) $('dialog').close();
@@ -1157,7 +1261,7 @@ function openPriorityRule(rule) {
 function openWorkflow(existing,{groupTarget,definition}={}){
   const activeProject = project();
   if (!activeProject) { toast('请先创建或选择一个项目。'); return; }
-  const roles=state.roles.filter(r=>r.enabled!==false&&r.engine!==geminiWebEngine&&activeProject.directories.some(d=>d.locationId===r.locationId));
+  const roles=state.roles.filter(r=>r.enabled!==false&&!usesExternalConversation(r.engine)&&activeProject.directories.some(d=>d.locationId===r.locationId));
   if (!roles.length && !existing&&!groupTarget) { openGraphWorkflow(activeProject); return; }
   if(!roles.length){toast('当前项目没有可以运行工作流的角色。请先在项目设置中为角色的运行位置添加工作目录。');return;}
   const stages=['implement','review'];
@@ -1234,7 +1338,7 @@ function openWorkflow(existing,{groupTarget,definition}={}){
 function openGraphWorkflow(activeProject,{goal='',draft}={}) {
   const roles = state.roles.filter(role=>{
     const location = locationOf(role.locationId);
-    return role.enabled!==false && role.engine!==geminiWebEngine &&
+    return role.enabled!==false && !usesExternalConversation(role.engine) &&
       activeProject.directories.some(directory=>directory.locationId===role.locationId) &&
       (location?.type==='local' || (location?.os==='linux' && role.provider==='native'));
   }).map(role=>({...role,location:locationOf(role.locationId).name,local:role.locationId==='local'}));
@@ -1317,7 +1421,7 @@ function openGraphWorkflow(activeProject,{goal='',draft}={}) {
 
 function openGeneratedWorkflow(activeProject,{goal='',existing,rerun=false,groupTarget,definition}={}) {
   const eligible=state.roles.filter(r=>{
-    if (!r||r.enabled===false||r.engine===geminiWebEngine||!activeProject.directories.some(d=>d.locationId===r.locationId)) return false;
+    if (!r||r.enabled===false||usesExternalConversation(r.engine)||!activeProject.directories.some(d=>d.locationId===r.locationId)) return false;
     const location=locationOf(r.locationId);
     return location?.type==='local'||(location?.os==='linux'&&r.provider==='native');
   });
@@ -1464,7 +1568,7 @@ function renderGraphWorkflow(panel, c) {
   };
   button('打开流程副本',()=>openGraphWorkflow(project(),{goal:flow.goal,draft:flow}));
   button('将副本保存到群聊',()=>openGroupWorkflowDestination(flow));
-  if (['paused','needs_check'].includes(flow.status)) {
+  if (['paused','needs_check','unavailable'].includes(flow.status)) {
     const guidance=document.createElement('textarea');
     guidance.rows=2;guidance.maxLength=16000;guidance.placeholder='为当前节点补充说明（可选）';
     guidance.setAttribute('aria-label','补充说明');panel.append(guidance);
@@ -1666,7 +1770,7 @@ function openChat(c, preferredRole, onCreated) {
   }
   $('chat-speaking-settings').insertAdjacentHTML('afterend','<section id="chat-moderator-settings" class="moderator-settings"><h3>群聊主持人</h3><label>主持角色<select id="c-moderator" aria-label="群聊主持人"></select></label><label class="moderator-checkbox"><input type="checkbox" id="c-moderator-compression" '+(c?.moderatorCompression===false?'':'checked')+'>长历史自动压缩，保留原始记录</label><p class="hint">负责接力群聊的长历史压缩和结束判断，使用本对话中的模型设置。</p><p class="hint">每次任务最多压缩 2 次；压缩和结束判断均消耗模型额度。</p></section>');
   let moderatorConfigured=false;
-  const refreshModerator=ids=>{refreshDefaults(ids);const selected=moderatorConfigured?$('c-moderator').value:c?.moderatorRoleId||'';moderatorConfigured=true;const eligible=ids.filter(id=>role(id)?.engine!==geminiWebEngine);$('c-moderator').innerHTML=options([['','不指定（各角色共同判断）'],...eligible.map(id=>[id,(role(id)?.name||id)+(roleEnabled(id)?'':'（已禁用）')])],eligible.includes(selected)?selected:'');$('chat-moderator-settings').hidden=ids.length<2||!eligible.length;$('c-moderator-compression').disabled=!$('c-moderator').value;};
+  const refreshModerator=ids=>{refreshDefaults(ids);const selected=moderatorConfigured?$('c-moderator').value:c?.moderatorRoleId||'';moderatorConfigured=true;const eligible=ids.filter(id=>!usesExternalConversation(role(id)?.engine));$('c-moderator').innerHTML=options([['','不指定（各角色共同判断）'],...eligible.map(id=>[id,(role(id)?.name||id)+(roleEnabled(id)?'':'（已禁用）')])],eligible.includes(selected)?selected:'');$('chat-moderator-settings').hidden=ids.length<2||!eligible.length;$('c-moderator-compression').disabled=!$('c-moderator').value;};
   $('c-moderator').onchange=()=>{$('c-moderator-compression').disabled=!$('c-moderator').value;};
   picker = window.createRolePicker($('chat-role-picker'), { roles: selectableRoles, selected: c?.roleIds || (roleEnabled(preferredRole) ? [preferredRole] : []), projectRoleIds: project().roleIds, locationName: id => locationOf(id)?.name, onChange: ids => { $('dialog-submit').disabled = ids.length === 0;const order=orderPicker.selected().filter(id=>ids.includes(id));for(const id of ids)if(!order.includes(id))order.push(id);orderPicker.set(order);$('chat-speaking-settings').hidden=ids.length<2;refreshModerator(order); } });
   if (c) {
@@ -1701,9 +1805,14 @@ function editRole(r) {
   $('r-login-source-field').insertAdjacentHTML('afterend','<div id="r-desktop-tools-field" class="wide"><div class="desktop-tool-inheritance"><strong id="r-desktop-tools-status"></strong><button type="button" id="r-desktop-tools-toggle" aria-describedby="r-desktop-tools-status"></button></div><input type="checkbox" id="r-desktop-tools" '+(value.codexDesktopTools===false?'':'checked')+' hidden><small class="hint">继承桌面版已启用的 MCP 和插件，适用于发言和主持人。关闭后仅使用本工具提供的工具。</small></div>');
   const remoteAntigravity = () => $('r-engine').value === 'antigravity' && $('r-location').value !== 'local';
   const customAcp = () => $('r-engine').value === 'custom-acp';
+  const useSlack = () => $('r-engine').value === slackChatEngine;
   const executableField = $('r-executable').closest('label');
+  executableField.insertAdjacentHTML('beforebegin', `
+    <label id="r-slack-channel-field" class="wide" hidden>Slack 私信链接或会话 ID<input id="r-slack-channel" value="${esc(value.slackChannel || '')}" placeholder="D…" maxlength="256" spellcheck="false"><small class="hint">先在 Slack 和你的 Dot 或 Grok Bot 建立一对一私信。</small></label>
+    <label id="r-slack-token-field" class="wide" hidden>Slack User OAuth Token<input id="r-slack-token" type="password" autocomplete="new-password" placeholder="${value.hasSlackKey ? '已加密保存，留空沿用' : 'xoxp-…'}"><small class="hint">用自己的 Slack 应用签发用户令牌，授权 chat:write、im:read 和 im:history。</small></label>`);
   const executableLabel = executableField.firstChild;
-  executableField.insertAdjacentHTML('afterend', `<label class="wide" id="r-acp-preset-field" hidden>启动预设<select id="r-acp-preset">${options([['','自定义命令'],['hermes','Hermes Agent'],['pi','Pi（pi-acp）']],value.executable === 'hermes' ? 'hermes' : value.executable === 'pi-acp' ? 'pi' : '')}</select><small class="hint">选择预设可填入命令和参数，安装与登录在 Agent 自身的界面完成。</small></label>
+  const savedPreset = Object.keys(acpPresets).find(id => acpPresets[id].command === value.executable);
+  executableField.insertAdjacentHTML('afterend', `<label class="wide" id="r-acp-preset-field" hidden>启动预设<select id="r-acp-preset">${options([['','自定义命令'],...Object.entries(acpPresets).map(([id, preset]) => [id,preset.label])],savedPreset || '')}</select><small class="hint">选择预设可填入命令和参数，账号和模型服务在 Agent 自身的界面配置。</small></label>
     <label class="wide" hidden>启动参数<textarea id="r-acp-args" rows="2" spellcheck="false">${esc(JSON.stringify(value.acpArgs || []))}</textarea><small class="hint">使用 JSON 数组，每个参数占一个元素，例如 ["acp"]。</small></label>
     <label class="wide" hidden>环境变量<textarea id="r-acp-env" rows="3" spellcheck="false">${esc(JSON.stringify(value.acpEnv || {}, null, 2))}</textarea><small class="hint">使用 JSON 对象。密钥请用 ${esc('${API_KEY}')} 的形式引用本机环境变量。</small></label>`);
   executableField.before($('r-acp-preset-field'));
@@ -1728,6 +1837,7 @@ function editRole(r) {
     $('r-desktop-tools-status').textContent=$('r-desktop-tools').checked?'已继承桌面版 MCP 和插件':'已关闭桌面工具继承';$('r-desktop-tools-toggle').textContent=$('r-desktop-tools').checked?'关闭继承':'开启继承';$('r-desktop-tools-toggle').disabled=!shared;
     $('r-login-source-hint').textContent = shared ? '共用桌面版账号；切换或退出登录会影响共用角色。' : '此角色单独登录账号。';
     $('role-login').innerHTML = icon('login') + (remoteAntigravity() ? '配置并登录 VPS' : shared ? '检查桌面版登录' : $('r-engine').value===geminiWebEngine?'在浏览器打开 Gemini':$('r-engine').value==='workbuddy'?'打开 WorkBuddy 登录':vendorKinds[$('r-engine').value]?'登录 '+vendorKinds[$('r-engine').value]+' 账号':'登录原生账号');
+    if (useSlack()) $('role-login').textContent = '检查 Slack 授权';
     $('role-login').classList.toggle('primary', remoteAntigravity());
     $('role-login').hidden = customAcp();
   };
@@ -1762,13 +1872,13 @@ function editRole(r) {
     for (const option of $('r-location').options) {
       const location = locationOf(option.value);
       const linuxSsh = location?.os === 'linux' && location.control === 'ssh';
-      option.disabled = option.value !== 'local' && (web || (vendor && (engine !== 'antigravity' || !linuxSsh)));
+      option.disabled = option.value !== 'local' && (usesExternalConversation(engine) || (vendor && (engine !== 'antigravity' || !linuxSsh)));
     }
     if ($('r-location').selectedOptions[0]?.disabled) $('r-location').value = 'local';
     const remote = remoteAntigravity(), nextKey = engine + ':' + $('r-location').value;
     if (runtimeKey !== nextKey && (customAcp() || runtimeKey.startsWith('custom-acp:') || remote || (runtimeKey.startsWith('antigravity:') && runtimeKey !== 'antigravity:local'))) {
       executables.set(runtimeKey, $('r-executable').value);
-      $('r-executable').value = executables.get(nextKey) || (customAcp() ? ({hermes:'hermes',pi:'pi-acp'}[$('r-acp-preset').value] || '') : '');
+      $('r-executable').value = executables.get(nextKey) || (customAcp() ? (acpPresets[$('r-acp-preset').value]?.command || '') : '');
     }
     runtimeKey = nextKey;
     runtimeRequest++;
@@ -1781,13 +1891,16 @@ function editRole(r) {
     executableLabel.nodeValue = customAcp() ? 'ACP 启动命令' : 'Agent 可执行文件（可选）';
     $('r-executable').placeholder = customAcp() ? 'PATH 中的命令，或可执行文件、Node.js 脚本的完整路径' : remote ? '留空自动检测，或填写 VPS 上的 / 或 ~/ 路径' : '留空自动检测原生可执行文件';
     for (const id of ['r-location','r-proxy','r-provider','role-model-picker','r-effort','r-permission','r-key','r-url','r-executable','r-location-tools']) $(id).closest('label').hidden=web;
+    if (useSlack()) for (const id of ['r-location','r-provider','role-model-picker','r-effort','r-permission','r-key','r-url','r-executable','r-location-tools']) $(id).closest('label').hidden=true;
+    for (const id of ['r-slack-channel-field','r-slack-token-field']) $(id).hidden=!useSlack();
     for (const id of ['r-acp-preset','r-acp-args','r-acp-env']) $(id).closest('label').hidden=!customAcp();
     if (customAcp()) for (const id of ['r-provider','r-key','r-url','r-effort']) $(id).closest('label').hidden = true;
     $('agent-runtime-guide').hidden = customAcp() && !$('r-acp-preset').value;
     $('agent-runtime-guide').textContent = customAcp() ? '查看预设安装说明' : '官方安装 / 登录说明';
     $('agent-runtime-detect').textContent = customAcp() ? '检查启动程序' : '检测引擎';
     for (const id of ['r-proxy-hint','permission-hint']) $(id).hidden=web;
-    $('r-location-tools').closest('.checks').nextElementSibling.hidden=web;
+    if (useSlack()) $('permission-hint').hidden=true;
+    $('r-location-tools').closest('.checks').nextElementSibling.hidden=usesExternalConversation(engine);
     $('gemini-web-role-hint').hidden=!web;
     $('r-effort').disabled=!supportsEffort(engine);if(!supportsEffort(engine))$('r-effort').value='';
     $('r-key').disabled=$('r-provider').value==='native';$('r-url').disabled=$('r-provider').value==='native';
@@ -1820,17 +1933,17 @@ function editRole(r) {
   $('r-model').addEventListener('change',()=>syncEditorEfforts($('r-effort').value,true));
   syncEditorEfforts(supportsEffort(value.engine)?value.effort||'':'');
   const picker = roleModelPicker;
-  const autoReadModels = () => $('role-connection')?.open && picker === roleModelPicker && $('r-engine').value !== geminiWebEngine && !remoteAntigravity() && !customAcp();
+  const autoReadModels = () => $('role-connection')?.open && picker === roleModelPicker && !usesExternalConversation($('r-engine').value) && !remoteAntigravity() && !customAcp();
   $('role-connection').addEventListener('toggle', () => { if (autoReadModels()) picker.update(); });
   for (const id of ['r-engine','r-provider','r-location','r-key','r-url','r-executable','r-proxy','r-login-source','r-acp-args','r-acp-env']) $(id).addEventListener('change', () => {
     picker.reset();
     if (autoReadModels()) picker.update();
   });
   $('r-acp-preset').onchange = () => {
-    const preset = $('r-acp-preset').value;
+    const preset = acpPresets[$('r-acp-preset').value];
     if (preset) {
-      $('r-executable').value = preset === 'hermes' ? 'hermes' : 'pi-acp';
-      $('r-acp-args').value = preset === 'hermes' ? '["acp"]' : '[]';
+      $('r-executable').value = preset.command;
+      $('r-acp-args').value = JSON.stringify(preset.args);
       $('r-model').value = '';
     }
     refreshAgentKind();
@@ -1865,7 +1978,17 @@ function editRole(r) {
     selectedAvatar = chosen.avatar; selectedAvatarId = chosen.avatarId; selectedAvatarUrl = chosen.avatarUrl;
     $('avatar-picker').querySelector('.avatar').outerHTML = avatar(chosen, 'large'); $('preview-avatar').innerHTML = avatar(chosen);
   }));
-  const save = async () => { const effort = isCursor() ? '' : $('r-effort').value; assertEffort(editorOffering(),effort); const next = await api['role-save']({ ...catalogDraft(), name: $('r-name').value, avatar: selectedAvatar, avatarId: selectedAvatarId, persona: $('r-persona').value, examples: $('r-examples').value, model: picker.value(), effort, description: $('r-description').value, permission: $('r-permission').value, codexDesktopTools:$('r-desktop-tools').checked, allowLocationTools: $('r-location-tools').checked }); savedRoleId = next.id; roleId = next.id; roleCatalogs.delete(next.id); return next; };
+  const save = async () => {
+    const effort = useSlack() || isCursor() ? '' : $('r-effort').value;
+    assertEffort(editorOffering(),effort);
+    const slack = useSlack() ? {slackChannel:$('r-slack-channel').value, slackToken:$('r-slack-token').value} : {};
+    const next = await api['role-save']({ ...catalogDraft(), ...slack, name: $('r-name').value, avatar: selectedAvatar, avatarId: selectedAvatarId, persona: $('r-persona').value, examples: $('r-examples').value, model: picker.value(), effort, description: $('r-description').value, permission: $('r-permission').value, codexDesktopTools:$('r-desktop-tools').checked, allowLocationTools: $('r-location-tools').checked });
+    $('r-slack-token').value='';
+    savedRoleId = next.id;
+    roleId = next.id;
+    roleCatalogs.delete(next.id);
+    return next;
+  };
   $('role-connection').open=true;
   $('role-form').onsubmit = e => { e.preventDefault(); action(async () => { const next = await save();toast('角色已保存，下次发言生效'); editRole({...role(next.id),...next}); }); };
   $('exe-pick').onclick = () => action(async () => { const files = await api.pick('file'); if (files[0]) { $('r-executable').value = files[0]; $('r-executable').dispatchEvent(new Event('change')); } });
@@ -1989,7 +2112,7 @@ function bindSshKeySetup(locationValue) {
   };
 }
 function renderAbout() {
-  claudeUpdateView = undefined;
+  cliUpdatesView = claudeUpdateView = undefined;
   const version = state?.appVersion ? `v${esc(state.appVersion)}` : '';
   $('editor-view').innerHTML = `
     <section class="editor simple-form about-page" aria-labelledby="about-title">
@@ -2044,13 +2167,49 @@ function renderAbout() {
   $('about-repo-link').onclick = openRepo;
 }
 function renderSettings() {
-  $('editor-view').innerHTML = `<form class="editor simple-form" id="settings-form"><header><h1>通用设置</h1><button class="primary" type="submit">保存设置</button></header><div class="setting-card"><h3>运行与唤醒</h3><div class="checks"><label><input type="checkbox" id="s-awake" ${state.settings.keepAwake ? 'checked' : ''}>保持电脑唤醒（前台和后台）</label></div><p>防止自动休眠和屏保；手动锁屏仍由 Windows 管理。</p><label class="field"><span>同时运行的讨论上限</span><input id="s-limit" type="number" min="1" max="8" value="${state.settings.maxJobs}"></label><p>群聊中的角色依次发言。</p></div><div class="setting-card"><h3>外观</h3><label class="field"><span>界面主题</span><select id="s-theme">${options([['system','跟随系统'],['light','浅色'],['dark','深色（夜间模式）']], state.settings.theme)}</select></label><p>切换后立即生效。</p></div><div class="setting-card"><h3>本机 Codex CLI</h3><p>管理本工具使用的 Codex CLI；更新前请暂停相关任务。</p><div style="display:flex;gap:9px"><button type="button" id="cli-check">检查更新</button><button type="button" id="cli-update">升级托管 CLI</button></div><p id="cli-result" style="margin-top:10px"></p></div><div id="claude-updater"></div><div class="form-actions"><span class="hint">设置保存后即时生效</span></div></form>`;
+  const themeList = window.deskThemes?.themes || [
+    { id: 'system', label: '跟随系统', description: '随 Windows 浅色 / 深色自动切换', swatches: ['#ffffff', '#f4f5f7', '#17a74e'] },
+    { id: 'light', label: '浅色', description: '清爽明亮的默认浅色界面', swatches: ['#ffffff', '#f4f5f7', '#17a74e'] },
+    { id: 'dark', label: '深色（夜间模式）', description: '标准深灰夜间界面', swatches: ['#191d23', '#272f39', '#15803d'] },
+  ];
+  const swatches = themeList.map(theme => `<button type="button" class="theme-swatch" data-theme-choice="${theme.id}" aria-pressed="${state.settings.theme === theme.id}"><span class="theme-swatch-preview" aria-hidden="true">${theme.swatches.map(color => `<span style="background:${color}"></span>`).join('')}</span><span class="theme-swatch-text"><strong>${esc(theme.label)}</strong><small>${esc(theme.description)}</small></span></button>`).join('');
+  $('editor-view').innerHTML = `<form class="editor simple-form" id="settings-form"><header><h1>通用设置</h1><button class="primary" type="submit">保存设置</button></header><div class="setting-card"><h3>运行与唤醒</h3><div class="checks"><label><input type="checkbox" id="s-awake" ${state.settings.keepAwake ? 'checked' : ''}>保持电脑唤醒（前台和后台）</label></div><p>防止自动休眠和屏保；手动锁屏仍由 Windows 管理。</p><label class="field"><span>同时运行的讨论上限</span><input id="s-limit" type="number" min="1" max="8" value="${state.settings.maxJobs}"></label><p>群聊中的角色依次发言。</p></div><div class="setting-card"><h3>外观</h3><label class="field"><span>界面主题</span><select id="s-theme">${options(themeList.map(theme => [theme.id, theme.label]), state.settings.theme)}</select></label><div class="theme-swatches" role="group" aria-label="主题色预设">${swatches}</div><p>切换后立即生效，提供护眼绿、暖纸米、雾霭蓝与低蓝光深色主题。</p></div><div class="form-actions"><span class="hint">设置保存后即时生效</span></div></form>`;
   $('settings-form').onsubmit = e => { e.preventDefault(); action(async () => { await api.settings({ keepAwake: $('s-awake').checked, maxJobs: Number($('s-limit').value), theme: $('s-theme').value }); toast('设置已保存'); }); };
-  $('s-theme').onchange = () => action(() => api.settings({ ...state.settings, theme: $('s-theme').value }));
-  claudeUpdateView = window.createClaudeUpdateView($('claude-updater'), { request: operation => api['claude-cli'](operation), error: problem => toast(problem.message) });
+  const applyThemeChoice = chosen => {
+    $('s-theme').value = chosen;
+    for (const button of $('editor-view').querySelectorAll('[data-theme-choice]')) {
+      button.setAttribute('aria-pressed', String(button.dataset.themeChoice === chosen));
+    }
+    window.applyDeskTheme(chosen);
+    return action(() => api.settings({ ...state.settings, theme: chosen }));
+  };
+  $('s-theme').onchange = () => applyThemeChoice($('s-theme').value);
+  for (const button of $('editor-view').querySelectorAll('[data-theme-choice]')) {
+    button.onclick = () => applyThemeChoice(button.dataset.themeChoice);
+  }
+  cliUpdatesView = claudeUpdateView = undefined;
+}
+function renderUpdateBadges() {
+  const count = state.cliUpdates?.reminders ? state.cliUpdates.count : 0;
+  for (const [id, label] of [['cli-nav-badge', '设置'], ['cli-settings-badge', '更新中心']]) {
+    const badge = $(id);
+    if (!badge) continue;
+    badge.textContent = count || '';
+    badge.hidden = !count;
+    badge.closest('button').setAttribute('aria-label', count ? label + '，' + count + ' 个 CLI 有可用更新' : label);
+  }
+}
+function renderUpdateCenter() {
+  $('editor-view').innerHTML = `<div class="editor simple-form cli-updates-page"><header><h1>更新中心</h1></header><div id="cli-updates"></div><div id="claude-updater"></div><p class="hint">包括 Claude Code、OpenCode、Cursor Agent、WorkBuddy 以及自定义 ACP 角色正在使用的 CLI，可在此检查并安装可用更新。</p></div>`;
+  cliUpdatesView = window.createCliUpdatesView($('cli-updates'), {
+    request: (verb, ...args) => api['cli-update-' + verb](...args),
+    error: problem => toast(problem.message),
+  });
+  claudeUpdateView = window.createClaudeUpdateView($('claude-updater'), {
+    request: operation => api['claude-cli'](operation), error: problem => toast(problem.message),
+  });
+  cliUpdatesView.render(state.cliUpdates);
   claudeUpdateView.render(state.claudeUpdate);
-  const cliResult = $('cli-result');
-  for (const name of ['check','update']) $('cli-' + name).onclick = () => action(async () => { cliResult.textContent = name === 'check' ? '正在检查…' : '正在升级托管 CLI…'; const result = await api['cli-' + name](); cliResult.textContent = result.message || JSON.stringify(result); });
 }
 function renderToolDirectory() { const select = $('tool-directory'); const previous = select.value; select.innerHTML = options((project()?.directories || []).map((d,i) => [i, (locationOf(d.locationId)?.name || d.locationId) + ' · ' + d.path]), previous || 0); }
 let groupWorkflowEditor;
@@ -2087,7 +2246,7 @@ function mountGroupWorkflow(c, key, draft, readOnly) {
   const p=project();
   const roles=state.roles.filter(role=>{
     const location=locationOf(role.locationId);
-    return role.enabled!==false&&role.engine!==geminiWebEngine&&p.directories.some(dir=>dir.locationId===role.locationId)&&
+    return role.enabled!==false&&!usesExternalConversation(role.engine)&&p.directories.some(dir=>dir.locationId===role.locationId)&&
       (location?.type==='local'||location?.os==='linux'&&role.provider==='native');
   }).map(role=>({...role,location:locationOf(role.locationId).name,local:role.locationId==='local'}));
   const chats=state.chats.map(item=>({id:item.id,name:item.id===c.id?'本群 · '+item.name:
@@ -2206,7 +2365,7 @@ function renderGroupWorkflows() {
     <label>本次任务目标<textarea id="group-workflow-goal" rows="4" maxlength="16000"></textarea></label>`,
     ()=>invokeWorkflow('group-start',c.id,definition.id,$('group-workflow-goal').value),'启动');
   $('group-workflow-stop').onclick=()=>action(()=>invokeWorkflow('group-stop',c.id,run.id));
-  $('group-workflow-resume').onclick=()=>dialog(`<h2>继续工作流</h2><p class="hint">沿用启动时的定义和群聊上文，继续当前节点。</p>
+  $('group-workflow-resume').onclick=()=>dialog(`<h2>继续工作流</h2><p class="hint">沿用启动时的定义和群聊上文。已有可用结果时会沿唯一出口继续。</p>
     <label>补充说明（可选）<textarea id="group-workflow-guidance" rows="4" maxlength="16000"></textarea></label>`,
     ()=>invokeWorkflow('group-resume',c.id,run.id,$('group-workflow-guidance').value),'继续');
   $('group-workflow-finish').onclick=()=>{
@@ -2533,8 +2692,17 @@ api.on('state', value => {
   if (!state) return;
   state = value;
   window.applyDeskTheme(value.settings.theme);
+  if ($('s-theme')) {
+    $('s-theme').value = value.settings.theme;
+    for (const button of $('editor-view').querySelectorAll('[data-theme-choice]')) {
+      button.setAttribute('aria-pressed', String(button.dataset.themeChoice === value.settings.theme));
+    }
+  }
   if ($('usage-center') && $('dialog').open) usageCenter?.render(value);
-  if (page === 'settings') claudeUpdateView?.render(value.claudeUpdate);
+  if (page === 'settings' && settingsSection === 'updates') {
+    cliUpdatesView?.render(value.cliUpdates);
+    claudeUpdateView?.render(value.claudeUpdate);
+  }
   if (page === 'projects' && !project() && state.projects.length) {
     projectId = orderedProjects()[0]?.id;
     chatId = chats()[0]?.id;

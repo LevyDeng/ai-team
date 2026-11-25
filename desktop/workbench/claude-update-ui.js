@@ -15,7 +15,7 @@
         button.disabled = !state.enabled || busy || (action !== 'check' && state.state === 'running') || (action === 'update' && state.latest && !state.available && !state.preparedVersion) || (action === 'rollback' && !state.canRollback);
       }
       const message = state.reason === 'connection_lost' ? reasons.connection_lost : state.state === 'running' ? phases[state.phase] || '正在更新…' : reasons[state.reason] || (state.available ? '有新版本可用。' : state.latest ? '当前没有可用更新。' : '点击检查更新读取服务器版本。');
-      container.querySelector('.claude-update-state').textContent = pending ? '正在连接服务器…' : message;
+      container.querySelector('.claude-update-state').textContent = !state.enabled ? '尚未配置托管服务器。' : pending ? '正在连接服务器…' : message;
     }
     for (const button of container.querySelectorAll('[data-claude-action]')) button.onclick = async () => {
       pending = true; render(state);

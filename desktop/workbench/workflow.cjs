@@ -3,13 +3,14 @@ const { Annotation, StateGraph, START, END } = require('@langchain/langgraph');
 const { inspect } = require('./codex-diagnostics.cjs');
 const { responseObject } = require('./moderator.cjs');
 const { engine: geminiWebEngine } = require('./gemini-web.cjs');
+const { engine: slackChatEngine } = require('./slack-chat.cjs');
 
 const stages = ['implement', 'review'];
 const routingTimeoutMs = 90_000;
 const routingFailed = 'The moderator could not select a candidate. Check the moderator output before continuing.';
 
 function canModerate(role) {
-  return Boolean(role?.engine) && role.enabled !== false && role.engine !== geminiWebEngine;
+  return Boolean(role?.engine) && role.enabled !== false && ![geminiWebEngine, slackChatEngine].includes(role.engine);
 }
 
 function validLimit(limit) {

@@ -5,7 +5,9 @@ const { settings: proxySettings } = require('./proxy.cjs');
 const conversations = require('./conversations.cjs');
 const {isVendor,supportsRemote,customSettings}=require('./vendor-agents.cjs');
 const {engine:geminiWebEngine}=require('./gemini-web.cjs');
+const {engine:slackChatEngine, conversationId:slackConversationId}=require('./slack-chat.cjs');
 const workflowPriorities = require('./workflow-ratings.js');
+const themes = require('./themes.js');
 const { WorkspaceDatabase, messageView } = require('./workspace-db.cjs');
 const { messageText } = require('./attachment-text.js');
 const projectOrders = ['recent', 'name', 'created', 'manual'];
@@ -17,6 +19,31 @@ function atomic(file, value) {
   finally { try { fs.unlinkSync(temporary); } catch {} }
 }
 function text(value, limit = 200) { return typeof value === 'string' ? value.trim().slice(0, limit) : ''; }
+function searchChatMessages(chats, query, offset, includeChat = false) {
+  const needle = String(query).trim().slice(0, 300).toLowerCase();
+  const start = Number.isInteger(offset) ? Math.max(0, offset) : 0;
+  const matches = [];
+  let total = 0;
+  if (!needle) return { matches, total };
+  for (const chat of chats) {
+    for (let position = chat.messages.length - 1; position >= 0; position--) {
+      const message = chat.messages[position];
+      if (message.workflowInstruction) continue;
+      const value = messageText(message);
+      const index = value.toLowerCase().indexOf(needle);
+      if (index < 0) continue;
+      if (total >= start && matches.length < 30) {
+        matches.push({
+          id: message.id, at: message.at, roleName: message.roleName, kind: message.kind,
+          excerpt: (index > 42 ? '…' : '') + value.slice(Math.max(0, index - 42), index + needle.length + 75) + (index + needle.length + 75 < value.length ? '…' : ''),
+          ...(includeChat ? { chatId: chat.id, projectId: chat.projectId } : {}),
+        });
+      }
+      total++;
+    }
+  }
+  return { matches, total };
+}
 class Store {
   constructor(directory, root, options) {
     this.directory = directory;
@@ -43,7 +70,7 @@ class Store {
         this.state = { version: 1, projects, roles, locations: [{ id: 'local', name: '本机', type: 'local', os: 'windows', control: 'ssh' }, ...(remote ? [remote] : [])], chats: [], settings: { keepAwake: true, maxJobs: 3 } };
       }
       this.state.workflowPriorities ??= workflowPriorities.migrate(this.state.roles, id);
-      if (!['light', 'dark', 'system'].includes(this.state.settings.theme)) this.state.settings.theme = 'system';
+      if (!themes.isValid(this.state.settings.theme)) this.state.settings.theme = 'system';
       for (const chat of this.state.chats) {
         if(chat.nativeSessions)for(const record of Object.values(chat.nativeSessions))if(record.status==='submitting')record.status='uncertain';
         conversations.initialize(chat, this.state.roles);
@@ -144,24 +171,14 @@ class Store {
       chat.messages.some(message => !message.workflowInstruction&&messageText(message).toLowerCase().includes(needle))).map(chat => chat.id);
   }
   searchMessages(chatId, query, offset = 0) {
-    const needle = String(query).trim().slice(0, 300).toLowerCase();
-    const start = Number.isInteger(offset) ? Math.max(0, offset) : 0;
-    const matches = [];
-    let total = 0;
-    const { messages } = this.get('chats', chatId);
-    if (needle) for (let position = messages.length - 1; position >= 0; position--) {
-      const message = messages[position];
-      if (message.workflowInstruction) continue;
-      const value = messageText(message);
-      const index = value.toLowerCase().indexOf(needle);
-      if (index < 0) continue;
-      if (total >= start && matches.length < 30) {
-        matches.push({ id: message.id, at: message.at, roleName: message.roleName, kind: message.kind,
-          excerpt: (index > 42 ? '…' : '') + value.slice(Math.max(0, index - 42), index + needle.length + 75) + (index + needle.length + 75 < value.length ? '…' : '') });
-      }
-      total++;
-    }
-    return { matches, total };
+    return searchChatMessages([this.get('chats', chatId)], query, offset);
+  }
+  searchOtherChats(chatId, query, offset = 0) {
+    const { projectId } = this.get('chats', chatId);
+    const chats = this.state.chats.filter(chat => chat.id !== chatId).sort((a, b) =>
+      Number(b.projectId === projectId) - Number(a.projectId === projectId) ||
+      (b.updatedAt || 0) - (a.updatedAt || 0));
+    return searchChatMessages(chats, query, offset, true);
   }
   updateWorkflowPriority(ruleId, value) {
     const previous = this.state.workflowPriorities;
@@ -170,7 +187,7 @@ class Store {
     if (value) {
       const rule = workflowPriorities.normalizeRule(value);
       if (workflowPriorities.findRule(updated, rule)) throw new Error('这组场景和职责已存在，请编辑原有规则。');
-      if (rule.candidates.some(candidate => !this.state.roles.some(role => role.id === candidate.roleId && role.engine !== geminiWebEngine))) {
+      if (rule.candidates.some(candidate => !this.state.roles.some(role => role.id === candidate.roleId && ![geminiWebEngine,slackChatEngine].includes(role.engine)))) {
         throw new Error('请选择可自动运行的角色，或移除已删除的角色。');
       }
       const next = { ...rule, id: ruleId || id() };
@@ -189,11 +206,13 @@ class Store {
   saveRole(value) {
     const previous = value.id ? this.get('roles', value.id) : { id: id() };
     const isGeminiWeb = value.engine === geminiWebEngine;
-    if (!['codex', 'claude', 'opencode', geminiWebEngine].includes(value.engine) && !isVendor(value.engine)) throw new Error('Choose a supported agent.');
+    const isSlackChat = value.engine === slackChatEngine;
+    if (!['codex', 'claude', 'opencode', geminiWebEngine, slackChatEngine].includes(value.engine) && !isVendor(value.engine)) throw new Error('Choose a supported agent.');
     if (!['native', 'openai', 'gemini', 'deepseek','moonshot'].includes(value.provider)) throw new Error('Choose a supported provider.');
     if (value.provider !== 'native' && value.engine !== 'codex') throw new Error('API providers currently use the Codex adapter.');
     const location = this.get('locations', value.locationId);
     if(isGeminiWeb && location.id !== 'local') throw new Error('Gemini Web uses the local browser.');
+    if (isSlackChat && location.id !== 'local') throw new Error('Slack 私信角色仅支持本机运行。');
     if (isVendor(value.engine) && location.type !== 'local' && !supportsRemote(value.engine, location)) {
       throw new Error(value.engine === 'antigravity' ? 'Antigravity 需要使用本机或可通过 SSH 连接的 Linux VPS。' : '此角色引擎目前仅支持本机运行。');
     }
@@ -224,7 +243,9 @@ class Store {
     }
     next.allowLocationTools = value.allowLocationTools !== false;
     if (value.workflowRatings !== undefined) next.workflowRatings = require('./workflow-ratings.js').normalize(value.workflowRatings);
-    if(isGeminiWeb) Object.assign(next, {model:'', effort:'', executable:'', baseUrl:'', permission:'read-only', allowLocationTools:false});
+    if (isGeminiWeb || isSlackChat) Object.assign(next, {model:'', effort:'', executable:'', baseUrl:'', permission:'read-only', allowLocationTools:false});
+    if (isSlackChat) next.slackChannel = slackConversationId(value.slackChannel ?? previous.slackChannel);
+    else delete next.slackChannel;
     next.avatarId = avatarId;
     next.proxyMode = value.proxyMode ?? previous.proxyMode ?? 'inherit';
     if (!['inherit', 'direct', 'proxy'].includes(next.proxyMode)) throw new Error('Choose a supported role proxy mode.');

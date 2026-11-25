@@ -27,10 +27,30 @@ test('Image previews deduplicate identical files, cache unchanged images and kee
 test('Previews allow explicit files outside the root, retain missing paths and never resolve a remote image URL',async t=>{
   const f=fixture(t),outside=fs.mkdtempSync(path.join(os.tmpdir(),'relay-explicit-image-'));t.after(()=>fs.rmSync(outside,{recursive:true,force:true}));const filename=path.join(outside,'outside.png');fs.writeFileSync(filename,'fixture');
   f.chat.messages.push({id:'message',kind:'assistant',imagePaths:[filename],text:'![Remote](https://fixture.invalid/remote.png) ![Missing](missing.png)'});
-  const files=await f.service.list('chat','message');assert.equal(files.length,2);assert.equal(files[0].path,filename);assert.equal(files[1].path,path.join(f.root,'missing.png'));assert(files[1].warning);assert(!files[1].thumbnail);await assert.rejects(f.service.list('chat','not-owned'),/not found/);
+  const files=await f.service.list('chat','message');assert.equal(files.length,2);assert.equal(files[0].path,filename);assert.equal(files[1].path,path.join(f.root,'missing.png'));assert(files[1].warning);assert(!files[1].thumbnail);await assert.rejects(f.service.list('chat','not-owned'),/\u627e\u4e0d\u5230/);
 });
 
 test('Oversized images remain openable without being decoded for a preview',async t=>{
   const f=fixture(t),filename=path.join(f.root,'large.png'),fd=fs.openSync(filename,'w');fs.ftruncateSync(fd,24*1024*1024+1);fs.closeSync(fd);
   f.chat.messages.push({id:'large',kind:'assistant',text:'![Large](large.png)'});const files=await f.service.list('chat','large');assert.equal(files.length,1);assert(files[0].warning);assert(!files[0].thumbnail);assert.equal(f.decodes(),0);
+});
+
+test('On-demand image data is scoped to a reply and reports an unavailable original', async t => {
+  const f=fixture(t);
+  const filename=path.join(f.root,'panel #1.png');
+  const bytes=Buffer.from('89504e470d0a1a0a0000000d49484452','hex');
+  fs.writeFileSync(filename,bytes);
+  fs.writeFileSync(path.join(f.root,'unreferenced.png'),bytes);
+  f.chat.messages.push({id:'message',kind:'assistant',text:'![Fixture](<panel #1.png>)'});
+  const [file]=await f.service.list('chat','message');
+  assert.equal(file.path,filename);
+  assert.equal(file.sourcePath,'panel #1.png');
+  assert.deepEqual(await f.service.original('chat','message',file.sourcePath), {
+    path:filename, dataUrl:'data:image/png;base64,'+bytes.toString('base64'),
+  });
+  await assert.rejects(f.service.original('chat','message','unreferenced.png'));
+  fs.writeFileSync(filename,'This is not a raster image.');
+  assert.deepEqual(await f.service.original('chat','message',file.sourcePath),{unavailable:'format'});
+  fs.unlinkSync(filename);
+  assert.deepEqual(await f.service.original('chat','message',file.sourcePath),{unavailable:'path'});
 });

@@ -25,6 +25,40 @@ test('Only an explicit unknown-session response permits a fresh session before p
   const f=fixture({sessionCapabilities:{resume:{}}},(v,reply)=>v.method==='session/resume'?reply(v.id,null,{code:-32002,message:'Unknown session'}):reply(v.id,{sessionId:'replacement'}));const result=await f.client.session('D:/fixture',{}, {id:'old-session'});assert.equal(result.fallback,'session_missing');assert.equal(result.sessionId,'replacement');assert.deepEqual(f.requests.map(r=>r.method),['session/resume','session/new']);f.client.close();
   const denied=fixture({loadSession:true},(v,reply)=>reply(v.id,null,{code:-32000,message:'Authentication required'}));await assert.rejects(denied.client.session('D:/fixture',{}, {id:'old-session'}),e=>e.code==='VENDOR_LOGIN_REQUIRED');assert.equal(denied.requests.length,1);denied.client.close();
 });
+
+test('Cursor recreates a missing session reported in Invalid params details', async t => {
+  const f = fixture({loadSession:true}, (request, reply) => {
+    if (request.method === 'session/load') {
+      reply(request.id, null, {code:-32602, message:'Invalid params', data:{message:'Session "old-session" not found'}});
+    } else {
+      reply(request.id, {sessionId:'replacement'});
+    }
+  });
+  f.client.role.engine = 'cursor';
+  t.after(() => f.client.close());
+  const result = await f.client.session('D:/fixture', {tools:{command:'tool-fixture'}}, {id:'old-session'});
+  assert.equal(result.sessionId, 'replacement');
+  assert.equal(result.restored, false);
+  assert.equal(result.fallback, 'session_missing');
+  assert.deepEqual(f.requests.map(request => request.method), ['session/load', 'session/new']);
+  assert.deepEqual(f.requests[1].params, {cwd:'D:/fixture', mcpServers:f.requests[0].params.mcpServers});
+});
+
+test('Cursor exposes other Invalid params errors without replacing the session', async t => {
+  for (const data of [{mcpServers:{_errors:['Invalid value']}}, {message:'Session "different-session" not found'}]) {
+    const f = fixture({loadSession:true}, (request, reply) => reply(request.id, null, {code:-32602, message:'Invalid params', data}));
+    f.client.role.engine = 'cursor';
+    t.after(() => f.client.close());
+    await assert.rejects(f.client.session('D:/fixture', {}, {id:'old-session'}), error => {
+      assert.equal(error.rpcCode, -32602);
+      assert.ok(error.message.includes('session/load'));
+      assert.ok(error.message.includes(data.message || 'Invalid params'));
+      return true;
+    });
+    assert.deepEqual(f.requests.map(request => request.method), ['session/load']);
+  }
+});
+
 test('Unsupported restore capability uses explicit compatibility mode, never an unadvertised resume operation',async()=>{
   const f=fixture({},(v,reply)=>reply(v.id,{sessionId:'fresh-session'}));const result=await f.client.session('D:/fixture',{}, {id:'old-session'});assert.equal(result.fallback,'resume_unsupported');assert.deepEqual(f.requests.map(r=>r.method),['session/new']);f.client.close();
 });

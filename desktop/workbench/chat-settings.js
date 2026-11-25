@@ -1,7 +1,8 @@
 ((root) => {
   const text = value => typeof value === 'string' ? value.trim() : '';
   const modelDefault = 'model-default';
-  const supportsEffort = engine => !['kimi','cursor','gemini-web','custom-acp'].includes(engine);
+  const usesExternalConversation = engine => ['gemini-web','slack-chat'].includes(engine);
+  const supportsEffort = engine => !usesExternalConversation(engine) && !['kimi','cursor','custom-acp'].includes(engine);
   function effectiveRole(chat, role) {
     const settings = chat?.roleSettings?.[role.id] || {};
     const persona = chat?.rolePersonas?.[role.id];
@@ -27,7 +28,7 @@
   function formatCursorModel(id, parameters) {
     return parameters.size ? id + '[' + [...parameters].map(([key, value]) => key + '=' + value).join(',') + ']' : id;
   }
-  const api = { effectiveRole, modelOffering, modelDefault, supportsEffort, parseCursorModel, formatCursorModel };
+  const api = { effectiveRole, modelOffering, modelDefault, usesExternalConversation, supportsEffort, parseCursorModel, formatCursorModel };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.deskChatSettings = api;
 })(typeof globalThis === 'object' ? globalThis : this);

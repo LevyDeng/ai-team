@@ -52,10 +52,11 @@
 
     function changeScope(depth, node) {
       Object.assign(scopes.at(-1).graph,{nodes,entry});
+      const returnTo=scopes[depth]?.node?.id;
       scopes.length=depth;
       if (node) scopes.push({graph:node.body,node});
       ({nodes,entry}=scopes.at(-1).graph);
-      selected=entry;
+      selected=node?entry:returnTo||entry;
       nextId=Math.max(0,...nodes.map(item=>Number(item.id.slice(1))))+1;
       renderCanvas();showNode();
     }
@@ -71,7 +72,8 @@
       element.querySelector('.graph-card-meta').textContent = (node.id===entry?'起点 · ':'') +
         (node.kind==='loop'?'最多 '+node.rounds+' 轮 · '+node.body.nodes.length+' 个节点':
           node.kind==='context'?(chats.find(chat=>chat.id===node.sourceChatId)?.name||'待选择来源群聊'):
-            (roles.find(role=>role.id===node.roleId)?.name || '待选择角色'));
+            (roles.find(role=>role.id===node.roleId)?.name || '待选择角色')+
+              (node.backupRoleIds?.length?' · 替补 '+node.backupRoleIds.length+' 位':''));
       node.exits.forEach((exit,i)=>{
         const caption = element.querySelector('.graph-port-'+(i+1));
         caption.textContent = exit.label || '未命名出口';
@@ -92,21 +94,32 @@
       modelIds.clear();
       function addCard(id, title, x, y, node) {
         const exits = node?.exits || [];
-        const html = `<div class="graph-card-title">${esc(title)}</div>${node?'<div class="graph-card-meta"></div>':''}${exits.map((_,i)=>`<div class="graph-port-label graph-port-${i+1}"></div>`).join('')}`;
-        const graphId = String(editor.addNode(id,id==='entry'?0:1,id==='entry'?1:exits.length,x,y,node?'graph-role':'graph-terminal',{},html));
+        const loop = node?.kind==='loop';
+        const heading = `<div class="graph-card-title">${esc(title)}</div>`;
+        const header = loop?`<div class="graph-loop-heading">${heading}<button type="button" class="graph-loop-open" aria-label="进入循环">进入 »</button></div>`:heading;
+        const html = `${header}${node?'<div class="graph-card-meta"></div>':''}${exits.map((_,i)=>`<div class="graph-port-label graph-port-${i+1}"></div>`).join('')}`;
+        const graphId = String(editor.addNode(id,id==='entry'?0:1,id==='entry'?1:exits.length,x,y,loop?'graph-role graph-loop':node?'graph-role':'graph-terminal',{},html));
         graphIds.set(id,graphId);
         modelIds.set(graphId,id);
         if (node) {
           const card=canvas.querySelector('#node-'+graphId);
           card.tabIndex=0;
           card.onkeydown=event=>{
-            if (event.key!=='Enter' && event.key!==' ') return;
+            if (event.target && event.target!==card || event.key!=='Enter' && event.key!==' ') return;
             event.preventDefault();
             selected=id;
             showNode();
           };
           if (readOnly) card.onclick=()=>{selected=id;showNode();};
-          if (node.kind==='loop') card.ondblclick=()=>changeScope(scopes.length,node);
+          if (loop) {
+            const enter=()=>changeScope(scopes.length,node);
+            card.ondblclick=enter;
+            const button=card.querySelector('.graph-loop-open');
+            button.onmousedown=event=>event.stopPropagation();
+            button.ontouchstart=event=>event.stopPropagation();
+            button.ondblclick=event=>event.stopPropagation();
+            button.onclick=event=>{event.stopPropagation();enter();};
+          }
           refreshNode(node);
         }
       }
@@ -123,6 +136,12 @@
           button.onclick=()=>changeScope(index+1);
           return button;
         }));
+        if (scopes.length>1) {
+          const back=document.createElement('button');
+          back.type='button';back.className='graph-back';back.textContent='‹ 返回上一层';
+          back.onclick=()=>changeScope(scopes.length-1);
+          breadcrumb.prepend(back);
+        }
       }
       for (const node of nodes) {
         node.exits.forEach((exit,i)=>{
@@ -151,10 +170,22 @@
       const node = nodes.find(item=>item.id===selected);
       if (!node) { inspector.textContent = '请选择一个节点。'; return; }
       const eligible = roles.filter(role=>!node.localOnly || role.local);
-      const unavailable = node.roleId && !eligible.some(role=>role.id===node.roleId);
+      const backups = node.backupRoleIds || [];
+      const roleOptions = (selected, choices) =>
+        (selected && !choices.some(role=>role.id===selected)?option(selected,'原角色当前不可用',selected):'')+
+        choices.map(role=>option(role.id,role.name+' · '+role.location,selected)).join('');
+      const nextBackup = eligible.find(role=>role.id!==node.roleId && !backups.includes(role.id));
+      const backupFields = `<div class="graph-inspector-actions"><strong>替补角色</strong>
+        <button type="button" data-add-backup ${!nextBackup||backups.length>=99?'disabled':''}>添加替补</button></div>
+        ${backups.map((id,index)=>`<div class="graph-backup-row"><label>第 ${index+1} 顺位<select data-backup-role="${index}">
+          ${roleOptions(id,eligible.filter(role=>role.id===id || role.id!==node.roleId && !backups.includes(role.id)))}</select></label>
+          <div class="graph-backup-actions"><button type="button" data-backup-up="${index}" aria-label="上移第 ${index+1} 顺位替补" ${index===0?'disabled':''}>↑</button>
+          <button type="button" data-backup-down="${index}" aria-label="下移第 ${index+1} 顺位替补" ${index===backups.length-1?'disabled':''}>↓</button>
+          <button type="button" data-remove-backup="${index}" aria-label="移除第 ${index+1} 顺位替补">移除</button></div></div>`).join('')}`;
       const roleFields = `
         <label class="graph-checkbox"><input data-field="localOnly" type="checkbox" ${node.localOnly?'checked':''}>仅使用本机角色</label>
-        <label>执行角色<select data-field="roleId">${option('','请选择角色',node.roleId)}${unavailable?option(node.roleId,'原角色当前不可用',node.roleId):''}${eligible.map(role=>option(role.id,role.name+' · '+role.location,node.roleId)).join('')}</select></label>
+        <label>执行角色<select data-field="roleId">${option('','请选择角色',node.roleId)}${roleOptions(node.roleId,eligible.filter(role=>!backups.includes(role.id)))}</select></label>
+        ${backupFields}
         <label>任务提示词与验收标准<textarea data-field="instruction" rows="4" maxlength="4000">${esc(node.instruction)}</textarea></label>
         ${structured?'':`<label>最多执行次数（含首次）<input data-field="limit" type="number" min="1" max="50" value="${esc(node.limit)}"></label>`}`;
       const loopFields = `
@@ -175,8 +206,9 @@
         <fieldset class="graph-node-fields" ${readOnly?'disabled':''}>
         <label>节点名称<input data-field="title" maxlength="100" value="${esc(node.title)}"></label>${fields}
         <div class="graph-inspector-actions"><strong>结果出口</strong>${customExits?`<button type="button" data-graph-exit ${node.exits.length===8?'disabled':''}>添加出口</button>`:''}</div>
+        ${customExits?`<p class="hint">${node.exits.length===1?'节点提交结果后沿唯一出口继续。':'执行角色会根据节点结果和下列条件判断出口。'}</p>`:''}
         ${node.exits.map((exit,i)=>`<fieldset class="graph-exit"><legend>出口 ${i+1}</legend>
-          ${customExits?`<label>判断条件<input data-exit-label="${i}" maxlength="200" value="${esc(exit.label)}"></label>`:`<p>${esc(exit.label)}</p>`}
+          ${customExits?`<label>${node.exits.length===1?'出口名称':'判断条件'}<input data-exit-label="${i}" maxlength="200" value="${esc(exit.label)}"></label>`:`<p>${esc(exit.label)}</p>`}
           <label>下一步<select data-exit-target="${i}">${option('','待连接',exit.to)}${targets().map(([id,title])=>option(id,title||'未命名节点',exit.to)).join('')}</select></label>
           ${customExits?`<button type="button" data-exit-remove="${i}" ${node.exits.length===1?'disabled':''}>移除出口</button>`:''}</fieldset>`).join('')}
         </fieldset>
@@ -189,8 +221,10 @@
           node[name] = field.type === 'checkbox' ? field.checked : field.type === 'number' ? field.valueAsNumber : field.value;
           if (name==='localOnly') {
             if (node.localOnly && !roles.some(role=>role.id===node.roleId && role.local)) node.roleId='';
+            if (node.localOnly) node.backupRoleIds=backups.filter(id=>roles.some(role=>role.id===id && role.local));
             showNode();
           }
+          if (name==='roleId') showNode();
           if (name==='mode') {
             if (node.mode==='until') node.exits.push({label:'轮次用尽',to:''});
             else node.exits.splice(1);
@@ -199,6 +233,21 @@
           refreshNode(node);
         };
       });
+      const updateBackups = ids => {node.backupRoleIds=ids;showNode();refreshNode(node);};
+      const addBackup=inspector.querySelector('[data-add-backup]');
+      if (addBackup && nextBackup) addBackup.onclick=()=>updateBackups([...backups,nextBackup.id]);
+      inspector.querySelectorAll('[data-backup-role]').forEach(select=>{select.onchange=()=>{
+        updateBackups(backups.map((id,index)=>index===Number(select.dataset.backupRole)?select.value:id));
+      };});
+      inspector.querySelectorAll('[data-remove-backup]').forEach(button=>{button.onclick=()=>{
+        updateBackups(backups.filter((_,index)=>index!==Number(button.dataset.removeBackup)));
+      };});
+      inspector.querySelectorAll('[data-backup-up],[data-backup-down]').forEach(button=>{button.onclick=()=>{
+        const up=button.hasAttribute('data-backup-up'), index=Number(up?button.dataset.backupUp:button.dataset.backupDown);
+        const ids=[...backups], neighbor=index+(up?-1:1);
+        [ids[index],ids[neighbor]]=[ids[neighbor],ids[index]];
+        updateBackups(ids);
+      };});
       inspector.querySelectorAll('[data-exit-label]').forEach(input=>{input.oninput=()=>{
         node.exits[Number(input.dataset.exitLabel)].label=input.value;
         refreshNode(node);

@@ -86,7 +86,7 @@
     function keydown(event){if(menu.hidden||event.isComposing||event.keyCode===229)return false;if(event.key==='Escape'){close();return true;}if(['ArrowDown','ArrowUp'].includes(event.key)){index=(index+(event.key==='ArrowDown'?1:-1)+items.length)%items.length;for(const[n,e]of [...menu.children].entries())e.setAttribute('aria-selected',String(n===index));return true;}if(['Enter','Tab'].includes(event.key)){choose(index);return true;}return false;}
     input.addEventListener('compositionstart',()=>{composing=true;close();});input.addEventListener('compositionend',()=>{composing=false;update();});input.addEventListener('blur',close);return {update,close,keydown};
   }
-  function message(element,m,{open,copy,cancel,caller,review}){
+  function message(element,m,{preview,open,copy,cancel,caller,review}){
     const key=JSON.stringify([m.status,m.files,m.note,m.request,m.model,m.handoff]);if(element._skillKey===key)return;element._skillKey=key;element.className='message skill';element.replaceChildren();
     const card=document.createElement('div');card.className='skill-result';const header=document.createElement('header'),title=document.createElement('strong');title.textContent='/'+m.command+' · '+m.skillName;const state=document.createElement('span');state.textContent=({running:'执行中',complete:'已完成',failed:'失败',cancelled:'已取消',interrupted:'已中断'})[m.status]||m.status;header.append(title,state);card.append(header);
     const who=document.createElement('small');who.className='hint';who.textContent=(caller?'由 '+caller+' 调用':'手动调用')+(m.model?' · '+m.model:'');card.append(who);const copyResult=document.createElement('button');copyResult.type='button';copyResult.className='quiet';copyResult.textContent='复制结果';copyResult.onclick=()=>copy(['/'+m.command,m.request,m.status,m.model,m.note,...(m.files||[]).map(f=>f.path)].filter(Boolean).join('\n'));card.append(copyResult);
@@ -100,7 +100,22 @@
       const button=document.createElement('button');button.type='button';button.textContent='确认转交';
       button.onclick=review;card.append(button);
     }
-    for(const file of m.files||[]){const image=document.createElement('img');image.className='skill-image';image.alt=m.skillName;if(/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(file.thumbnail||''))image.src=file.thumbnail;image.onclick=()=>open(file.path);const actions=document.createElement('div');actions.className='tool-actions';const button=document.createElement('button');button.type='button';button.textContent='打开图片';button.onclick=()=>open(file.path);const copyButton=document.createElement('button');copyButton.type='button';copyButton.textContent='复制路径';copyButton.onclick=()=>copy(file.path);actions.append(button,copyButton);card.append(image,actions);}
+    for(const file of m.files||[]){
+      if(/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(file.thumbnail||'')){
+        const image=document.createElement('img');
+        image.className='skill-image';
+        image.alt=file.name||m.skillName;
+        image.src=file.thumbnail;
+        const view=document.createElement('button');
+        view.type='button';view.className='skill-image-button';view.title='放大查看';
+        view.onclick=()=>preview(file);
+        view.append(image);card.append(view);
+      }
+      const actions=document.createElement('div');actions.className='tool-actions';
+      const button=document.createElement('button');button.type='button';button.textContent='打开原图';button.onclick=()=>open(file.path);
+      const copyButton=document.createElement('button');copyButton.type='button';copyButton.textContent='复制路径';copyButton.onclick=()=>copy(file.path);
+      actions.append(button,copyButton);card.append(actions);
+    }
     if(m.note){const note=document.createElement('p');note.textContent=m.note;card.append(note);}if(m.status==='running'){const stop=document.createElement('button');stop.type='button';stop.textContent='取消技能';stop.onclick=()=>cancel(m.id);card.append(stop);}element.append(card);
   }
   root.deskSkills={editor,system,commands,message};

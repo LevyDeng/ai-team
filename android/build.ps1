@@ -1,3 +1,10 @@
+[CmdletBinding()]
+param(
+    [string]$OverlayDirectory,
+    [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9._-]*\.apk$')]
+    [string]$ApkName = 'ai-team-LAN.apk'
+)
+
 $ErrorActionPreference = 'Stop'
 
 function Invoke-BuildTool {
@@ -27,7 +34,7 @@ $output = Join-Path $root '.runtime/android'
 $work = Join-Path $output ([guid]::NewGuid().ToString())
 $generated = Join-Path $work 'generated'
 $classes = Join-Path $work 'classes'
-$apk = Join-Path $output 'ai-team-LAN.apk'
+$apk = Join-Path $output $ApkName
 $keystore = Join-Path $output 'debug.keystore'
 $zxing = Join-Path $output 'zxing-core-3.5.3.jar'
 $zxingHash = '8D8064C1636FDAEF7189DD9055C7D59950A8940A12F2293956446EC3C109FD82'
@@ -47,11 +54,19 @@ try {
     $code = Join-Path $work 'classes.jar'
     $aligned = Join-Path $work 'aligned.apk'
     $signed = Join-Path $work 'signed.apk'
-    Invoke-BuildTool (Join-Path $tools 'aapt2.exe') @('compile', '--dir', (Join-Path $PSScriptRoot 'res'), '-o', $resources)
+    $variant = if ($OverlayDirectory) { (Resolve-Path -LiteralPath $OverlayDirectory).Path } else { $PSScriptRoot }
+    Invoke-BuildTool (Join-Path $tools 'aapt2.exe') @('compile', '--dir', (Join-Path $variant 'res'), '-o', $resources)
     Invoke-BuildTool (Join-Path $tools 'aapt2.exe') @('link', '-I', $platform, '--manifest',
-        (Join-Path $PSScriptRoot 'AndroidManifest.xml'), '--java', $generated, '-o', $unsigned, $resources)
-    $sources = Get-ChildItem (Join-Path $PSScriptRoot 'src'), $generated -Recurse -Filter '*.java' |
-        ForEach-Object FullName
+        (Join-Path $variant 'AndroidManifest.xml'), '--java', $generated, '-o', $unsigned, $resources)
+    $sourceFiles = @{}
+    foreach ($sourceRoot in @($PSScriptRoot, $variant) | Select-Object -Unique) {
+        $sourceDirectory = Join-Path $sourceRoot 'src'
+        foreach ($source in Get-ChildItem -LiteralPath $sourceDirectory -Recurse -File -Filter '*.java') {
+            $sourceFiles[$source.FullName.Substring($sourceDirectory.Length)] = $source.FullName
+        }
+    }
+    $sources = @($sourceFiles.Values) + @(Get-ChildItem -LiteralPath $generated -Recurse -File -Filter '*.java' |
+        ForEach-Object FullName)
     Invoke-BuildTool $javac (@('-encoding', 'UTF-8', '--release', '8',
         '-classpath', "$platform;$zxing", '-d', $classes) + $sources)
     Invoke-BuildTool $jar @('cf', $code, '-C', $classes, '.')

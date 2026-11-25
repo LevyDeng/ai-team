@@ -15,7 +15,7 @@ async function run({window,store,directory,services,fixture,js}) {
   const [role]=fixture.roles;
   const open = `document.querySelector('[data-filter="workflow"]').click();openWorkflow();$('wf-graph-open').click();`;
   await js(open);
-  assert.equal(await js(`$('graph-template-save').parentElement===document.querySelector('.dialog-header')`),true);
+  assert.equal(await js(`$('graph-template-save').parentElement===$('dialog').querySelector('.dialog-header')`),true);
   await js(`$('graph-starter').click()`);
   assert.equal(await js(`document.querySelectorAll('.graph-role').length`),4);
   assert.equal(await js(`document.querySelectorAll('.graph-canvas .connection').length`),8);

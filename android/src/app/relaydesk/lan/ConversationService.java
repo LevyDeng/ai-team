@@ -6,7 +6,6 @@ import android.os.Binder;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
-import android.text.TextUtils;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
@@ -52,7 +51,8 @@ public final class ConversationService extends Service implements Link.Observer 
     boolean hasLink() { return link != null; }
     boolean isConnected() { return connected; }
     String getStatus() { return status; }
-    String getTranscript() { return (conversation.isEmpty() ? "" : conversation + "\n\n") + TextUtils.join("\n\n", transcript.values()); }
+    String getConversation() { return conversation; }
+    java.util.Map<String, String> getMessages() { return transcript; }
 
     private void changed() {
         if (observer != null) {

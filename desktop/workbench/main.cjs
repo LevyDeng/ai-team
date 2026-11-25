@@ -15,12 +15,14 @@ const { Vault, Locations } = require('./locations.cjs');
 const { setupSshKey } = require('./ssh-key-setup.cjs');
 const { Agents, findExecutable } = require('./agents.cjs');
 const { ClaudeUpdater } = require('./claude-update.cjs');
+const { CliUpdates } = require('./cli-updates.cjs');
 const { Avatars } = require('./avatars.cjs');
 const { ModelCatalogs } = require('./model-catalogs.cjs');
 const { Usage } = require('./usage.cjs');
 const { ProxyRouter, environment: proxyEnvironment } = require('./proxy.cjs');
+const themes = require('./themes.js');
 const { effectiveRole } = require('./conversations.cjs');
-const { projectGuestIds } = require('./mentions.js');
+const { projectGuestIds, resolve: resolveMentions } = require('./mentions.js');
 const { formatMissingProjectDirectories } = require('./project-directories.cjs');
 const { findProjectPaths, messagePaths } = require('./path-resolution.cjs');
 const pathLinks = require('../path-links.js');
@@ -35,6 +37,7 @@ const { ProjectTerminals, projectFiles } = require('../project-tools.cjs');
 const { ClipboardImages, readClipboardImage } = require('../clipboard-images.cjs');
 const { Attachments }=require('./attachments.cjs');
 const {GeminiWeb, engine:geminiWebEngine, home:geminiWebHome}=require('./gemini-web.cjs');
+const { SlackChat, engine: slackChatEngine, maxText: slackMaxText, tokenKey: slackTokenKey, userToken: slackUserToken } = require('./slack-chat.cjs');
 const root = path.resolve(__dirname, '../..');
 const smoke = process.argv.includes('--workbench-smoke');
 const smokeRun=smoke&&/^[0-9]{1,12}$/.test(process.env.RELAY_SMOKE_RUN||'')?'-'+process.env.RELAY_SMOKE_RUN:'';
@@ -53,12 +56,15 @@ const vault = new Vault(data, safeStorage); const backend = new Backend(root, { 
 const locationName = id => store.state.locations.find(location => location.id === id)?.name || id;
 try { backend.forceControl=JSON.parse(fs.readFileSync(path.join(root,'.runtime/desktop/state.json'),'utf8')).forceControl===true; } catch {}
 const avatars = new Avatars(path.join(data, 'avatars'), nativeImage);
-nativeTheme.themeSource = store.state.settings.theme;
+const themeBackground = (preference = store.state.settings.theme) => themes.resolve(preference, nativeTheme.shouldUseDarkColors).background;
+nativeTheme.themeSource = themes.themeSource(store.state.settings.theme);
 nativeTheme.on('updated', () => {
-  for (const window of BrowserWindow.getAllWindows()) window.setBackgroundColor(nativeTheme.shouldUseDarkColors ? '#191d23' : '#ffffff');
+  const background = themeBackground();
+  for (const window of BrowserWindow.getAllWindows()) window.setBackgroundColor(background);
 });
 const running = new Map(); const terminalManagers = new Map();
 const antigravitySetups = new Set();
+const localLogins = new Set();
 let confirmingQuit = false, quitting = false, quitReady = false, workbenchWindow, displayedBadgeCount;
 // Chromium's network stack follows the user's system proxy; Node fetch does not.
 const providerFetch = (input, options) => net.fetch(input, options);
@@ -95,12 +101,23 @@ const locations = new Locations(store, vault, backend, async (location, fingerpr
 }, emit);
 const agents = new Agents(store, vault, locations, publishMessage, { fetch: providerFetch, network });
 const geminiWeb = new GeminiWeb({store, emit:agents.emit, open:url=>shell.openExternal(url), copy:writeClipboardText,readClipboard:readClipboardText});
+const slackChat = new SlackChat({store, vault, emit:publishMessage, fetchFor:role=>network.fetchFor(role)});
 const attachments=new Attachments(store);
 const images = new ClipboardImages(path.join(data, 'images')); images.prepare(attachments.protectedPaths());
 const imageSource={read:()=>readClipboardImage(clipboard,nativeImage)};
 const messageImages=new (require('./message-images.cjs').MessageImages)({store,nativeImage});
 const keepAwake = new KeepAwake(root, { enabled: store.state.settings.keepAwake, disabled: smoke, changed: emit, log: () => {} });
 const claudeUpdater = new ClaudeUpdater(root, store, backend, locations, emit);
+const updateNetworkRole = { locationId: 'local', baseUrl: 'https://registry.npmjs.org' };
+const cliUpdates = new CliUpdates({
+  store, file: path.join(data, 'cli-updates.json'), resolveExecutable: localExecutable,
+  busyRoles: engine => store.state.roles.filter(role => role.engine === engine && role.locationId === 'local' &&
+    (busyRole(role.id) || localLogins.has(role.id) || store.state.chats.some(chat => chat.localTask?.roleId === role.id) ||
+      [...quotaConsole.sessions.values()].some(entry => entry.roleId === role.id))).map(role => role.name),
+  fetchLocal: () => network.fetchFor(updateNetworkRole),
+  npmEnvironment: () => network.environmentFor(updateNetworkRole, process.env),
+  remote: claudeUpdater, changed: emit,
+});
 const modelCatalogs = new ModelCatalogs({ directory: data, store, vault, locations, backend, agents, fetch: providerFetch, network });
 const accountUsage = new Usage({store,vault,agents,locations,backend,network,emit});
 const quotaConsole=new (require('./quota-console.cjs').QuotaConsole)({store,agents,network,spawn:(...args)=>require('node-pty').spawn(...args)});
@@ -138,13 +155,19 @@ backend.on('status', emit);
 function snapshot() {
   const value = store.summary();
   value.phoneLink = phoneLink.status();
-  value.roles = value.roles.map(r => ({ ...r, avatarId: r.avatarId || avatars.defaultId(r.engine), avatarUrl: avatars.get(r.avatarId || avatars.defaultId(r.engine)), hasKey: vault.has('api:' + r.id), available: r.engine === geminiWebEngine || r.locationId !== 'local' || (() => { try { findExecutable(r); return true; } catch { return false; } })() }));
+  const executables = new Map();
+  value.roles = value.roles.map(r => {
+    const virtual = r.engine === geminiWebEngine || r.engine === slackChatEngine || r.locationId !== 'local';
+    if (!virtual) executables.set(r.id, localExecutable(r));
+    return { ...r, avatarId: r.avatarId || avatars.defaultId(r.engine), avatarUrl: avatars.get(r.avatarId || avatars.defaultId(r.engine)), hasKey: vault.has('api:' + r.id), hasSlackKey: vault.has(slackTokenKey(r.id)), available: virtual || Boolean(executables.get(r.id)) };
+  });
   value.connectionStatus = locations.status(); value.running = Object.fromEntries([...running].map(([id, job]) => [id, { roleId: job.roleId, round: job.round, rounds: job.rounds, phase:job.phase||'participant', stopping: job.controller.signal.aborted, workflowRunId:job.workflowRunId }]));
   value.inputBusy=Object.fromEntries(value.chats.map(chat=>[chat.id,inputBusy(chat.id)]));
   const terminals=interactiveAgents.list();
   value.forceStops=Object.fromEntries(value.chats.map(chat=>[chat.id,forceStopTarget(chat,terminals)]));
   value.mcp = { ssh: backend.status.ssh, mcp: backend.status.mcp, tunnel: backend.status.tunnel, mcpOwned:backend.status.mcpOwned, tunnelOwned:backend.status.tunnelOwned, forceControl:backend.appliedForceControl };
   value.claudeUpdate = claudeUpdater.snapshot();
+  value.cliUpdates = cliUpdates.snapshot(executables);
   value.accountUsage = accountUsage.snapshot();
   value.skills=skills.list();
   value.skillSources=skills.system.sources();
@@ -159,7 +182,11 @@ function handle(name, fn, withSender=false) {
     const result = await (withSender?fn(event.sender,...args):fn(...args)); return result;
   });
 }
-function busyRole(id) { return [...running.values()].some(job => job.roleIds.includes(id))||interactiveAgents.list().some(e=>e.roleId===id&&e.state!=='ended'); }
+function busyRole(id) { return [...running.values()].some(job => job.roleId === id || job.roleIds.includes(id))||interactiveAgents.list().some(e=>e.roleId===id&&e.state!=='ended'); }
+function localExecutable(role) { try { return findExecutable(role); } catch { return ''; } }
+function ensureCliReady(role) {
+  if (cliUpdates.isInstalling(role)) throw new Error('角色「' + role.name + '」使用的 CLI 正在更新，请稍后重试。');
+}
 function updateBadges() {
   return notifications.refresh();
 }
@@ -184,6 +211,7 @@ handle('project-order', (order, direction) => store.sortProjects(order, directio
 handle('project-search', (id, query) => store.searchProject(id, query));
 handle('chat-messages', (id, cursor) => store.messagePage(id, cursor));
 handle('chat-search', (id, query, offset) => store.searchMessages(id, query, offset));
+handle('other-chats-search', (id, query, offset) => store.searchOtherChats(id, query, offset));
 handle('message-details', (id, messageId, field) => {
   const message = store.get('chats', id).messages.find(item => item.id === messageId);
   if (!message) throw new Error('找不到这条消息。');
@@ -200,18 +228,29 @@ handle('skill-models',(value,options)=>skills.models(value,options));
 handle('skill-save',value=>{const result=skills.save(value);emit();return result;});
 handle('skill-delete',id=>{skills.remove(id);emit();});
 handle('skill-cancel',(chatId,id)=>skills.cancel(chatId,id));
-handle('account-usage', async roleId => { await accountUsage.request(roleId); return snapshot(); });
+handle('account-usage', async roleId => { ensureCliReady(store.get('roles', roleId)); await accountUsage.request(roleId); return snapshot(); });
 handle('usage-guide', (sender,roleId) => {
   const role=store.get('roles',roleId);
   if(role.enabled===false)return;
+  ensureCliReady(role);
   if(role.engine==='antigravity'&&role.provider==='native'&&role.locationId==='local')return quotaConsole.open(roleId,sender);
   const url=accountUsage.guide(roleId);
   if(url)return shell.openExternal(url);
 },true);
 for(const method of ['action','screen','resize','stop'])handle('quota-'+method,(sender,...args)=>quotaConsole[method](sender,...args),true);
-handle('cli-check', () => require('./runtime.cjs').check());
-handle('claude-cli', action => claudeUpdater.request(action));
-handle('cli-update', () => { if (running.size||interactiveAgents.active()) throw new Error('End interactive terminals and pause running discussions before updating the CLI.'); return require('./runtime.cjs').install(); });
+handle('claude-cli', async action => {
+  try { return await claudeUpdater.request(action); }
+  catch (error) {
+    console.warn('Server Claude CLI operation failed:', error.message);
+    throw new Error('服务器 Claude Code 操作未完成，请检查 SSH 连接后重试。');
+  }
+});
+handle('cli-update-preference', (key, value) => cliUpdates.savePreference(key, value));
+handle('cli-update-check', engine => engine === undefined ? cliUpdates.runBatch('check') : cliUpdates.check(engine));
+handle('cli-update-install', engine => {
+  if (quitting || confirmingQuit) throw new Error('工作台正在退出，请稍后重试。');
+  return engine === undefined ? cliUpdates.runBatch('install') : cliUpdates.install(engine);
+});
 handle('models', (input, options) => modelCatalogs.request(input, options));
 handle('agent-info', async value => {
   if (!vendors.isVendor(value?.engine)) throw new Error('Choose an official account agent.');
@@ -224,16 +263,27 @@ handle('agent-guide', (engine, preset) => {
   if (engine === 'custom-acp') {
     if (preset === 'hermes') return shell.openExternal('https://hermes-agent.nousresearch.com/docs/user-guide/features/acp');
     if (preset === 'pi') return shell.openExternal('https://www.npmjs.com/package/pi-acp');
+    if (preset === 'dsh') return shell.openExternal('https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/cli/README.zh.md');
     throw new Error('请选择需要查看安装说明的 ACP 预设。');
   }
   if(!vendors.isVendor(engine))throw new Error('Choose an official account agent.');
   return shell.openExternal(vendors.catalog[engine].docs);
 });
-handle('agent-install', async engine => { if(store.state.roles.some(role=>role.engine===engine&&busyRole(role.id)))throw new Error('Wait for active tasks using this agent to finish before updating.');return require('./vendor-install.cjs').install(engine); });
+handle('agent-install', async engine => {
+  if (quitting || confirmingQuit) throw new Error('工作台正在退出，请稍后重试。');
+  if (!Object.hasOwn(vendors.packages, engine) && engine !== 'antigravity') throw new Error('请使用该 CLI 的官方安装方式。');
+  const result = await cliUpdates.install(engine, { roleEditor: true });
+  if (result.status === 'skipped') throw new Error('此 CLI 正在使用或已有操作进行中，请稍后重试。');
+  if (result.status === 'failed') throw new Error('安装失败，请检查网络、Node.js 和本机目录权限。');
+  return result;
+});
 handle('role-save', value => {
   if (value.avatarId && !avatars.get(value.avatarId)) throw new Error('The selected avatar no longer exists. Choose it again.');
+  const slackToken = value.engine === slackChatEngine && value.slackToken ? slackUserToken(value.slackToken) : '';
   const role = store.saveRole(value);
-  if (value.apiKey && ![geminiWebEngine,'custom-acp'].includes(role.engine)) vault.set('api:' + role.id, value.apiKey);
+  if (slackToken) vault.set(slackTokenKey(role.id), slackToken);
+  if (role.engine !== slackChatEngine && vault.has(slackTokenKey(role.id))) vault.remove(slackTokenKey(role.id));
+  if (value.apiKey && ![geminiWebEngine,slackChatEngine,'custom-acp'].includes(role.engine)) vault.set('api:' + role.id, value.apiKey);
   emit(); return role;
 });
 handle('role-enabled', (id, enabled) => {
@@ -260,6 +310,7 @@ handle('role-delete', id => {
   const memberships=store.state.chats.filter(c=>!c.disbandedAt&&c.roleIds.includes(id));
   if (memberships.length) throw new Error('请先从这些对话移除该角色：'+memberships.slice(0,3).map(chat=>chat.name).join('、')+(memberships.length>3?' 等':'')+'。');
   store.get('roles', id); store.state.roles = store.state.roles.filter(r => r.id !== id); for (const p of store.state.projects) p.roleIds = p.roleIds.filter(r => r !== id); vault.remove('api:' + id);
+  if (vault.has(slackTokenKey(id))) vault.remove(slackTokenKey(id));
   store.state.workflowPriorities = store.state.workflowPriorities.map(rule => ({...rule,candidates:rule.candidates.filter(candidate => candidate.roleId !== id)})).filter(rule => rule.candidates.length);
   store.save(); emit();
 });
@@ -384,7 +435,7 @@ function workflowProjectRoles(project, roles = project.roleIds.map(id => store.s
 }
 
 function workflowRoleIds(flow) {
-  if (flow.type==='graph') return [...new Set(structuredWorkflows.allNodes(flow).map(node=>node.roleId).filter(Boolean))];
+  if (flow.type==='graph') return graphWorkflows.roleIds(flow);
   const ids = flow.type === 'generated' ? flow.nodes.flatMap(node => node.roleIds || []) : [...flow.teams.implement, ...flow.teams.review];
   if (flow.moderatorRoleId) ids.push(flow.moderatorRoleId);
   return [...new Set(ids)];
@@ -401,6 +452,7 @@ const planJobKey = projectId => `workflow-plan:${projectId}`;
 handle('workflow-plan',async ({projectId, goal, plannerId, requestId}) => {
   const project = store.get('projects',projectId);
   const planner = workflowModerationRole(project, plannerId), key = planJobKey(project.id);
+  ensureCliReady(planner);
   const roles = workflowProjectRoles(project, store.state.roles.filter(role => role.id === plannerId || project.roleIds.includes(role.id)));
   if (!roles.some(role => role.id === plannerId)) throw new Error('此角色无法在当前项目的运行位置生成工作流。');
   if (typeof requestId !== 'string' || requestId.length > 80 || running.has(key) || running.size+interactiveAgents.list().filter(entry=>entry.state!=='ended').length>=store.state.settings.maxJobs) {
@@ -429,7 +481,9 @@ function pumpWorkflows(){
   const legacyBusy=[...running.values()].some(job=>job.workflow&&!job.workflowRunId);
   const next=store.state.chats.filter(item=>!item.disbandedAt&&!inputBusy(item.id,true)&&!inputQueue.dispatching.has(item.id))
     .map(chat=>({chat,flow:chat.workflow?(legacyBusy?undefined:chat.workflow):groupWorkflows.activeRun(chat)}))
-    .filter(({flow})=>flow?.status==='queued').sort((a,b)=>a.flow.createdAt-b.flow.createdAt)[0];
+    .filter(({flow})=>flow?.status==='queued' && !workflowRoleIds(flow).some(id =>
+      cliUpdates.isInstalling(store.state.roles.find(role => role.id === id))))
+    .sort((a,b)=>a.flow.createdAt-b.flow.createdAt)[0];
   if(!next)return;
   const {chat,flow}=next, controller=new AbortController();
   const embedded=Boolean(flow.id);
@@ -479,11 +533,14 @@ function pumpWorkflows(){
       job.phase='participant';job.roleId=attempt.roleId;job.round=generated?(attempt.nodeIndex ?? flow.attempts.length-1)+1:attempt.round;job.taskId=attempt.id;
       const role=store.state.roles.find(r=>r.id===attempt.roleId);
       attempt.roleName=role?.name||attempt.roleId;
+      if (cliUpdates.isInstalling(role)) return { status:'failed', workflowSubmitted:false, errorCode:'ROLE_UNAVAILABLE',
+        note:'此角色使用的 CLI 正在更新，请稍后重试。' };
       if (role?.enabled === false) return {status:'failed',workflowSubmitted:false,errorCode:'ROLE_UNAVAILABLE',note:'角色「'+role.name+'」已禁用。'};
-      if(!role||role.engine===geminiWebEngine)return {status:'failed',workflowSubmitted:false,errorCode:'ROLE_UNAVAILABLE',note:'Role unavailable for unattended execution.'};
+      if(!workflowEngine.canModerate(role))return {status:'failed',workflowSubmitted:false,errorCode:'ROLE_UNAVAILABLE',
+        note:flow.type==='graph'?'此角色当前无法自动执行任务。':'Role unavailable for unattended execution.'};
       const project=currentProject();
       if (flow.type==='graph' && (structuredNode || flow.nodes[flow.nodeIndex]).localOnly && role.locationId!=='local') {
-        return {status:'failed',note:'本机验证节点需要本机角色。'};
+        return {status:'failed',workflowSubmitted:false,errorCode:'ROLE_UNAVAILABLE',note:'本机验证节点需要本机角色。'};
       }
       if (generated && !workflowProjectRoles(project, flow.selection?.via === 'priority' ? [role] : undefined).some(candidate=>candidate.id===role.id)) {
         return {status:'failed',workflowSubmitted:false,errorCode:'ROLE_UNAVAILABLE',note:'Role unavailable for unattended execution.'};
@@ -629,6 +686,11 @@ handle('workflow-group-resume',(id,runId,guidance='')=>{
   ensureWorkflowSlot(chat);
   if (!groupWorkflows.resumableStatuses.has(flow.status)) throw new Error('这次运行当前无法继续。');
   if (typeof guidance!=='string'||guidance.length>16000) throw new Error('补充说明最多 16000 字。');
+  if (!guidance.trim() && flow.type==='graph' && graphWorkflows.continueReportedNode({...chat,workflow:flow})) {
+    chat.unread=false;
+    if (!groupWorkflows.publish(store,chat,flow)) store.save();
+    emit();setImmediate(pumpWorkflows);return;
+  }
   if (guidance.trim()) store.message(id,{kind:'user',text:guidance.trim(),status:'accepted',workflowRunId:flow.id,workflowTitle:flow.title});
   if (flow.type==='generated'||flow.type==='teams') {
     delete flow.candidateOrder;
@@ -669,10 +731,11 @@ function generatedConfiguration(value, project, stepOffset = 0) {
 handle('workflow-create',value=>{
   const project = store.get('projects',value.projectId);
   const generated = value.type === 'generated';
-  const workflow = value.type === 'graph' ? graphWorkflows.configure(value,workflowProjectRoles(project,store.state.roles)) :
+  const graphRoles = value.type === 'graph' ? workflowProjectRoles(project,store.state.roles) : null;
+  const workflow = graphRoles ? graphWorkflows.configure(value,graphRoles) :
     generated ? generatedConfiguration(value,project) : workflowEngine.configure(value,store.state.roles.filter(role => role.enabled !== false));
   if (!generated && workflow.moderatorRoleId) workflowModerationRole(project,workflow.moderatorRoleId);
-  const roleIds = workflowRoleIds(workflow);
+  const roleIds = workflowRoleIds(workflow).filter(id=>!graphRoles || graphRoles.some(role=>role.id===id));
   if (generated) {
     const existing = workflowProjectRoles(project).filter(role => !roleIds.includes(role.id));
     roleIds.push(...existing.slice(0, Math.max(0, 100 - roleIds.length)).map(role => role.id));
@@ -810,16 +873,40 @@ function prepareInput(value, queued=false){
   if(text.length>150000)throw new Error('Message is too long. Attach a path instead.');
   const requestedRounds=discussion.limit(value.summary?1:value.rounds??chat.maxRounds??1),autoStop=value.autoStop??chat.autoStop??true;
   if(typeof autoStop!=='boolean')throw new Error('Choose whether AI may end the discussion early.');
+  const roles = roleIds.map(id=>store.get('roles',id));
+  const slackTargets = roles.filter(role => role.engine === slackChatEngine)
+    .map(role => ({roleId:role.id, channel:role.slackChannel}));
+  const queuedTargets = value.slackTargets || (value.slackTarget ? [value.slackTarget] : []);
+  if (queued && (slackTargets.length !== queuedTargets.length || slackTargets.some((target, index) =>
+    target.roleId !== queuedTargets[index]?.roleId || target.channel !== queuedTargets[index]?.channel))) {
+    throw new Error('待发送消息的 Slack 私信配置已变化。请恢复草稿并重新确认收件人。');
+  }
+  let slackText;
+  if (slackTargets.length) {
+    if (files.length || value.summary || invocation || value.mode === 'steer' || interactiveAgents.active(chat.id)) {
+      throw new Error('Slack 私信角色支持普通文字发言。请移除附件、技能或结束交互连接后再发送。');
+    }
+    if (new Set(slackTargets.map(target => target.channel)).size !== slackTargets.length) {
+      throw new Error('这次选中的多个角色绑定了同一条 Slack 私信，请只选其中一位。');
+    }
+    const possibleRoles = [...chat.roleIds, ...projectGuestIds(chat, project)]
+      .map(id => store.state.roles.find(role => role.id === id)).filter(Boolean)
+      .map(role => ({ ...role, guest: !chat.roleIds.includes(role.id) }));
+    const mentions = resolveMentions(text, possibleRoles, chat.defaultReplyRoleIds);
+    slackText = queued && typeof value.slackText === 'string' ? value.slackText : mentions.explicit ? mentions.content : text;
+    if (!slackText.trim()) throw new Error('请在点名后输入要发给 Slack 角色的文字。');
+    if (slackText.length > slackMaxText) throw new Error(`Slack 私信最多支持 ${slackMaxText} 个字符。`);
+    if (slackTargets.some(target => !vault.has(slackTokenKey(target.roleId)))) throw new Error('请在角色设置保存 Slack 用户授权令牌。');
+  }
   if(invocation?.skill.kind==='image'){if(files.length)throw new Error('首版生图技能仅接收文字；附件已保留，请移除附件或改用聊天发送。');skills.validate(invocation.skill.id,invocation.prompt);}
   else {
-    const roles=roleIds.map(id=>store.get('roles',id));
     if(files.length&&roles.some(role=>role.engine===geminiWebEngine))throw new Error('Gemini 网页版角色仅支持文字。请移除附件，或改选其他角色。');
-    const missingRoles = roles.filter(role => role.engine !== geminiWebEngine &&
+    const missingRoles = roles.filter(role => ![geminiWebEngine,slackChatEngine].includes(role.engine) &&
       !project.directories.some(directory => directory.locationId === role.locationId));
     if (missingRoles.length) throw new Error(formatMissingProjectDirectories(project, missingRoles, locationName));
   }
   if(interactiveAgents.active(chat.id)&&(guests.length||roleIds.length!==1||value.summary||store.get('roles',roleIds[0]).engine===geminiWebEngine))throw new Error('交互连接期间，请 @ 一位已连接角色发送。群聊接力请先结束交互连接。');
-  return {chat,project,invocation,roleIds,files,text,requestedRounds,autoStop};
+  return {chat,project,invocation,roleIds,files,text,requestedRounds,autoStop,slackTargets,slackText};
 }
 function submitChat(value) {
   const prepared=prepareInput(value),{chat,roleIds,files,text,requestedRounds,autoStop}=prepared;
@@ -834,7 +921,8 @@ function submitChat(value) {
     store.save(); emit();
     return result;
   }
-  return inputQueue.submit(chat.id,{chatId:chat.id,text,files,roleIds,rounds:requestedRounds,autoStop,summary:Boolean(value.summary),roleSettings,plain:value.plain===true},value.mode||'queue');
+  const slack = prepared.slackTargets.length ? {slackTargets:prepared.slackTargets, slackText:prepared.slackText} : {};
+  return inputQueue.submit(chat.id,{chatId:chat.id,text,files,roleIds,rounds:requestedRounds,autoStop,summary:Boolean(value.summary),roleSettings,...slack,plain:value.plain===true},value.mode||'queue');
 }
 handle('send', value => submitChat({ ...value, plain: false }));
 handle('queue-resume',(id, confirmedTaskId)=>{
@@ -860,7 +948,7 @@ handle('queue-restore',(id,entryId)=>{
   inputQueue.remove(id,entryId);return {text:chat.draft,attachments:chat.draftAttachments};
 });
 async function startSend(value,inputQueueId) {
-  const {invocation,roleIds,files,requestedRounds,autoStop}=prepareInput(value,true);
+  const {invocation,roleIds,files,requestedRounds,autoStop,slackTargets,slackText}=prepareInput(value,true);
   const chat = store.get('chats', value.chatId); const project = structuredClone(store.get('projects', chat.projectId));
   if (running.has(chat.id)) throw new Error('This chat is already running. Pause it before sending another task.');
   if(invocation?.skill.kind==='image'){
@@ -879,10 +967,12 @@ async function startSend(value,inputQueueId) {
   }
   if (running.size + interactiveAgents.list().filter(e=>e.state!=='ended').length >= store.state.settings.maxJobs) throw new Error('The concurrent discussion limit has been reached. End an interactive terminal, pause a running chat or adjust Settings.');
   const relay=chat.relayReplies!==false,group=!value.summary&&roleIds.length>1&&relay;
-  const rounds=group?requestedRounds:1;
-  const configuredModerator=group&&chat.roleIds.includes(chat.moderatorRoleId)?store.get('roles',chat.moderatorRoleId):null;
+  const hasOtherRoles = slackTargets.length < roleIds.length;
+  const rounds=group&&hasOtherRoles?requestedRounds:1;
+  const configuredModerator=group&&hasOtherRoles&&chat.roleIds.includes(chat.moderatorRoleId)?store.get('roles',chat.moderatorRoleId):null;
   const moderatorId=workflowEngine.canModerate(configuredModerator)?configuredModerator.id:'';
   const executionRoleIds=[...new Set([...roleIds,...(moderatorId?[moderatorId]:[])])];
+  for (const id of executionRoleIds) ensureCliReady(store.get('roles', id));
   if (moderatorId) {
     const moderator = store.get('roles', moderatorId);
     if (!project.directories.some(directory => directory.locationId === moderator.locationId)) {
@@ -911,16 +1001,29 @@ async function startSend(value,inputQueueId) {
   (async () => {
     try {
       if(invocation?.skill.kind==='prompt'){const loaded=await skills.run(skills.scope(chat.id,null,userMessage.id),invocation.skill.id,invocation.prompt||'Apply the skill to this project.');context.skillInstructions=loaded.instructions;}
+      const slackRoles = new Set(slackTargets.map(target => target.roleId));
+      const failedSlackRoles = [];
       const outcome=await discussion.run({roleIds,rounds,autoStop:group&&autoStop,signal:controller.signal,
+        singleTurnRoles:slackRoles,
+        continueAfterFailure:roleId=>{
+          if (!hasOtherRoles || !slackRoles.has(roleId)) return false;
+          failedSlackRoles.push(roles[roleId].name);
+          return true;
+        },
         beforeRound:moderator?round=>moderator.beforeRound(round,rounds):undefined,
         reviewRound:moderator&&autoStop?round=>moderator.reviewRound(round,rounds):undefined,
         onTurn:(round,roleId)=>{job.round=round;job.roleId=roleId;job.phase=roles[roleId].engine===geminiWebEngine?'web-reply':'participant';emit();},
         runTurn:(roleId,control)=>{
           const role=roles[roleId],turnContext={...context,discussion:control};
           if(role.engine===geminiWebEngine)return geminiWeb.run(chat,role,controller.signal,turnContext,Boolean(value.summary));
+          if(role.engine===slackChatEngine)return slackChat.run(chat,role,slackText,controller.signal);
           return agents.run(chat.id,role,structuredClone(project),controller.signal,Boolean(value.summary),turnContext);
         }});
       chat.lastDiscussion={...outcome,automatic:group&&autoStop,moderatorRoleId:moderatorId,userMessageId:userMessage.id,at:Date.now()};
+      if (failedSlackRoles.length) {
+        const note = 'Slack 角色「' + failedSlackRoles.join('、') + '」未完成回复。';
+        chat.lastDiscussion.reason = [outcome.reason, note].filter(Boolean).join(' ');
+      }
       if(!group&&outcome.state==='limit')chat.lastDiscussion.state=value.summary?'summary':'answered';
     } catch (error) { chat.lastDiscussion={state:'failed',rounds:Math.max(0,job.round-1),maxRounds:rounds,userMessageId:userMessage.id,at:Date.now()};store.message(chat.id, { kind: 'system', text: error.message, status: 'failed' }); }
     finally {
@@ -1022,7 +1125,7 @@ handle('force-stop', async (id, expected) => {
   interruptChat(id);
   emit();
 });
-handle('settings', value => { const n = Number(value.maxJobs); if (!Number.isInteger(n) || n < 1 || n > 8) throw new Error('Choose between 1 and 8 concurrent discussions.'); const theme = value.theme ?? store.state.settings.theme; if (!['light', 'dark', 'system'].includes(theme)) throw new Error('Choose a supported appearance.'); store.state.settings.theme = theme; nativeTheme.themeSource = theme; store.state.settings.keepAwake = value.keepAwake === true; store.state.settings.maxJobs = n; store.save(); keepAwake.setEnabled(store.state.settings.keepAwake); emit(); });
+handle('settings', value => { const n = Number(value.maxJobs); if (!Number.isInteger(n) || n < 1 || n > 8) throw new Error('Choose between 1 and 8 concurrent discussions.'); const theme = value.theme ?? store.state.settings.theme; if (!themes.isValid(theme)) throw new Error('Choose a supported appearance.'); store.state.settings.theme = theme; nativeTheme.themeSource = themes.themeSource(theme); const background = themeBackground(theme); for (const window of BrowserWindow.getAllWindows()) window.setBackgroundColor(background); store.state.settings.keepAwake = value.keepAwake === true; store.state.settings.maxJobs = n; store.save(); keepAwake.setEnabled(store.state.settings.keepAwake); emit(); });
 handle('pick', async (kind, initialPath) => {
   const options = { properties: [kind === 'folder' ? 'openDirectory' : 'openFile', ...(kind === 'files' ? ['multiSelections'] : [])] };
   const validPath = value => typeof value === 'string' && value.length <= 4096 && path.isAbsolute(value) && !/[\x00-\x1f]/.test(value);
@@ -1037,6 +1140,7 @@ async function readClipboardText() { if (typeof clipboard.readText === 'function
 handle('clipboard-text', readClipboardText);
 handle('image', async id => {store.get('chats',id);const image=await imageSource.read();if(attachments.files(id).length>=8)throw new Error('Attach at most 8 files per message.');const file=images.stage(image,attachments.protectedPaths());try{const files=attachments.add(id,[file.path],file);emit();return files;}catch(error){images.remove(file);throw error;}});
 handle('message-images',(chatId,messageId)=>messageImages.list(chatId,messageId));
+handle('message-image-original', (chatId, messageId, sourcePath) => messageImages.original(chatId, messageId, sourcePath));
 handle('open', async (filename, projectId, { chatId, messageId, inspect, reveal } = {}) => {
   if (/^https?:\/\//i.test(filename)) {
     const link = pathLinks.target(filename);
@@ -1123,7 +1227,7 @@ handle('terminal-input', (id, data) => { for (const m of terminalManagers.values
 handle('terminal-resize', (id, cols, rows) => { for (const m of terminalManagers.values()) m.resize(id, cols, rows); });
 handle('terminal-close', id => { for (const m of terminalManagers.values()) m.close(id); });
 handle('agent-terminals',()=>interactiveAgents.list());
-handle('agent-terminal-open',(chatId,roleId)=>{activeChat(chatId);return interactiveAgents.open(chatId,roleId);});
+handle('agent-terminal-open',(chatId,roleId)=>{activeChat(chatId);ensureCliReady(store.get('roles',roleId));return interactiveAgents.open(chatId,roleId);});
 handle('agent-terminal-input',(id,value)=>interactiveAgents.input(id,value));
 handle('agent-terminal-screen',(id,text)=>interactiveAgents.screen(id,text));
 handle('agent-terminal-resize',(id,cols,rows)=>interactiveAgents.resize(id,cols,rows));
@@ -1238,6 +1342,17 @@ async function configureRemoteAntigravity(role, location) {
 
 handle('role-login', async id => {
   const role = store.get('roles', id); if (role.provider !== 'native') throw new Error('API roles use the saved API key.');
+  ensureCliReady(role);
+  if (role.engine === slackChatEngine) {
+    const signal = AbortSignal.timeout(10000);
+    try { await slackChat.connect(role, signal); }
+    catch (error) {
+      if (signal.aborted) throw new Error('检查 Slack 私信超时，请确认网络后重试。');
+      if (error instanceof TypeError || error instanceof SyntaxError) throw new Error('无法连接 Slack，请检查网络代理。');
+      throw error;
+    }
+    return { slackConnected: true };
+  }
   if (role.engine === 'custom-acp') throw new Error('请在 ACP Agent 自身的界面完成账号登录。');
   accountUsage.invalidate(id);
   const location = store.get('locations', role.locationId);
@@ -1263,6 +1378,16 @@ handle('role-login', async id => {
     }
     t.manager.input(terminalId, command + '\r'); return { projectId: project.id, terminalId };
   }
+  if (localLogins.has(id)) throw new Error('此角色的登录窗口已打开。');
+  localLogins.add(id);
+  let loginWindow;
+  try { return await openLocalRoleLogin(role, window => { loginWindow = window; }); }
+  finally {
+    if (loginWindow && !loginWindow.isDestroyed()) loginWindow.once('closed', () => localLogins.delete(id));
+    else localLogins.delete(id);
+  }
+});
+async function openLocalRoleLogin(role, opened) {
   const executable = findExecutable(role); const env = await network.environmentFor(role, agents.environment(role));
   if(role.engine==='workbuddy'){
     const file=path.resolve(path.dirname(executable),'../../../..','WorkBuddyAI.exe');
@@ -1279,14 +1404,15 @@ handle('role-login', async id => {
   const launch=vendors.isVendor(role.engine)?vendors.launch(executable,args,env):{command:executable,args,env};
   const pty = ptySpawn(launch.command, launch.args, { cwd: root, env:launch.env, cols: 100, rows: 28, useConptyDll: true });
   const window = new BrowserWindow({ width: 900, height: 600, title: role.name + ' · 登录', webPreferences: { preload: path.join(__dirname, 'login-preload.cjs'), contextIsolation: true, sandbox: true } });
+  opened(window);
   window.loadFile(path.join(__dirname, 'login.html')); let output = '';
   pty.onData(value => { output = (output + value).slice(-160000); if (!window.isDestroyed()) window.webContents.send('login:data', value); });
   window.webContents.once('did-finish-load', () => window.webContents.send('login:data', output));
   const input = (event, value) => { if (event.sender === window.webContents && typeof value === 'string') pty.write(value); };
   ipcMain.on('login:input', input); window.on('closed', () => { ipcMain.removeListener('login:input', input); try { pty.kill(); } catch {} });
-});
+}
 function createWindow() {
-  const w = new BrowserWindow({ width: 1488, height: 1000, minWidth: 1000, minHeight: 650, show: !smoke, backgroundColor: nativeTheme.shouldUseDarkColors ? '#191d23' : '#ffffff', title: 'AI 小队', autoHideMenuBar: true, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: !smoke } });
+  const w = new BrowserWindow({ width: 1488, height: 1000, minWidth: 1000, minHeight: 650, show: !smoke, backgroundColor: themeBackground(), title: 'AI 小队', autoHideMenuBar: true, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: !smoke } });
   workbenchWindow = w;
   w.on('close', event => {
     if (quitReady) return;
@@ -1304,31 +1430,94 @@ function createWindow() {
   w.webContents.once('did-finish-load',restoreBadges);
   return w;
 }
+function showQuitDialog(options) {
+  return workbenchWindow ? dialog.showMessageBox(workbenchWindow, options) : dialog.showMessageBox(options);
+}
+
+function restartResources() {
+  const tasks = [], terminals = [];
+  const roleName = id => store.state.roles.find(role => role.id === id)?.name;
+  const projectName = id => store.state.projects.find(project => project.id === id)?.name;
+  const label = (...parts) => parts.filter(Boolean).join(' · ');
+  for (const [id, job] of running) {
+    if (job.localExecutor) continue;
+    if (job.phase === 'workflow-plan') {
+      const project = store.state.projects.find(item => planJobKey(item.id) === id);
+      tasks.push(label('正在生成工作流', project?.name, roleName(job.roleId)));
+    } else {
+      tasks.push(label(job.controller.signal.aborted ? '正在停止任务' : '对话任务', chatById(id)?.name, roleName(job.roleId)));
+    }
+  }
+  for (const job of skills.jobs.values()) tasks.push(label('技能任务', chatById(job.chatId)?.name));
+  for (const id of inputQueue.dispatching) tasks.push(label('正在提交消息', chatById(id)?.name));
+  for (const terminal of interactiveAgents.list()) {
+    if (terminal.state === 'ended') continue;
+    const idle = terminal.state === 'ready' && terminal.inputReady && !terminal.forceStopping &&
+      !['running', 'waiting'].includes(terminal.taskState);
+    const status = terminal.state === 'opening' ? '正在连接' : terminal.forceStopping ? '正在停止'
+      : terminal.taskState === 'running' ? '正在运行' : terminal.taskState === 'waiting' ? '等待确认' : '状态未确认';
+    (idle ? terminals : tasks).push(label(idle ? '空闲角色终端' : '角色终端：' + status,
+      chatById(terminal.chatId)?.name, roleName(terminal.roleId)));
+  }
+  for (const manager of terminalManagers.values()) {
+    for (const terminal of manager.list()) {
+      if (terminal.state !== 'ended') terminals.push(label('项目终端', projectName(terminal.projectId),
+        (terminal.kind === 'local' ? 'Windows ' : 'Linux ') + terminal.number));
+    }
+  }
+  return { tasks, terminals };
+}
+
+function describeQuitResources(items) {
+  const shown = items.slice(0, 6).map(item => '• ' + item);
+  if (items.length > shown.length) shown.push('另有 ' + (items.length - shown.length) + ' 项');
+  return shown.join('\n');
+}
+
+async function confirmRestart() {
+  let { tasks, terminals } = restartResources();
+  if (!tasks.length && terminals.length) {
+    const result = await showQuitDialog({
+      type: 'warning', title: '重启工作台', message: '重启前需要关闭以下终端。',
+      detail: describeQuitResources(terminals) + '\n\n关闭终端可能中断其中的命令。后台执行器管理的本机任务会继续运行。',
+      buttons: ['取消', '关闭终端并重启'], defaultId: 0, cancelId: 0, noLink: true,
+    });
+    if (result.response !== 1) return false;
+    tasks = restartResources().tasks;
+  }
+  if (!tasks.length) return true;
+  await showQuitDialog({
+    type: 'info', title: '重启工作台', message: '以下任务或角色终端暂时阻止重启。',
+    detail: describeQuitResources(tasks) + '\n\n请等待任务结束，或在对应对话的「对话任务输出」中检查角色终端。后台执行器管理的本机任务会继续运行。',
+    buttons: ['确定'], noLink: true,
+  });
+  return false;
+}
+
 async function requestQuit(restart = false) {
   if (quitting || confirmingQuit) return;
-  const hasActiveTasks = [...running.values()].some(job => !restart || !job.localExecutor) || skills.jobs.size || inputQueue.dispatching.size || interactiveAgents.active() ||
-    [...terminalManagers.values()].some(manager => manager.list().some(terminal => terminal.state !== 'ended'));
-  if (restart && hasActiveTasks) {
-    const options = {type:'info', title:'重启工作台', message:'当前有任务或终端仍由工作台管理。', detail:'请等这些任务结束后重启。由后台执行器管理的本机任务可以在重启时继续运行。'};
-    if (workbenchWindow) await dialog.showMessageBox(workbenchWindow, options);
-    return;
-  }
-  if (hasActiveTasks) {
-    confirmingQuit = true;
-    try {
-      const options = {
+  confirmingQuit = true;
+  try {
+    if (cliUpdates.installing()) {
+      await showQuitDialog({ type:'info', title:'CLI 正在更新', message:'请等待本机 CLI 更新完成后再退出或重启。', buttons:['确定'], noLink:true });
+      return;
+    }
+    if (restart) {
+      if (!await confirmRestart()) return;
+    } else if (running.size || skills.jobs.size || inputQueue.dispatching.size || interactiveAgents.active() ||
+      [...terminalManagers.values()].some(manager => manager.list().some(terminal => terminal.state !== 'ended'))) {
+      const result = await showQuitDialog({
         type: 'warning', title: '退出 AI 小队', message: '有任务正在运行，或有终端仍处于连接状态。',
         detail: '退出时会尝试停止任务并断开终端。聊天记录和待发送消息会保留。',
         buttons: ['取消', '结束任务并退出'], defaultId: 0, cancelId: 0, noLink: true,
-      };
-      const result = await (workbenchWindow ? dialog.showMessageBox(workbenchWindow, options) : dialog.showMessageBox(options));
+      });
       if (result.response !== 1) return;
-    } catch (error) {
-      console.error('Could not confirm workbench exit:', error);
-      return;
-    } finally {
-      confirmingQuit = false;
     }
+  } catch (error) {
+    console.error('Could not confirm workbench shutdown:', error);
+    return;
+  } finally {
+    confirmingQuit = false;
   }
 
   quitting = true;
@@ -1366,7 +1555,7 @@ async function requestQuit(restart = false) {
       flow.pending = null;
     }
     const cleanup = [() => store.close(), () => quotaConsole.close(), () => accountUsage.close(),
-      () => claudeUpdater.close(), () => locations.close(), () => backend.stop(), () => keepAwake.dispose()];
+      () => cliUpdates.close(), () => claudeUpdater.close(), () => locations.close(), () => backend.stop(), () => keepAwake.dispose()];
     for (const close of cleanup) {
       try { close(); } catch (error) { console.error('Workbench exit cleanup failed:', error); }
     }
@@ -1405,8 +1594,12 @@ async function requestQuit(restart = false) {
     store.save();
     const workflowTimer=setInterval(pumpWorkflows,3000);workflowTimer.unref();
     setImmediate(pumpWorkflows);
+    if (!smoke) {
+      const timer = setTimeout(() => { if (!quitting) void cliUpdates.startup(); }, 3500);
+      timer.unref();
+    }
     if (skills.system.sources().some(source=>source.enabled&&source.locationId!=='local')) skills.system.refresh().then(emit);
-    if (smoke) require('./smoke.cjs').run(w, store, app, data, { agents, running, inputQueue, notifications, backend, claudeUpdater, avatars, dialog, modelCatalogs, providerFetch, network, accountUsage,imageSource,quotaConsole,interactiveAgents,skills,shell,clipboard }).catch(error => { console.error(error); app.exit(1); });
+    if (smoke) require('./smoke.cjs').run(w, store, app, data, { agents, running, inputQueue, notifications, backend, claudeUpdater, cliUpdates, avatars, dialog, modelCatalogs, providerFetch, network, accountUsage,imageSource,quotaConsole,interactiveAgents,skills,shell,clipboard }).catch(error => { console.error(error); app.exit(1); });
   });
   app.on('window-all-closed', () => app.quit());
   app.on('before-quit', event => {

@@ -1,4 +1,5 @@
-const {randomUUID} = require('node:crypto');
+const nodeRoles = require('./graph-workflow-roles.cjs');
+const {decisionFor, exitInstructions} = require('./graph-workflow-exits.cjs');
 
 const publishedStatuses = new Set(['complete', 'unresolved', 'round_limit']);
 const loopEnds = ['iteration_end', 'loop_break'];
@@ -38,7 +39,7 @@ function validate(graph, {field, position, exitsFor}, depth = 0) {
       case 'role':
       case undefined:
         return {...base, kind:'role', instruction:field(node.instruction, 4000, '请为角色节点填写任务与判断标准（最多 4000 字）。'),
-          roleId:typeof node.roleId === 'string' ? node.roleId : '', localOnly:node.localOnly === true};
+          ...nodeRoles.roleFields(node)};
       default: throw new Error('无法识别工作流节点类型。');
     }
   });
@@ -50,8 +51,9 @@ function validate(graph, {field, position, exitsFor}, depth = 0) {
     if (costs.has(id)) return costs.get(id);
     active.add(id);
     const node = byId.get(id);
-    const result = (node.kind === 'loop' ? 1 + node.rounds * node.body.maxSteps : 1) +
-      Math.max(...node.exits.map(exit => cost(exit.to)));
+    const ownSteps = node.kind === 'loop' ? 1 + node.rounds * node.body.maxSteps :
+      node.kind === 'role' ? Math.max(1,nodeRoles.roleIds(node).length) : 1;
+    const result = ownSteps + Math.max(...node.exits.map(exit => cost(exit.to)));
     active.delete(id);
     costs.set(id, result);
     return result;
@@ -95,7 +97,7 @@ function advance(flow, exit) {
   } else frames.at(-1).nodeId = exit.to;
 }
 
-function settle(flow, attempt, receipt, decisionFor) {
+function settle(flow, attempt, receipt) {
   flow.pending = null;
   attempt.status = receipt?.status || 'interrupted';
   const node = current(flow).at(-1).node;
@@ -111,7 +113,7 @@ function settle(flow, attempt, receipt, decisionFor) {
   advance(flow, exit);
 }
 
-async function run(chat, {turn, save, signal}, decisionFor) {
+async function run(chat, {turn, save, signal}) {
   const flow = chat.workflow;
   flow.status = 'running';
   flow.reason = '';
@@ -129,31 +131,21 @@ async function run(chat, {turn, save, signal}, decisionFor) {
         advance(flow, node.exits[0]);
       }
     } else {
-      const attempt = {id:randomUUID(), roleId:node.roleId, status:'running',
-        path:path.map(({node, round}) => ({id:node.id, title:node.title, round}))};
-      flow.pending = attempt.id;
-      flow.attempts.push(attempt);
-      save();
+      const fields = {path:path.map(({node, round}) => ({id:node.id, title:node.title, round}))};
       const guidance = path.map(({node, round}) => node.title + (round ? ' (iteration '+round+')' : '')).join(' / ');
       const previous = flow.attempts.findLast(item => item.outcome);
       const prompt = [
         'Task goal: '+(flow.goal || 'Apply the current node to the conversation at workflow start.'),
         'Current workflow path: '+guidance, node.instruction,
         previous && 'Incoming result: '+previous.evidence,
-        'Perform the current node. Use the conversation and earlier steps as context. Report evidence in the language of the task. End on a separate line with WORKFLOW: EXIT N, using the number below, or WORKFLOW: NEEDS_USER if none applies.',
-        ...node.exits.map((exit, index) => (index+1)+'. '+exit.label),
+        'Perform the current node. Use the conversation and earlier steps as context. Report evidence in the language of the task.',
+        ...exitInstructions(node),
       ].filter(Boolean).join('\n\n');
-      let receipt;
-      try { receipt = await turn(attempt, prompt, signal, node); }
-      catch (error) { receipt = {status:'failed', note:error.message}; }
-      if (signal.aborted && receipt?.status === 'cancelled' && receipt.stopConfirmed) {
-        attempt.status = 'cancelled';
-        flow.pending = null;
-        flow.status = 'paused';
-      } else {
-        settle(flow, attempt, receipt, decisionFor);
+      await nodeRoles.runAttempt(flow,node,fields,prompt,{turn,save,signal},(attempt,receipt)=>{
+        settle(flow, attempt, receipt);
         if (flow.status === 'needs_check' && receipt?.note && !flow.stopUnconfirmed) flow.reason += '\n'+receipt.note;
-      }
+      });
+      continue;
     }
     if (signal.aborted && flow.status === 'running') flow.status = 'paused';
     save();
@@ -164,16 +156,17 @@ async function run(chat, {turn, save, signal}, decisionFor) {
   }
 }
 
-function recover(chat, decisionFor) {
+function recover(chat) {
   const flow = chat.workflow;
   if (flow.status !== 'running') return;
   flow.status = 'queued';
   if (!flow.pending) return;
   const attempt = flow.attempts.find(item => item.id === flow.pending);
   const receipt = chat.messages.find(message => message.kind === 'assistant' && message.workflowAttemptId === flow.pending);
-  if (attempt) settle(flow, attempt, receipt, decisionFor);
+  if (attempt) nodeRoles.settleAttempt(flow,current(flow).at(-1).node,attempt,receipt,(item,result)=>settle(flow,item,result));
   else {
     flow.pending = null;
+    delete flow.nodeCandidateIndex;
     flow.status = 'needs_check';
     flow.reason = '缺少节点执行记录，请核对后重试。';
   }

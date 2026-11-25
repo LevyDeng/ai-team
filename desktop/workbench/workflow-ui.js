@@ -38,7 +38,7 @@
       body.innerHTML = matches.map(rule => {
         const groups = ratings.tiers(rule.candidates).map(([tier, candidates]) => `<div class="priority-tier"><span class="priority-tier-name">第 ${tier} 档</span><div class="priority-chips">${candidates.map(item => {
           const role = roster.get(item.roleId);
-          const unavailable = !role || role.enabled === false || role.engine === 'gemini-web';
+          const unavailable = !role || role.enabled === false || ['gemini-web','slack-chat'].includes(role.engine);
           return `<span class="priority-chip${unavailable ? ' is-unavailable' : ''}">${role ? roleAvatar(role) : ''}<span>${escape(role?.name || '已移除角色')}${unavailable && role ? ' <small>不可选</small>' : ''}</span><b title="抽选权重">×${item.weight}</b></span>`;
         }).join('')}</div></div>`).join('');
         return `<tr><th scope="row">${escape(rule.domain)}</th><td>${escape(rule.duty)}</td><td>${groups}</td><td><button type="button" class="quiet" data-priority-id="${escape(rule.id)}" aria-label="编辑 ${escape(rule.domain)} ${escape(rule.duty)}">${icon('edit')}编辑</button></td></tr>`;
@@ -77,7 +77,7 @@
       const selected = new Set(candidates.map(item=>item.roleId));
       const available = item => {
         const role = roleById.get(item.roleId);
-        return role && role.enabled !== false && role.engine !== 'gemini-web' &&
+        return role && role.enabled !== false && !['gemini-web','slack-chat'].includes(role.engine) &&
           [item.tier,item.weight].every(value => Number.isInteger(value) && value >= 1 && value <= 100);
       };
       const totals = new Map();

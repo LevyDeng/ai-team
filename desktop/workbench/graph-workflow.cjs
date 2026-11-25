@@ -1,6 +1,7 @@
-const { randomUUID } = require('node:crypto');
 const { StateGraph, Annotation, START, END } = require('@langchain/langgraph');
 const structured = require('./structured-workflow.cjs');
+const nodeRoles = require('./graph-workflow-roles.cjs');
+const {decisionFor, exitInstructions} = require('./graph-workflow-exits.cjs');
 
 const terminals = new Set(['complete', 'unresolved']);
 function field(value, max, error) {
@@ -33,8 +34,8 @@ function validate(value) {
     const instruction = field(node.instruction, 4000, '请为每个节点填写任务与判断标准（最多 4000 字）。');
     if (!Number.isInteger(node.limit) || node.limit < 1 || node.limit > 50) throw new Error('每个节点的执行上限须为 1 到 50 次。');
     const exits = exitsFor(node.exits, ids, terminals);
-    return {id:node.id,title,instruction,roleId:typeof node.roleId === 'string' ? node.roleId : '',
-      localOnly:node.localOnly === true, limit:node.limit, x:position(node.x), y:position(node.y), exits};
+    return {id:node.id,title,instruction,...nodeRoles.roleFields(node),
+      limit:node.limit, x:position(node.x), y:position(node.y), exits};
   });
   const reachable = new Set([value.entry]);
   for (const id of reachable) {
@@ -49,29 +50,16 @@ function configure(value, roles, {optionalGoal = false} = {}) {
   const template = validate(value);
   for (const node of structured.allNodes(template)) {
     if (node.kind === 'loop' || node.kind === 'context') continue;
-    const role = roles.find(r=>r.id===node.roleId);
-    if (!role || (node.localOnly && role.locationId !== 'local')) throw new Error('请为「'+node.title+'」选择可用的'+(node.localOnly?'本机':'项目')+'角色。');
+    const candidates = nodeRoles.roleIds(node);
+    if (!node.roleId || !roles.some(role=>role.enabled!==false && candidates.includes(role.id) && (!node.localOnly || role.locationId === 'local'))) {
+      throw new Error('请为「'+node.title+'」选择可用的'+(node.localOnly?'本机':'项目')+'角色。');
+    }
   }
   const goal = optionalGoal && typeof value.goal === 'string' && !value.goal.trim()
     ? '' : field(value.goal,16000,'请填写本次任务目标（最多 16000 字）。');
   const cursor = template.structured ? {frames:[{nodeId:template.entry,round:0}],activeSources:[]}
     : {nodeIndex:template.nodes.findIndex(n=>n.id===template.entry),visits:{}};
   return {type:'graph', ...template, ...cursor, goal, attempts:[], status:'queued', reason:'', createdAt:Date.now()};
-}
-
-function decisionFor(node, receipt) {
-  if (receipt?.status !== 'complete' || receipt.warningCode === 'CLAUDE_PERMISSION_DENIED') {
-    return {reason:'节点未取得已确认的结果，请查看运行记录后重试。'};
-  }
-  const lines = (receipt.text || '').trim().split(/\r?\n/);
-  const signal = lines.pop()?.trim();
-  const decision = /^WORKFLOW: EXIT ([1-8])$/.exec(signal);
-  const exit = decision && node.exits[Number(decision[1])-1];
-  const evidence = lines.join('\n').trim();
-  if (!exit || !evidence) {
-    return {reason:signal === 'WORKFLOW: NEEDS_USER' ? '节点无法选择出口，请查看输出并补充说明。' : '结果缺少依据或有效的出口编号，请查看节点输出。'};
-  }
-  return {exit,evidence};
 }
 
 function settle(flow, attempt, receipt) {
@@ -105,14 +93,28 @@ function settle(flow, attempt, receipt) {
 
 function recover(chat) {
   const flow = chat.workflow;
-  if (flow.structured) return structured.recover(chat, decisionFor);
+  if (flow.structured) return structured.recover(chat);
   if (flow.status !== 'running') return;
   flow.status = 'queued';
   if (!flow.pending) return;
   const attempt = flow.attempts.find(a=>a.id===flow.pending);
   const receipt = chat.messages.find(m=>m.kind==='assistant' && m.workflowAttemptId===flow.pending);
-  if (attempt) settle(flow,attempt,receipt);
-  else { flow.pending=null; flow.status='needs_check'; flow.reason='缺少节点执行记录，请核对后重试。'; }
+  if (attempt) nodeRoles.settleAttempt(flow,flow.nodes[attempt.nodeIndex],attempt,receipt,(item,result)=>settle(flow,item,result));
+  else { flow.pending=null; delete flow.nodeCandidateIndex; flow.status='needs_check'; flow.reason='缺少节点执行记录，请核对后重试。'; }
+}
+
+function continueReportedNode(chat) {
+  const flow = chat.workflow;
+  if (flow.status !== 'needs_check' || flow.stopUnconfirmed || flow.pending) return false;
+  const attempt = flow.attempts.at(-1);
+  if (!attempt || attempt.status !== 'complete' || attempt.outcome) return false;
+  const node = flow.structured ? structured.current(flow).at(-1)?.node : flow.nodes[flow.nodeIndex];
+  if (node?.exits.length !== 1) return false;
+  const receipt = chat.messages.find(message=>message.kind === 'assistant' && message.workflowAttemptId === attempt.id);
+  if (!decisionFor(node,receipt).exit) return false;
+  Object.assign(flow,{status:'running',pending:attempt.id,reason:''});
+  recover(chat);
+  return true;
 }
 
 function promptFor(chat, node) {
@@ -134,34 +136,28 @@ function promptFor(chat, node) {
     'Prior node reports: '+JSON.stringify(reports), previous && 'Incoming result: '+previous.evidence,
     guidance && 'Additional user guidance: '+guidance,
     'Perform this node now. Base the outcome on observed evidence. For local tests run the checks and report their commands, results or observed UI behavior. Never claim a pass for a skipped or unavailable check.',
-    'Select the matching numbered outcome. Give evidence in the language of the goal, then end on a separate line with WORKFLOW: EXIT N (replace N with its number). If none applies, end with WORKFLOW: NEEDS_USER.',
-    ...node.exits.map((exit,i)=>(i+1)+'. '+exit.label)].filter(Boolean).join('\n\n');
+    ...exitInstructions(node)].filter(Boolean).join('\n\n');
 }
 
 async function run(chat,{turn,save,signal}) {
   const flow=chat.workflow;
-  if (flow.structured) return structured.run(chat, {turn,save,signal}, decisionFor);
+  if (flow.structured) return structured.run(chat, {turn,save,signal});
   flow.status='running'; flow.reason=''; save();
   const builder=new StateGraph(Annotation.Root({next:Annotation()}));
   const destination = () => flow.status==='running' ? flow.nodes[flow.nodeIndex].id : END;
   for (const node of flow.nodes) {
     builder.addNode(node.id, async () => {
       if (signal.aborted) { flow.status='paused'; save(); return {next:END}; }
-      const attempt={id:randomUUID(),nodeIndex:flow.nodeIndex,roleId:node.roleId,status:'running'};
-      flow.pending=attempt.id; flow.attempts.push(attempt); save();
-      let receipt;
-      try { receipt=await turn(attempt,promptFor(chat,node),signal); }
-      catch (error) { receipt={status:'failed',note:error.message}; }
-      if (signal.aborted && receipt?.status==='cancelled' && receipt.stopConfirmed) {
-        attempt.status='cancelled'; flow.pending=null; flow.status='paused';
-      } else settle(flow,attempt,receipt);
-      if (signal.aborted && flow.status==='running') flow.status='paused';
-      save(); return {next:destination()};
+      await nodeRoles.runAttempt(flow,node,{nodeIndex:flow.nodeIndex},promptFor(chat,node),{turn,save,signal},
+        (attempt,receipt)=>settle(flow,attempt,receipt));
+      return {next:destination()};
     });
   }
   builder.addConditionalEdges(START,s=>s.next);
   for (const node of flow.nodes) builder.addConditionalEdges(node.id,s=>s.next);
-  await builder.compile().invoke({next:destination()}, {recursionLimit:2+flow.nodes.reduce((sum,n)=>sum+n.limit,0)});
+  await builder.compile().invoke({next:destination()}, {recursionLimit:2+flow.nodes.reduce((sum,n)=>sum+n.limit*nodeRoles.roleIds(n).length,0)});
 }
 
-module.exports = {validate,configure,run,recover};
+const roleIds = graph => [...new Set(structured.allNodes(graph).flatMap(nodeRoles.roleIds))];
+
+module.exports = {validate,configure,run,recover,roleIds,continueReportedNode};

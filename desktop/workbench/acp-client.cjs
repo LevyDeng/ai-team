@@ -55,10 +55,15 @@ class AcpClient {
       const request=this.pending.get(message.id);if(!request)continue;this.pending.delete(message.id);clearTimeout(request.timer);
       if(message.error){
         const detail = message.error.message || '';
+        const rpcDetail = typeof message.error.data?.message === 'string' ? message.error.data.message : '';
+        const cursorInvalidParams = this.role.engine === 'cursor' && message.error.code === -32602;
         const error = new Error(this.role.engine==='custom-acp'
           ? 'ACP Agent 拒绝请求。请检查 Agent 自身的登录、模型设置和任务输出。'+(detail?'\n'+detail:'')
-          : 'Official agent rejected '+(detail || 'the request')+'. Complete its account login or check the model ID.');
+          : cursorInvalidParams
+            ? 'Cursor 拒绝了请求参数（'+request.method+'）。'+(rpcDetail || detail ? '\n'+(rpcDetail || detail).slice(0,1000) : '')
+            : 'Official agent rejected '+(detail || 'the request')+'. Complete its account login or check the model ID.');
         error.rpcCode=message.error.code;
+        error.rpcDetail=rpcDetail;
         if(message.error.code===-32000 && /auth|login/i.test(detail) || /authentication required|not authenticated|not logged in/i.test(detail))error.code='VENDOR_LOGIN_REQUIRED';
         request.reject(error);
       }
@@ -126,7 +131,14 @@ class AcpClient {
     let method='session/new',restored=false,fallback='';
     if(previous?.id){if(this.capabilities.sessionCapabilities?.resume)method='session/resume';else if(this.capabilities.loadSession)method='session/load';else fallback='resume_unsupported';}
     let result;try{this.replaying=method==='session/load'||(this.role.engine==='custom-acp'&&method==='session/resume');result=await this.call(method,{cwd,mcpServers:servers,...(method!=='session/new'?{sessionId:previous.id}:{})});restored=method!=='session/new';}
-    catch(error){if(method==='session/new'||error.rpcCode!==-32002)throw error;fallback='session_missing';result=await this.call('session/new',{cwd,mcpServers:servers});}
+    catch (error) {
+      // Cursor reports a missing ACP session as Invalid params with a matching session ID in error.data.
+      const cursorSessionMissing = this.role.engine === 'cursor' && method === 'session/load' &&
+        error.rpcCode === -32602 && error.rpcDetail === `Session "${previous.id}" not found`;
+      if (method === 'session/new' || (error.rpcCode !== -32002 && !cursorSessionMissing)) throw error;
+      fallback = 'session_missing';
+      result = await this.call('session/new', {cwd,mcpServers:servers});
+    }
     finally{this.replaying=false;}
     const sessionId=result?.sessionId||(restored?previous.id:'');if(!sessionId)throw new Error(this.role.engine==='custom-acp'?'ACP Agent 未创建会话。请检查 Agent 配置和任务输出。':'The agent did not create a session.');if(restored&&sessionId!==previous.id){const error=new Error(this.role.engine==='custom-acp'?'ACP Agent 恢复了不同的会话。请检查任务输出，必要时重置原生会话。':'The agent returned a different session while resuming.');error.code='NATIVE_SESSION_MISMATCH';throw error;}this.sessionId=sessionId;return {...(restored?previous.metadata||{}:{}),...result,sessionId,restored,fallback};
   }

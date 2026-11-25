@@ -13,7 +13,7 @@ import android.view.inputmethod.EditorInfo;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
+import java.util.Collections;
 import android.widget.TextView;
 
 public final class MainActivity extends Activity {
@@ -24,8 +24,7 @@ public final class MainActivity extends Activity {
     private Button scan;
     private Button send;
     private TextView status;
-    private TextView transcript;
-    private ScrollView scroll;
+    private TranscriptView transcript;
     private ConversationService service;
     private boolean bound;
     private boolean resumed;
@@ -78,14 +77,8 @@ public final class MainActivity extends Activity {
         status.setPadding(0, dp(8), 0, dp(8));
         status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         page.addView(status);
-        scroll = new ScrollView(this);
-        scroll.setFillViewport(true);
-        transcript = new TextView(this);
-        transcript.setTextSize(17);
-        transcript.setTextIsSelectable(true);
-        transcript.setPadding(0, dp(8), 0, dp(8));
-        scroll.addView(transcript);
-        page.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        transcript = new TranscriptView(this);
+        page.addView(transcript, new LinearLayout.LayoutParams(-1, 0, 1));
         LinearLayout composer = new LinearLayout(this);
         message = new EditText(this);
         message.setSingleLine(true);
@@ -151,16 +144,8 @@ public final class MainActivity extends Activity {
         message.setEnabled(connected);
         send.setEnabled(connected);
         status.setText(service == null ? getString(R.string.connect_hint) : service.getStatus());
-        String text = service == null ? "" : service.getTranscript();
-        String previous = transcript.getText().toString();
-        if (!text.equals(previous)) {
-            if (text.startsWith(previous)) {
-                transcript.append(text.substring(previous.length()));
-            } else {
-                transcript.setText(text);
-            }
-            scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN));
-        }
+        transcript.update(service == null ? "" : service.getConversation(),
+            service == null ? Collections.emptyMap() : service.getMessages());
     }
 
     @Override protected void onActivityResult(int request, int result, Intent data) {

@@ -39,6 +39,9 @@ async function run({window,store,app,directory,services,fixture,js,errors}){
   await until(async()=>await js('document.querySelector("#input").value===""'));
   assert.equal(calls,1);assert.equal(agentCalls,0);assert.equal(await js('document.querySelectorAll(".skill-result .skill-image").length'),1);
   const message=store.get('chats',fixture.chat.id).messages.find(m=>m.kind==='skill'&&m.status==='complete');assert(fs.existsSync(message.files[0].path));
+  await js("document.querySelector('.skill-image-button').click()");
+  await until(()=>js("$('message-image-dialog').open && $('message-image-full').src.startsWith('data:image/png;base64,') && $('message-image-full').naturalWidth === 128"));
+  await js("$('message-image-close').click()");
   assert.equal(message.model,'gpt-image-2.6-flare');assert((await js('document.querySelector(".skill-result").textContent')).includes(message.model));
   const question=store.get('chats',fixture.chat.id).messages.find(m=>m.kind==='user'&&m.text==='/image A green square');assert.equal(await js(`Boolean(document.getElementById('msg-${question.id}').compareDocumentPosition(document.getElementById('msg-${message.id}'))&Node.DOCUMENT_POSITION_FOLLOWING)`),true);
   const bridge=await require('./mcp-tools.cjs').createTools({...fixture.project,directories:[]},store,{}, {service:services.skills,scope:services.skills.scope(fixture.chat.id,fixture.roles[0].id,'ai-fixture-task')});
