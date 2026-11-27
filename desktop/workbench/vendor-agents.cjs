@@ -8,9 +8,11 @@ const catalog = {
   cursor: { label:'Cursor Agent', docs:'https://cursor.com/docs/cli/installation', names:['cursor-agent.exe','cursor-agent'], folder:'.cursor', config:'CURSOR_CONFIG_DIR', effort:false },
   workbuddy: { label:'WorkBuddy', docs:'https://www.codebuddy.cn/workbuddy/', names:[], folder:'.workbuddy', config:'WORKBUDDY_CONFIG_DIR', effort:true },
   codebuddy: { label:'CodeBuddy Code', docs:'https://www.codebuddy.ai/docs/cli/installation', names:['codebuddy.exe','codebuddy'], folder:'.codebuddy', config:'CODEBUDDY_CONFIG_DIR', effort:true },
+  zcode: { label:'ZCode', docs:'https://zcode.z.ai/cn/docs/install', names:['zcode.exe','zcode'], effort:false },
   'custom-acp': { label:'自定义 ACP', effort:false },
 };
 function isVendor(engine) { return Object.hasOwn(catalog,engine); }
+function usesAcp(engine) { return isVendor(engine) && engine !== 'zcode'; }
 function supportsRemote(engine, location) {
   return engine === 'antigravity' && location.type === 'ssh' && location.os === 'linux' && location.control === 'ssh';
 }
@@ -23,7 +25,7 @@ function validEntry(file) {
   if (!file || !fs.existsSync(file) || !fs.statSync(file).isFile()) return false;
   if (/\.cmd$|\.ps1$/i.test(file)) return false;
   // Desktop window launchers do not accept the headless/ACP protocol.
-  if (/^(?:cursor|kimi|workbuddyai)\.exe$/i.test(path.basename(file)) && fs.existsSync(path.join(path.dirname(file),'resources','app.asar'))) return false;
+  if (/^(?:cursor|kimi|workbuddyai|zcode)\.exe$/i.test(path.basename(file)) && fs.existsSync(path.join(path.dirname(file),'resources','app.asar'))) return false;
   return true;
 }
 function customSettings(role) {
@@ -80,10 +82,18 @@ function find(role, { home = os.homedir(), local = process.env.LOCALAPPDATA || '
     return findCustom(role.executable, [...searchPath.split(path.delimiter), path.join(process.env.APPDATA || home, 'npm'), path.join(home, '.local', 'bin')], {home, local});
   }
   if (role.executable) {
+    if (role.engine === 'zcode' && (!path.isAbsolute(role.executable) || !validEntry(role.executable) || /\.bat$/i.test(role.executable))) {
+      throw new Error('请选择 ZCode CLI 可执行文件或 ZCode 安装目录里的 resources/glm/zcode.cjs。');
+    }
     if (!validEntry(role.executable)) throw new Error('Choose the official agent runtime, not a desktop window launcher or shell shim.');
     return role.executable;
   }
   const candidates = [];
+  if (role.engine === 'zcode') {
+    for (const root of [path.join(managedRoot,'zcode'), path.join(local,'Programs','ZCode'), path.join(programFiles,'ZCode')]) {
+      candidates.push(path.join(root,'resources','glm','zcode.cjs'));
+    }
+  }
   if(role.engine==='antigravity')candidates.push(require('./antigravity.cjs').executable,path.join(local,'agy','bin','agy.exe'));
   if (role.engine === 'workbuddy') for (const root of [path.join(programFiles,'WorkBuddyAI'),path.join(local,'Programs','WorkBuddyAI')]) candidates.push(path.join(root,'resources','app.asar.unpacked','cli','dist','codebuddy-lite-wb.mjs'));
   if (role.engine === 'kimi') for (const root of [path.join(local,'Programs','Kimi Code'),path.join(local,'Programs','kimi-code')]) candidates.push(path.join(root,'resources','app.asar.unpacked','node_modules','@moonshot-ai','kimi-code','dist','index.js'));
@@ -98,6 +108,15 @@ function find(role, { home = os.homedir(), local = process.env.LOCALAPPDATA || '
 function launch(entry, args, env) {
   let script=/\.(?:mjs|cjs|js)$/i.test(entry);
   if(!path.extname(entry)){try{const fd=fs.openSync(entry,'r'),header=Buffer.alloc(150);try{fs.readSync(fd,header);}finally{fs.closeSync(fd);}script=/^#![^\r\n]*\bnode\b/.test(header.toString());}catch{}}
+  if (script && path.basename(entry).toLowerCase() === 'zcode.cjs') {
+    const node = find({engine:'custom-acp', executable:'node'});
+    if (!node) throw new Error('ZCode CLI 脚本需要 Node.js 24，请安装 Node.js 并确认 node 已加入 PATH。');
+    const config = path.resolve(path.dirname(entry),'../config/provider/zcode-builtin.json');
+    const launchEnv = {...env};
+    if (!launchEnv.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE && fs.existsSync(config)) launchEnv.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE = config;
+    delete launchEnv.ELECTRON_RUN_AS_NODE;
+    return {command:node,args:[entry,...args],env:launchEnv};
+  }
   // DSH native addons distinguish Node.js from Electron even in RunAsNode mode.
   if (script && /[\\/]@deepseek-ai[\\/]dsh[\\/]/i.test(entry)) {
     const node = find({engine:'custom-acp', executable:'node'});
@@ -111,7 +130,7 @@ function launch(entry, args, env) {
 }
 function environment(role, env) {
   if (!isVendor(role.engine)) return env;
-  if(role.engine==='antigravity' || role.engine==='custom-acp'){
+  if(role.engine==='antigravity' || role.engine==='custom-acp' || role.engine==='zcode'){
     const result={...env};
     if (role.engine==='antigravity') for(const name of Object.keys(result))if(/^(?:AGY_|ANTIGRAVITY_|GOOGLE_CLOUD_|GCLOUD_|GOOGLE_APPLICATION_CREDENTIALS$)/i.test(name))delete result[name];
     for(const name of ['XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_STATE_HOME','XDG_CACHE_HOME']){if(process.env[name])result[name]=process.env[name];else delete result[name];}
@@ -141,7 +160,7 @@ function customEnvironment(role) {
   return { env, secrets };
 }
 function args(role) {
-  if (!isVendor(role.engine)) throw new Error('Unsupported native agent.');
+  if (!usesAcp(role.engine)) throw new Error('Unsupported ACP agent.');
   if (role.engine === 'custom-acp') return customSettings(role).acpArgs;
   if(role.engine==='antigravity')return ['acp','--process-per-session',...(role.permission==='danger-full-access'?['--dangerously-skip-permissions']:[])];
   const result=[];
@@ -162,7 +181,7 @@ function args(role) {
   if(role.engine==='workbuddy')result.unshift('--serve','--host','127.0.0.1');
   return [...result,'--acp'];
 }
-function loginArgs(engine) { return engine==='antigravity'?['acp','--login']:engine==='kimi'?['login']:engine==='cursor'?['login']:[]; }
+function loginArgs(engine) { if (engine==='zcode') return ['login','bigmodel']; return engine==='antigravity'?['acp','--login']:engine==='kimi'?['login']:engine==='cursor'?['login']:[]; }
 async function stop(child,cancel=()=>child.kill(),{graceful=false}={}) {
   if(child.exitCode!==null||child.signalCode!==null)return;
   await new Promise(resolve => {
@@ -183,4 +202,4 @@ async function stop(child,cancel=()=>child.kill(),{graceful=false}={}) {
   });
 }
 function info(role) { let executable='',error='';try{executable=find(role);}catch(e){error=e.message;}return { ...catalog[role.engine],installed:Boolean(executable),executable,error,installable:Boolean(packages[role.engine])||role.engine==='antigravity',experimental:role.engine==='workbuddy',source:role.engine==='workbuddy'?'desktop-engine':role.engine==='custom-acp'?'custom-acp':'official-account-cli' }; }
-module.exports={catalog,isVendor,supportsRemote,find,validEntry,launch,environment,customSettings,customEnvironment,args,loginArgs,info,packages,managedRoot,packageBin,stop};
+module.exports={catalog,isVendor,usesAcp,supportsRemote,find,validEntry,launch,environment,customSettings,customEnvironment,args,loginArgs,info,packages,managedRoot,packageBin,stop};

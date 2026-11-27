@@ -26,7 +26,7 @@ const terminalConnectPending=new Set();
 const attachmentTasks=new Map(),sendingChats=new Set();
 const draftSchedules=new Map();
 const scheduleDateFormat=new Intl.DateTimeFormat('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
-const vendorKinds = { antigravity:'Antigravity（反重力）',workbuddy:'WorkBuddy（兼容测试）',kimi:'Kimi Code',cursor:'Cursor Agent',codebuddy:'CodeBuddy Code','custom-acp':'自定义 ACP' };
+const vendorKinds = { antigravity:'Antigravity（反重力）',workbuddy:'WorkBuddy（兼容测试）',kimi:'Kimi Code',cursor:'Cursor Agent',codebuddy:'CodeBuddy Code',zcode:'ZCode（智谱 GLM）','custom-acp':'自定义 ACP' };
 const acpPresets = {
   hermes: { label:'Hermes Agent', command:'hermes', args:['acp'] },
   pi: { label:'Pi（pi-acp）', command:'pi-acp', args:[] },
@@ -864,7 +864,7 @@ function quickSettings() {
   const r=quickRole(), ids=composerRecipients().roleIds;
   composerTargetKey=ids.join(',');
   const hidden=!r || usesExternalConversation(r.engine);
-  $('quick-model').hidden=hidden;$('quick-effort').hidden=hidden||!supportsEffort(r?.engine);
+  $('quick-model').hidden=hidden||r?.engine==='zcode';$('quick-effort').hidden=hidden||!supportsEffort(r?.engine);
   const saved=chat()?.roleSettings?.[r?.id];
   $('quick-model').value=r?.model||'';
   renderQuickCatalog(r?.id);
@@ -917,9 +917,10 @@ function openChatRole(id) {
     $('gemini-web-open').onclick = () => action(() => api['gemini-web-open'](c.id, id));
     return;
   }
+  const zcode = r.engine === 'zcode';
   const defaultModel = cursor ? parseCursorModel(role(id)?.model).id : role(id)?.model;
   const defaultEffort = cursor ? '' : ' · ' + esc(role(id)?.effort || '未指定强度');
-  dialog(`<h2>${esc(r.name)} · 本对话设置</h2><p class="hint">对话模型与推理强度可留空跟随角色，保存后下次发言生效。</p><label>对话模型<div id="chat-model-picker"></div></label><label>推理强度<select id="chat-effort">${options([['','跟随角色'],['low','低'],['medium','中'],['high','高'],['xhigh','很高'],...(r.effort && !['low','medium','high','xhigh'].includes(r.effort) ? [[r.effort,r.effort]] : [])],selection.effort || '')}</select></label><p class="hint">角色默认：${esc(defaultModel || '未设置模型')}${defaultEffort}。${esc(engineLabel(r.engine))} · ${esc(locationOf(r.locationId)?.name)}。</p>${roleFields}<button type="button" id="chat-role-output" class="quiet">查看任务输出</button>`, async () => {
+  dialog(`<h2>${esc(r.name)} · 本对话设置</h2><p class="hint">${zcode ? "使用 ZCode 中选定的模型和推理设置。" : "对话模型与推理强度可留空跟随角色，保存后下次发言生效。"}</p><label ${zcode?"hidden":""}>对话模型<div id="chat-model-picker"></div></label><label ${zcode?"hidden":""}>推理强度<select id="chat-effort">${options([['','跟随角色'],['low','低'],['medium','中'],['high','高'],['xhigh','很高'],...(r.effort && !['low','medium','high','xhigh'].includes(r.effort) ? [[r.effort,r.effort]] : [])],selection.effort || '')}</select></label><p class="hint" ${zcode?"hidden":""}>角色默认：${esc(defaultModel || '未设置模型')}${defaultEffort}。${esc(engineLabel(r.engine))} · ${esc(locationOf(r.locationId)?.name)}。</p>${roleFields}<button type="button" id="chat-role-output" class="quiet">查看任务输出</button>`, async () => {
     const model=chatModelPicker.value().trim();
     const effort=cursor ? '' : $('chat-effort').value;
     assertEffort(modelOffering(roleCatalogs.get(id)||[],model||role(id)?.model),effort||role(id)?.effort);
@@ -942,7 +943,7 @@ function openChatRole(id) {
   modelInput.addEventListener('change',()=>syncEfforts($('chat-effort').value,true));
   syncEfforts(selection.effort||'');
   if(!cursor && !supportsEffort(r.engine)){$('chat-effort').disabled=true;$('chat-effort').value='';$('chat-effort').title='此 Agent 无独立推理强度参数，请选择其模型变体或使用原生设置。';}
-  chatModelPicker.update();
+  if (!zcode) chatModelPicker.update();
   $('chat-role-output').onclick = () => { $('dialog').close(); activityRoleId = id; activityRunId = undefined; activityFollow = true; action(() => openTools('activity')); };
   const native=c.nativeSessions?.[id];$('chat-role-output').insertAdjacentHTML('afterend','<section class="native-session-setting"><h3>原生会话</h3><p class="hint" id="chat-native-session"></p><button type="button" class="quiet" id="chat-session-reset">重新建立原生会话</button><p class="hint">重建后下次发送使用新会话，聊天记录保留。</p></section>');
   $('chat-native-session').textContent=native?.id?'会话 ID：'+native.id+(native.status==='uncertain'?' · 上一轮状态未确认':'')+(native.disableRequestCompression?' · 已为此会话关闭请求压缩（兼容恢复）':''):'尚未建立原生会话';$('chat-session-reset').disabled=!native;
@@ -1881,6 +1882,7 @@ function editRole(r) {
     $('r-desktop-tools-status').textContent=$('r-desktop-tools').checked?'已继承桌面版 MCP 和插件':'已关闭桌面工具继承';$('r-desktop-tools-toggle').textContent=$('r-desktop-tools').checked?'关闭继承':'开启继承';$('r-desktop-tools-toggle').disabled=!shared;
     $('r-login-source-hint').textContent = shared ? '共用桌面版账号；切换或退出登录会影响共用角色。' : '此角色单独登录账号。';
     $('role-login').innerHTML = icon('login') + (remoteAntigravity() ? '配置并登录 VPS' : shared ? '检查桌面版登录' : $('r-engine').value===geminiWebEngine?'在浏览器打开 Gemini':$('r-engine').value==='workbuddy'?'打开 WorkBuddy 登录':vendorKinds[$('r-engine').value]?'登录 '+vendorKinds[$('r-engine').value]+' 账号':'登录原生账号');
+    if ($('r-engine').value==='zcode') $('role-login').textContent = '登录智谱账号';
     if (useSlack()) $('role-login').textContent = '检查 Slack 授权';
     $('role-login').classList.toggle('primary', remoteAntigravity());
     $('role-login').hidden = customAcp();
@@ -1936,6 +1938,7 @@ function editRole(r) {
     $('r-executable').placeholder = customAcp() ? 'PATH 中的命令，或可执行文件、Node.js 脚本的完整路径' : remote ? '留空自动检测，或填写 VPS 上的 / 或 ~/ 路径' : '留空自动检测原生可执行文件';
     for (const id of ['r-location','r-proxy','r-provider','role-model-picker','r-effort','r-permission','r-key','r-url','r-executable','r-location-tools']) $(id).closest('label').hidden=web;
     if (useSlack()) for (const id of ['r-location','r-provider','role-model-picker','r-effort','r-permission','r-key','r-url','r-executable','r-location-tools']) $(id).closest('label').hidden=true;
+    if (engine === 'zcode') for (const id of ['r-location','r-provider','role-model-picker','r-effort','r-key','r-url','r-location-tools']) $(id).closest('label').hidden=true;
     for (const id of ['r-slack-channel-field','r-slack-token-field']) $(id).hidden=!useSlack();
     for (const id of ['r-acp-preset','r-acp-args','r-acp-env']) $(id).closest('label').hidden=!customAcp();
     if (customAcp()) for (const id of ['r-provider','r-key','r-url','r-effort']) $(id).closest('label').hidden = true;
@@ -1944,13 +1947,17 @@ function editRole(r) {
     $('agent-runtime-detect').textContent = customAcp() ? '检查启动程序' : '检测引擎';
     for (const id of ['r-proxy-hint','permission-hint']) $(id).hidden=web;
     if (useSlack()) $('permission-hint').hidden=true;
-    $('r-location-tools').closest('.checks').nextElementSibling.hidden=usesExternalConversation(engine);
+    $('r-location-tools').closest('.checks').nextElementSibling.hidden=usesExternalConversation(engine)||engine==='zcode';
     $('gemini-web-role-hint').hidden=!web;
     $('r-effort').disabled=!supportsEffort(engine);if(!supportsEffort(engine))$('r-effort').value='';
     $('r-key').disabled=$('r-provider').value==='native';$('r-url').disabled=$('r-provider').value==='native';
     if (customAcp()) {
       $('agent-runtime-title').textContent = vendorKinds[engine] + ' · 本机';
       $('agent-runtime-help').textContent = '先安装并配置支持 ACP 的智能体。模型可刷新列表、输入 ID，或留空使用 Agent 的默认模型。';
+    } else if(engine==='zcode'){
+      $('agent-runtime-title').textContent='ZCode · 本机';
+      $('agent-runtime-help').textContent='登录智谱账号后使用 ZCode 配置中的默认模型。可用「检测引擎」检查运行时路径。';
+      if($('role-connection').open)action(detectRuntime);
     } else if(vendor){$('agent-runtime-title').textContent=vendorKinds[engine]+(remote ? ' · ' + locationOf($('r-location').value).name : ' · 官方账号优先');$('agent-runtime-help').textContent=engine==='antigravity'?(remote ? '一键检测和安装官方 agy，然后在本机浏览器授权。登录归这个 VPS 的 SSH 用户使用。' : '使用 Google 账号登录；模型以列表为准，额度可用 /usage 查看。'):engine==='workbuddy'?'桌面引擎登录尚未兼容，请改用官方 CLI，以 WorkBuddy 同站点、同账号登录。':engine==='kimi'?'使用 Kimi Code 账号登录，首次需浏览器授权。':engine==='cursor'?'使用 Cursor 账号登录，可能需单独完成浏览器授权。':'使用 WorkBuddy 同站点、同账号登录 CLI；各角色共用登录，额度按站点和套餐计算。';if(!remote&&$('role-connection').open)action(detectRuntime);}
     refreshLoginSource();
   }
@@ -1977,7 +1984,7 @@ function editRole(r) {
   $('r-model').addEventListener('change',()=>syncEditorEfforts($('r-effort').value,true));
   syncEditorEfforts(supportsEffort(value.engine)?value.effort||'':'');
   const picker = roleModelPicker;
-  const autoReadModels = () => $('role-connection')?.open && picker === roleModelPicker && !usesExternalConversation($('r-engine').value) && !remoteAntigravity() && !customAcp();
+  const autoReadModels = () => $('role-connection')?.open && picker === roleModelPicker && !usesExternalConversation($('r-engine').value) && !remoteAntigravity() && !customAcp() && $('r-engine').value!=='zcode';
   $('role-connection').addEventListener('toggle', () => { if (autoReadModels()) picker.update(); });
   for (const id of ['r-engine','r-provider','r-location','r-key','r-url','r-executable','r-proxy','r-login-source','r-acp-args','r-acp-env']) $(id).addEventListener('change', () => {
     picker.reset();
@@ -2003,6 +2010,13 @@ function editRole(r) {
     $('r-permission').querySelector('[value="read-only"]').textContent=claude?'计划模式（按 Claude 规则）':'只读';
     $('r-permission').querySelector('[value="danger-full-access"]').textContent=claude?'完全权限（跳过工具审批）':vendor?'完全权限（自动同意工具审批）':'完全权限（无沙箱、不弹审批）';
     if(claude){$('permission-hint').textContent=$('r-permission').value==='danger-full-access'?'跳过工具审批；仍受系统权限、容器挂载和 MCP 授权限制。':$('r-permission').value==='read-only'?'Claude 计划模式，并非系统级只读沙箱。':'自动接受编辑；部分工具仍需审批，可在交互终端处理。';return;}
+    if ($('r-engine').value==='zcode') {
+      $('r-permission').querySelector('[value="read-only"]').textContent='计划模式（按 ZCode 规则）';
+      $('r-permission').querySelector('[value="workspace-write"]').textContent='编辑模式（按 ZCode 规则）';
+      $('r-permission').querySelector('[value="danger-full-access"]').textContent='完全权限（跳过常规工具确认）';
+      $('permission-hint').textContent='ZCode 负责审批。计划模式限制普通写入和命令执行，具体范围由 ZCode 的工具规则决定。';
+      return;
+    }
     if (customAcp()) {
       $('r-permission').querySelector('[value="workspace-write"]').textContent = '标准权限（按 Agent 规则）';
       $('permission-hint').textContent = '工具权限由 Agent 自身管理。只读模式需要 Agent 支持；完全权限会自动同意 Agent 发给 AI 小队的单次审批。';

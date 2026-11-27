@@ -40,7 +40,7 @@ test('ACP decodes split UTF-8 events and rejects unsupported project MCP transpo
 test('New native engines validate local account use, preserve permissions, and do not invent effort flags',t=>{
   const directory=fixture(t),store=new Store(directory,directory),base=store.state.roles[0];
   for(const engine of Object.keys(vendors.catalog)){
-    if (engine === 'custom-acp') continue;
+    if (engine === 'custom-acp' || !vendors.usesAcp(engine)) continue;
     const role=store.saveRole({...base,id:undefined,engine,model:'fixture-model',effort:'high',permission:'danger-full-access',codexLoginSource:'isolated'});
     assert.equal(store.saveRole({...role,permission:undefined}).permission,'danger-full-access');
     assert.equal(role.effort,['kimi','cursor'].includes(engine)?'':'high');
@@ -65,10 +65,10 @@ test('DeepSeek Harness launches with standalone Node.js and does not inherit Ele
   assert.deepEqual(launch.args,[entry,'--profile','acp']);
   assert.deepEqual(launch.env,{FIXTURE:'value'});
 });
-test('Each native adapter completes a fixture job and model metadata uses ACP without a prompt',async t=>{
+test('Built-in ACP adapters complete fixture jobs and query models without a prompt',async t=>{
   const directory=fixture(t),store=new Store(directory,directory),project=store.state.projects[0],agents=new Agents(store,{get:()=>''},{},()=>{});t.after(()=>agents.close());
   for(const engine of Object.keys(vendors.catalog)){
-    if (engine === 'custom-acp') continue;
+    if (engine === 'custom-acp' || !vendors.usesAcp(engine)) continue;
     const role=store.saveRole({...store.state.roles[0],id:undefined,engine,provider:'native',executable:entry,model:'fixture-model',permission:'read-only',allowLocationTools:false,codexLoginSource:'isolated'});
     const chat=store.createChat({projectId:project.id,roleIds:[role.id]});store.message(chat.id,{kind:'user',text:'Fixture request',status:'accepted'});
     const result=await agents.run(chat.id,role,project,new AbortController().signal);assert.equal(result.status,'complete',result.note);assert(result.text.startsWith('ACP_FIXTURE_COMPLETE'));assert.equal(result.agentSessionId,'fixture-session');
@@ -78,6 +78,34 @@ test('Each native adapter completes a fixture job and model metadata uses ACP wi
         {id:'reasoning_effort',category:'thought_level',defaultValue:'high',values:['low','medium','high','xhigh']},
       ]);
     }else assert.deepEqual(models,engine==='antigravity'?[{id:'fixture-model',label:'Fixture model'}]:[{id:'fixture-model',label:'Fixture model',description:undefined}]);
+  }
+});
+test('ZCode runs through the CLI, streams a reply and resumes the same session',async t=>{
+  const directory=fixture(t),store=new Store(directory,directory),project=store.state.projects[0];
+  const executable=path.join(directory,'zcode-fixture.cjs');
+  fs.writeFileSync(executable, `
+    const assert=require('node:assert/strict');
+    const args=process.argv.slice(2);
+    assert.equal(args[args.indexOf('--mode')+1],'edit');
+    assert.equal(args[args.indexOf('--output-format')+1],'stream-json');
+    assert.ok(args[args.indexOf('--prompt')+1].includes('Fixture request'));
+    assert.ok(!args.includes('--acp')&&!args.includes('--model'));
+    const response=args.includes('--resume')?'Resumed':'First reply';
+    if(args.includes('--resume')) assert.equal(args[args.indexOf('--resume')+1],'sess_fixture');
+    console.log(JSON.stringify({type:'model.streaming',payload:{kind:'text_delta',delta:response}}));
+    console.log(JSON.stringify({type:'result',sessionId:'sess_fixture',response}));
+  `);
+  const role=store.saveRole({name:'ZCode fixture',engine:'zcode',provider:'native',locationId:'local',
+    executable,model:'ignored',effort:'high',permission:'workspace-write'});
+  assert.equal(role.model,'');assert.equal(role.effort,'');assert.equal(role.allowLocationTools,false);
+  const chat=store.createChat({projectId:project.id,roleIds:[role.id]});
+  const agents=new Agents(store,{get:()=>''},{},()=>{});t.after(()=>agents.close());
+  for (const text of ['First reply','Resumed']) {
+    store.message(chat.id,{kind:'user',text:'Fixture request',status:'accepted'});
+    const reply=await agents.run(chat.id,role,project,AbortSignal.timeout(10000));
+    assert.equal(reply.status,'complete',reply.note);
+    assert.equal(reply.text,text);
+    assert.equal(reply.agentSessionId,'sess_fixture');
   }
 });
 test('Custom ACP persists its argv and environment and runs through the workflow agent path',async t=>{

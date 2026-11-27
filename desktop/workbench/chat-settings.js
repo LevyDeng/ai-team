@@ -2,7 +2,7 @@
   const text = value => typeof value === 'string' ? value.trim() : '';
   const modelDefault = 'model-default';
   const usesExternalConversation = engine => ['gemini-web','slack-chat'].includes(engine);
-  const supportsEffort = engine => !usesExternalConversation(engine) && !['kimi','cursor','custom-acp'].includes(engine);
+  const supportsEffort = engine => !usesExternalConversation(engine) && !['kimi','cursor','custom-acp','zcode'].includes(engine);
   function effectiveRole(chat, role) {
     const settings = chat?.roleSettings?.[role.id] || {};
     const persona = chat?.rolePersonas?.[role.id];

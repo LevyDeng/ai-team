@@ -17,6 +17,7 @@ const {waitForRemoteExit,connectionClosed,openRemoteCommand,waitForRemotePrepara
 const vendors = require('./vendor-agents.cjs');
 const { AcpClient } = require('./acp-client.cjs');
 const remoteAntigravity = require('./remote-antigravity.cjs');
+const zcode = require('./zcode-cli.cjs');
 const discussion = require('./discussion.cjs');
 const {messageText}=require('./attachment-text.js');
 const defaults = {
@@ -36,6 +37,11 @@ function findExecutable(role) {
     if (!entry) throw new Error('找不到 ACP 启动程序。请检查 PATH，或选择可执行文件、Node.js 入口脚本。');
     return entry;
   }
+  if (role.engine === 'zcode') {
+    const entry = vendors.find(role);
+    if (!entry) throw new Error('找不到 ZCode CLI。请安装官方 ZCode，或在角色设置中选择 CLI 运行时。');
+    return entry;
+  }
   if(vendors.isVendor(role.engine)){const entry=vendors.find(role);if(!entry)throw new Error('Install the official '+vendors.catalog[role.engine].label+' agent runtime, then select its executable. Desktop window launchers are not agent runtimes.');return entry;}
   if (role.executable) { if (!fs.existsSync(role.executable)) throw new Error('The configured agent executable does not exist.'); return role.executable; }
   if (role.engine === 'codex') {
@@ -51,7 +57,7 @@ function findExecutable(role) {
   throw new Error('Agent CLI not found. Install it or choose its executable in role settings.');
 }
 function argumentsFor(role,session) {
-  if(vendors.isVendor(role.engine))return vendors.args(role);
+  if(vendors.usesAcp(role.engine))return vendors.args(role);
   if (role.engine === 'codex') {
     const permission = role.permission || 'workspace-write';
     if (!['read-only', 'workspace-write', 'danger-full-access'].includes(permission)) throw new Error('Unsupported Codex permission mode.');
@@ -105,6 +111,7 @@ function buildPrompt(role, project, chat, summary = false) {
   ].filter(Boolean).join('\n\n');
 }
 function parseEvent(engine, event, state, emit) {
+  if (engine === 'zcode') return zcode.parseEvent(event,state,emit);
   if(engine==='codex'&&event.type==='thread.started'&&typeof event.thread_id==='string')state.nativeSessionId=event.thread_id;
   if(engine==='claude'&&typeof event.session_id==='string')state.nativeSessionId=event.session_id;
   if(engine==='opencode'&&typeof(event.sessionID||event.sessionId||event.part?.sessionID)==='string')state.nativeSessionId=event.sessionID||event.sessionId||event.part.sessionID;
@@ -166,6 +173,7 @@ class Agents {
       fs.writeFileSync(path.join(env.CODEX_HOME, 'config.toml'), `model=${q(role.model)}\nmodel_provider="relay"\ncli_auth_credentials_store="file"\nweb_search="disabled"\ncheck_for_update_on_startup=false\n[model_providers.relay]\nname=${q(settings.label)}\nbase_url=${q(bridge.url)}\nwire_api="responses"\nenv_key="CODEX_LAUNCH_TOKEN"\nrequires_openai_auth=false\nsupports_websockets=false\n`);
       env.CODEX_LAUNCH_TOKEN = bridge.token;
     }
+    if (role.engine === 'zcode') return { executable, env, extra:[] };
     let tools;
     try { tools = await createTools(role.allowLocationTools===false?{...project,directories:[]}:project, this.store, this.locations,{...(this.skills&&skillScope?{service:this.skills,scope:skillScope}:{}),...(history?{history}:{})}); } catch (error) { bridge?.close(); throw error; }
     const mcp = {};
@@ -180,7 +188,7 @@ class Agents {
       mcp[name] = { type: 'http', url: target.mcpUrl, headers: { Authorization: 'Bearer ${' + variable + '}' } };
     }
     const extra = [...nativeArgs];
-    if(vendors.isVendor(role.engine))return {executable,env,bridge,tools,extra,mcp:Object.fromEntries(Object.entries(mcp).map(([name,config])=>[name,config.command?config:{...config,headers:{Authorization:config.headers.Authorization.replace(/\$\{([^}]+)\}/g,(_match,key)=>env[key] || '')}}]))};
+    if(vendors.usesAcp(role.engine))return {executable,env,bridge,tools,extra,mcp:Object.fromEntries(Object.entries(mcp).map(([name,config])=>[name,config.command?config:{...config,headers:{Authorization:config.headers.Authorization.replace(/\$\{([^}]+)\}/g,(_match,key)=>env[key] || '')}}]))};
     if (role.engine === 'codex' && role.provider === 'native' && !shared) extra.push(...fileAuthArgs);
     if (Object.keys(mcp).length && role.engine === 'codex') {
       for (const [name, config] of Object.entries(mcp)) {
@@ -299,7 +307,7 @@ class Agents {
         const runLocal=async({input:recoveryInput,session:launchSession=nativeSession}={})=>{
         buffer='';errors='';decoder=new StringDecoder('utf8');stderrDecoder=new StringDecoder('utf8');expectedSessionId=launchSession?.resumed?launchSession.id:'';
         diagnostics?.begin({sessionId:launchSession?.id,resumed:launchSession?.resumed,compression:launchSession?.disableRequestCompression||launchSession?.record?.disableRequestCompression?'disabled_by_override':'cli_default',appPromptBytes:Buffer.byteLength(recoveryInput===undefined?prompt:recoveryInput),cliVersion});let attemptError,observedExitCode=null;
-        const args = argumentsFor(role,launchSession);
+        const args = role.engine === 'zcode' ? zcode.taskArgs(role,launchSession,prompt) : argumentsFor(role,launchSession);
         // Isolated profiles have no saved Windows sandbox selection; otherwise exec can fall back to read-only.
         if (process.platform === 'win32' && role.engine === 'codex' && (role.permission || 'workspace-write') === 'workspace-write') args.unshift('-c', 'features.prefer_mxc=true', '-c', 'windows.sandbox="unelevated"');
         if (role.engine === 'codex') args.unshift(...prepared.extra); else args.push(...prepared.extra);
@@ -328,7 +336,7 @@ class Agents {
           else child.kill('SIGTERM');
         } };
         this.jobs.set(jobId, transport);child.stderr.on('data',consumeError);
-        if(vendors.isVendor(role.engine)){
+        if(vendors.usesAcp(role.engine)){
           const client=new AcpClient(child,state,update,role);
           if (role.engine === 'custom-acp') activeCustomClient = client;
           try{await runAcp(client,directory.path,prepared.mcp);}
@@ -339,8 +347,12 @@ class Agents {
           }
         } else {
           child.stdout.on('data', consume);child.stdin.on('error', () => {});submitted();
-          const completion=waitForCliExit(child, code => {const error=new Error('Agent exited with code ' + code + '. ' + (state.error || state.warning || errors));error.exitCode=code;return error;},750,{signal,...(role.engine==='codex'?{terminal:()=>state.turnEnded,onStalled:(_terminal,details)=>{state.activity='Closing the finished agent process';terminal(state,'\r\n[Agent shutdown] Native turn ended; the CLI cleanup deadline of '+Math.ceil(details.graceMs/1000)+' seconds elapsed. Closing only this CLI process.\r\n');update();}}:{})});
-          try{try{child.stdin.end(role.engine === 'opencode' ? '' : recoveryInput===undefined?input:recoveryInput);}catch(error){completion.catch(()=>{});transport.cancel();throw error;}const result=await completion;observedExitCode=result.exitCode;if(role.engine==='codex'){message.cliShutdown=result.shutdown;diagnostics?.shutdown(result.shutdown);}if(result.protocolComplete&&result.shutdown.reason!=='normal'){message.warningCode='CODEX_SHUTDOWN_WARNING';state.note=result.forced?'Codex completed the turn. The CLI cleanup deadline elapsed and its process was reclaimed; the reply is preserved and no task was replayed.':'Codex completed the turn, then the CLI exited abnormally; the reply is preserved and no task was replayed.';}}
+          const completion=waitForCliExit(child, code => {const detail=state.error || state.warning || errors;
+            const needsZCodeLogin=role.engine==='zcode' && /select a model|not logged in|authentication required/i.test(detail);
+            const error=new Error(needsZCodeLogin ? '请先登录 ZCode 并设置默认模型。可在角色连接配置中登录智谱账号。' : role.engine==='zcode' ? 'ZCode 运行未完成（退出码 '+code+'）。请查看任务输出。' : 'Agent exited with code ' + code + '. ' + detail);
+            if (needsZCodeLogin) error.code='VENDOR_LOGIN_REQUIRED';
+            error.exitCode=code;return error;},750,{signal,...(role.engine==='codex'?{terminal:()=>state.turnEnded,onStalled:(_terminal,details)=>{state.activity='Closing the finished agent process';terminal(state,'\r\n[Agent shutdown] Native turn ended; the CLI cleanup deadline of '+Math.ceil(details.graceMs/1000)+' seconds elapsed. Closing only this CLI process.\r\n');update();}}:{})});
+          try{try{child.stdin.end(['opencode','zcode'].includes(role.engine) ? '' : recoveryInput===undefined?input:recoveryInput);}catch(error){completion.catch(()=>{});transport.cancel();throw error;}const result=await completion;observedExitCode=result.exitCode;if(role.engine==='codex'){message.cliShutdown=result.shutdown;diagnostics?.shutdown(result.shutdown);}if(result.protocolComplete&&result.shutdown.reason!=='normal'){message.warningCode='CODEX_SHUTDOWN_WARNING';state.note=result.forced?'Codex completed the turn. The CLI cleanup deadline elapsed and its process was reclaimed; the reply is preserved and no task was replayed.':'Codex completed the turn, then the CLI exited abnormally; the reply is preserved and no task was replayed.';}}
           catch(error){attemptError=error;if(role.engine==='codex'&&error.cliShutdown){message.cliShutdown=error.cliShutdown;diagnostics?.shutdown(error.cliShutdown);}throw error;}
           finally{await treeStop;diagnostics?.end(attemptError,state,observedExitCode);child.stdout.removeListener('data',consume);child.stderr.removeListener('data',consumeError);transport=undefined;this.jobs.delete(jobId);}
           if(state.error)throw new Error(state.error);
@@ -349,6 +361,7 @@ class Agents {
         if(role.engine==='codex'&&nativeSession)await require('./codex-recovery.cjs').run({role,session:nativeSession,state,message,signal,attempt:runLocal,update:recoveryUpdate});
         else await runLocal();
       } else {
+        if (role.engine === 'zcode') throw new Error('ZCode 角色目前只支持在本机运行。');
         if (location.os !== 'linux') throw new Error('Remote agent execution currently requires Linux. Windows locations can be used as MCP targets.');
         if (role.provider !== 'native') throw new Error('Remote API-provider adapters are not enabled. Use a local role or a native remote agent.');
         const remote = await waitForRemotePreparation(() => this.locations.runner(location.id, directory.path), signal);

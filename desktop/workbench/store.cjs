@@ -230,7 +230,8 @@ class Store {
     if (typeof avatarId !== 'string' || (avatarId && !/^(?:[a-f0-9]{32}|preset-[a-z0-9-]{1,40})$/.test(avatarId))) throw new Error('Choose a valid local avatar.');
     const next = { ...previous, name: text(value.name, 60), description: text(value.description), avatar: Math.max(0, Math.min(2, Number(value.avatar) || 0)), persona: text(value.persona, 30000), examples: text(value.examples, 30000), engine: value.engine, provider: value.provider, locationId: location.id, model: text(value.model), effort: text(value.effort, 20), executable, baseUrl: text(value.baseUrl, 2000), permission: value.engine === 'codex' ? permission : 'acceptEdits' };
     if(value.engine==='claude'||isVendor(value.engine))next.permission=permission;
-    if(['kimi','cursor','custom-acp'].includes(value.engine))next.effort='';
+    if(['kimi','cursor','custom-acp','zcode'].includes(value.engine))next.effort='';
+    if(value.engine==='zcode')next.model='';
     if (value.engine === 'custom-acp') {
       if (!executable) throw new Error('请输入 ACP 启动命令或可执行文件路径。');
       Object.assign(next, customSettings({
@@ -242,7 +243,7 @@ class Store {
       delete next.acpArgs;
       delete next.acpEnv;
     }
-    next.allowLocationTools = value.allowLocationTools !== false;
+    next.allowLocationTools = value.engine !== 'zcode' && value.allowLocationTools !== false;
     if (value.workflowRatings !== undefined) next.workflowRatings = require('./workflow-ratings.js').normalize(value.workflowRatings);
     if (isGeminiWeb || isSlackChat) Object.assign(next, {model:'', effort:'', executable:'', baseUrl:'', permission:'read-only', allowLocationTools:false});
     if (isSlackChat) next.slackChannel = slackConversationId(value.slackChannel ?? previous.slackChannel);

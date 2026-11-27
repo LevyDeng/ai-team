@@ -48,14 +48,20 @@ class ProxyRouter {
   async environmentFor(role, env) {
     const location = this.store.get('locations', role.locationId); let config = this.policy(role);
     if (location.type === 'local' && config.mode === 'system') {
-      const target = role.baseUrl || (role.engine==='antigravity'?'https://daily-cloudcode-pa.googleapis.com':role.provider === 'gemini' ? 'https://generativelanguage.googleapis.com' : role.provider === 'deepseek' ? 'https://api.deepseek.com' : role.provider === 'moonshot' || role.engine==='kimi' ? 'https://api.moonshot.cn' : role.engine==='cursor'?'https://api2.cursor.sh': ['workbuddy','codebuddy'].includes(role.engine)?'https://www.codebuddy.cn':role.engine === 'claude' ? 'https://api.anthropic.com' : 'https://chatgpt.com');
+      const target = role.baseUrl || (role.engine==='antigravity'?'https://daily-cloudcode-pa.googleapis.com':role.provider === 'gemini' ? 'https://generativelanguage.googleapis.com' : role.provider === 'deepseek' ? 'https://api.deepseek.com' : role.provider === 'moonshot' || role.engine==='kimi' ? 'https://api.moonshot.cn' : role.engine==='cursor'?'https://api2.cursor.sh': ['workbuddy','codebuddy'].includes(role.engine)?'https://www.codebuddy.cn':role.engine === 'claude' ? 'https://api.anthropic.com' : role.engine === 'zcode' ? 'https://open.bigmodel.cn' : 'https://chatgpt.com');
       const selection = (await this.electron.app.resolveProxy(target)).split(';')[0].trim();
       const match = /^(PROXY|HTTP|HTTPS)\s+(.+)$/i.exec(selection);
       if (match) config = { mode: 'custom', url: (match[1].toUpperCase() === 'HTTPS' ? 'https://' : 'http://') + match[2] };
       else if (selection === 'DIRECT') config = { mode: 'direct', url: '' };
       else throw new Error('The system proxy is not HTTP/HTTPS. Configure an HTTP proxy on the local location for native agents.');
     }
-    return environment(env, config);
+    const result = environment(env, config);
+    if (role.engine === 'zcode' && config.mode !== 'system') {
+      delete result.ZCODE_HTTP_PROXY;
+      if (config.mode === 'custom') result.ZCODE_HTTP_PROXY = config.url;
+      result.ZCODE_NO_PROXY = result.NO_PROXY;
+    }
+    return result;
   }
 }
 module.exports = { settings, policy, environment, ProxyRouter };

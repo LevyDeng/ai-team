@@ -4,7 +4,7 @@ const digest=value=>crypto.createHash('sha256').update(JSON.stringify(value)).di
 const validId=value=>typeof value==='string'&&/^[a-zA-Z0-9_-]{1,200}$/.test(value);
 function loginScope(role,location,desktopHome=''){
   if(role.engine==='antigravity'&&location.type==='ssh')return digest([role.engine,location.host,location.port,location.username]);
-  return digest([role.engine,location.id,location.managed?'managed':location.type==='ssh'?role.id:role.engine==='codex'&&role.codexLoginSource==='desktop'?desktopHome:['antigravity','kimi','cursor','workbuddy','codebuddy'].includes(role.engine)?'official-account':role.id]);
+  return digest([role.engine,location.id,location.managed?'managed':location.type==='ssh'?role.id:role.engine==='codex'&&role.codexLoginSource==='desktop'?desktopHome:['antigravity','kimi','cursor','workbuddy','codebuddy','zcode'].includes(role.engine)?'official-account':role.id]);
 }
 function authHint(engine,env){
   if(engine==='codex')try{const data=JSON.parse(fs.readFileSync(path.join(env.CODEX_HOME,'auth.json'),'utf8'));const account=data.tokens?.account_id;return digest([data.auth_mode,account||'',data.OPENAI_API_KEY||'']);}catch{}

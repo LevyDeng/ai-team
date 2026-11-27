@@ -76,6 +76,7 @@ function normalize(entries) {
   }).filter(entry => entry.id && entry.id.length <= 200 && !/[\s\x00-\x1f]/.test(entry.id) && !seen.has(entry.id) && seen.add(entry.id)).slice(0, 500);
 }
 function queryCli(role, home, cwd, proxyEnvironment) {
+  if (role.engine === 'zcode') return Promise.reject(new Error('请在 ZCode 自身的模型设置中选择默认模型。'));
   if(vendors.isVendor(role.engine))return queryVendor(role,home,cwd,proxyEnvironment || vendors.environment(role,cleanEnv(home)));
   if (!['codex', 'claude'].includes(role.engine)) return Promise.reject(new Error('This native agent does not expose a supported model catalog. Enter a model ID manually.'));
   const executable = findExecutable(role);
