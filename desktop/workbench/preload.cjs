@@ -8,6 +8,7 @@ for (const name of ['project-select', 'project-order', 'project-search', 'chat-m
   api[name] = (...args) => ipcRenderer.invoke('desk:' + name, ...args);
 }
 for(const name of ['queue-resume','queue-pause','queue-remove','queue-move','queue-now','queue-restore'])api[name]=(...args)=>ipcRenderer.invoke('desk:'+name,...args);
+for(const name of ['schedule-message','schedule-workflow','schedule-edit'])api[name]=(...args)=>ipcRenderer.invoke('desk:'+name,...args);
 api['force-stop']=(...args)=>ipcRenderer.invoke('desk:force-stop',...args);
 for(const name of ['agent-terminals','agent-terminal-open','agent-terminal-input','agent-terminal-resize','agent-terminal-close','agent-terminal-screen'])api[name]=(...args)=>ipcRenderer.invoke('desk:'+name,...args);
 for(const name of ['skill-get','skill-save','skill-delete','skill-cancel','skill-models','skill-sources-save','skill-enabled','message-images','message-image-original'])api[name]=(...args)=>ipcRenderer.invoke('desk:'+name,...args);

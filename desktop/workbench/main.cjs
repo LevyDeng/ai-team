@@ -32,6 +32,7 @@ const { requireCodexLogin } = require('./native-auth.cjs');
 const vendors = require('./vendor-agents.cjs');
 const remoteAntigravity = require('./remote-antigravity.cjs');
 const discussion = require('./discussion.cjs');
+const scheduledTasks = require('./scheduled-tasks.cjs');
 const { Backend } = require('../backend.cjs');
 const { KeepAwake } = require('../keep-awake.cjs');
 const { ProjectTerminals, projectFiles } = require('../project-tools.cjs');
@@ -653,10 +654,10 @@ handle('workflow-group-save',(id,definitionId,value)=>{
   return definition;
 });
 
-handle('workflow-group-start',(id,definitionId,goal='')=>{
+function startGroupWorkflow(id,definitionId,goal='',savedDefinition) {
   const chat=groupWorkflowChat(id);
   ensureWorkflowSlot(chat);
-  const definition=chat.workflowDefinitions?.find(item=>item.id===definitionId);
+  const definition=savedDefinition || chat.workflowDefinitions?.find(item=>item.id===definitionId);
   if (!definition) throw new Error('请先保存工作流。');
   if (chat.workflowRuns?.some(run=>run.definitionId===definitionId&&groupWorkflows.resumableStatuses.has(run.status))) {
     throw new Error('请先继续或结束这个工作流的上一次运行。');
@@ -681,6 +682,14 @@ handle('workflow-group-start',(id,definitionId,goal='')=>{
   }
   emit();setImmediate(pumpWorkflows);
   return flow.id;
+}
+handle('workflow-group-start',(id,definitionId,goal='')=>startGroupWorkflow(id,definitionId,goal));
+handle('schedule-workflow',(id,definitionId,goal,at)=>{
+  const chat=groupWorkflowChat(id), definition=chat.workflowDefinitions?.find(item=>item.id===definitionId);
+  if (!definition) throw new Error('请先保存工作流。');
+  if (typeof goal !== 'string' || goal.length > 16000) throw new Error('任务目标最多 16000 字。');
+  configureGroupWorkflow(chat,definition,goal.trim());
+  return addSchedule(chat, scheduledTasks.entry('workflow',at,{definition:structuredClone(definition),goal:goal.trim()}));
 });
 
 handle('workflow-group-stop',(id,runId)=>{
@@ -757,7 +766,13 @@ handle('workflow-create',value=>{
     }
   }
   if (!roleIds.length) throw new Error('请选择主持人、指定候选角色，或先为项目添加角色。');
-  const chat=store.createChat({projectId:project.id,name:workflow.title||workflow.goal.slice(0,70),roleIds},{workflow});
+  const title=workflow.title||workflow.goal.slice(0,70);
+  const seed={workflow};
+  if (value.startAt !== undefined) {
+    seed.scheduledTasks=[scheduledTasks.entry('standalone',value.startAt,{title})];
+    workflow.status='scheduled';
+  }
+  const chat=store.createChat({projectId:project.id,name:title,roleIds},seed);
   emit();setImmediate(pumpWorkflows);return {id:chat.id,projectId:chat.projectId};
 });
 handle('workflow-resume',(id,mode,guidance='')=>{
@@ -822,6 +837,7 @@ handle('chat-disband', id => {
   if(chat.roleIds.length<2)throw new Error('只有群聊可以解散。');
   if(inputBusy(id)||interactiveAgents.active(id)||inputQueue.dispatching.has(id))throw new Error('请先结束群聊任务和交互终端。');
   if(chat.inputQueue?.length)throw new Error('请先处理待发送消息。');
+  if(chat.scheduledTasks?.length)throw new Error('请先取消此群聊的定时任务。');
   if(chat.draft?.trim()||chat.draftAttachments?.length)throw new Error('请先处理输入框中的草稿和附件。');
   chat.disbandedAt=Date.now();chat.unread=false;store.save();emit();updateBadges();
 });
@@ -916,23 +932,88 @@ function prepareInput(value, queued=false){
   if(interactiveAgents.active(chat.id)&&(guests.length||roleIds.length!==1||value.summary||store.get('roles',roleIds[0]).engine===geminiWebEngine))throw new Error('交互连接期间，请 @ 一位已连接角色发送。群聊接力请先结束交互连接。');
   return {chat,project,invocation,roleIds,files,text,requestedRounds,autoStop,slackTargets,slackText};
 }
-function submitChat(value) {
-  const prepared=prepareInput(value),{chat,roleIds,files,text,requestedRounds,autoStop}=prepared;
+function queueInput(prepared, value) {
+  const {chat,roleIds,files,text,requestedRounds,autoStop}=prepared;
   const roleSettings=Object.fromEntries(roleIds.map(id=>{
     const role=effectiveRole(chat.roleIds.includes(id)?chat:null,store.get('roles',id));
     return [id,{model:role.model||'',effort:role.effort||'',persona:role.persona||'',examples:role.examples||''}];
   }));
+  const slack = prepared.slackTargets.length ? {slackTargets:prepared.slackTargets, slackText:prepared.slackText} : {};
+  return {chatId:chat.id,text,files,roleIds,rounds:requestedRounds,autoStop,summary:Boolean(value.summary),roleSettings,...slack,plain:value.plain===true};
+}
+function submitChat(value) {
+  const prepared=prepareInput(value), {chat,roleIds,text}=prepared;
+  const input=queueInput(prepared,value);
   if (value.mode === 'steer') {
-    if(roleIds.length!==1||files.length||value.summary||prepared.invocation)throw new Error('插话只能向一位正在运行的 Codex 角色发送文字。输入内容已保留。');
-    const result = interactiveAgents.submit(chat.id,roleIds[0],{text,settings:roleSettings[roleIds[0]],steer:true});
+    if(roleIds.length!==1||input.files.length||value.summary||prepared.invocation)throw new Error('插话只能向一位正在运行的 Codex 角色发送文字。输入内容已保留。');
+    const result = interactiveAgents.submit(chat.id,roleIds[0],{text,settings:input.roleSettings[roleIds[0]],steer:true});
     if (chat.draft === text) chat.draft = '';
     store.save(); emit();
     return result;
   }
-  const slack = prepared.slackTargets.length ? {slackTargets:prepared.slackTargets, slackText:prepared.slackText} : {};
-  return inputQueue.submit(chat.id,{chatId:chat.id,text,files,roleIds,rounds:requestedRounds,autoStop,summary:Boolean(value.summary),roleSettings,...slack,plain:value.plain===true},value.mode||'queue');
+  return inputQueue.submit(chat.id,input,value.mode||'queue');
 }
 handle('send', value => submitChat({ ...value, plain: false }));
+function addSchedule(chat, task, consumeDraft = false) {
+  if (quitting || confirmingQuit) throw new Error('工作台正在退出，请稍后重试。');
+  const previous={scheduledTasks:chat.scheduledTasks,draft:chat.draft,draftAttachments:chat.draftAttachments};
+  if ((previous.scheduledTasks?.length || 0) >= 20) throw new Error('此对话最多保留 20 项定时任务。');
+  chat.scheduledTasks=[...(previous.scheduledTasks||[]),task];
+  if (consumeDraft) {
+    if (chat.draft===task.value.text) chat.draft='';
+    attachments.consume(chat.id,task.value.files);
+  }
+  try { store.save(); } catch (error) { Object.assign(chat,previous); throw error; }
+  emit();
+  return {accepted:true, id:task.id};
+}
+handle('schedule-message',(value,at)=>{
+  const request={...value, summary:false, plain:false, mode:'queue'}, prepared=prepareInput(request);
+  return addSchedule(prepared.chat, scheduledTasks.entry('message',at,queueInput(prepared,request)), true);
+});
+handle('schedule-edit',(chatId,taskId,at)=>{
+  const chat=activeChat(chatId), previous=chat.scheduledTasks;
+  const task=previous?.find(item=>item.id===taskId);
+  if (!task) throw new Error('该定时任务已启动或取消。');
+  if (at !== null) scheduledTasks.futureTime(at);
+  const oldStatus=chat.workflow?.status, oldReason=chat.workflow?.reason;
+  chat.scheduledTasks=at===null ? previous.filter(item=>item!==task) : previous.map(item=>item===task ? {...task,at,error:undefined} : item);
+  if (at===null && task.kind==='standalone') Object.assign(chat.workflow,{status:'paused',reason:'定时启动已取消。'});
+  try { store.save(); } catch (error) {
+    chat.scheduledTasks=previous;
+    if (chat.workflow) Object.assign(chat.workflow,{status:oldStatus,reason:oldReason});
+    throw error;
+  }
+  emit();
+});
+function pumpScheduledTasks(now = Date.now()) {
+  if (quitting || confirmingQuit) return;
+  for (const {chat,task} of scheduledTasks.due(store.state.chats,now)) {
+    if (interactiveAgents.active(chat.id)) continue;
+    if (task.kind==='message' && (chat.inputQueue?.length||0)>=require('./input-queue.cjs').maxEntries) continue;
+    if (task.kind==='workflow' && (groupWorkflows.activeRun(chat)||inputBusy(chat.id)||inputQueue.dispatching.has(chat.id)||
+        chat.workflowRuns?.some(run=>run.definitionId===task.value.definition.id&&groupWorkflows.resumableStatuses.has(run.status)))) continue;
+    const previous=chat.scheduledTasks;
+    chat.scheduledTasks=previous.filter(item=>item!==task);
+    try {
+      // Each dispatch persists the removal and its durable queue or workflow entry in the same write.
+      if (task.kind==='message') {
+        prepareInput(task.value,true);
+        inputQueue.submit(chat.id,task.value,'queue',{scheduled:true});
+      } else if (task.kind==='workflow') {
+        startGroupWorkflow(chat.id,task.value.definition.id,task.value.goal,task.value.definition);
+      } else {
+        chat.workflow.status='queued';
+        try { store.save(); } catch (error) { chat.workflow.status='scheduled'; throw error; }
+        emit();setImmediate(pumpWorkflows);
+      }
+    } catch (error) {
+      chat.scheduledTasks=previous.map(item=>item===task ? {...item,error:String(error.message).slice(0,500)} : item);
+      try { store.save(); } catch (saveError) { chat.scheduledTasks=previous; console.error('Could not persist scheduled task failure:',saveError); }
+      emit();
+    }
+  }
+}
 handle('queue-resume',(id, confirmedTaskId)=>{
   const chat=store.get('chats',id);
   if(chat.localTask?.stopUnconfirmed){
@@ -1622,13 +1703,15 @@ async function requestQuit(restart = false, applyUpdate = false) {
     for (const chat of store.state.chats) if (chat.localTask&&!chat.localTask.stopUnconfirmed) followLocalTask(chat, chat.localTask);
     store.save();
     const workflowTimer=setInterval(pumpWorkflows,3000);workflowTimer.unref();
+    const scheduleTimer=setInterval(()=>pumpScheduledTasks(),1000);scheduleTimer.unref();
+    setImmediate(pumpScheduledTasks);
     setImmediate(pumpWorkflows);
     if (!smoke) {
       const timer = setTimeout(() => { if (!quitting) void cliUpdates.startup(); }, 3500);
       timer.unref();
     }
     if (skills.system.sources().some(source=>source.enabled&&source.locationId!=='local')) skills.system.refresh().then(emit);
-    if (smoke) require('./smoke.cjs').run(w, store, app, data, { agents, running, inputQueue, notifications, backend, claudeUpdater, cliUpdates, avatars, dialog, modelCatalogs, providerFetch, network, accountUsage,imageSource,quotaConsole,interactiveAgents,skills,shell,clipboard }).catch(error => { console.error(error); app.exit(1); });
+    if (smoke) require('./smoke.cjs').run(w, store, app, data, { agents, running, inputQueue, notifications, backend, claudeUpdater, cliUpdates, avatars, dialog, modelCatalogs, providerFetch, network, accountUsage,imageSource,quotaConsole,interactiveAgents,skills,shell,clipboard,pumpScheduledTasks }).catch(error => { console.error(error); app.exit(1); });
   }).catch(error => {
     console.error('The workbench could not finish starting:', error);
     app.exit(1);

@@ -24,6 +24,8 @@ const terminalViews = new Map();
 const agentTerminalViews=new Map();let agentTerminals=[],activityMode='log';
 const terminalConnectPending=new Set();
 const attachmentTasks=new Map(),sendingChats=new Set();
+const draftSchedules=new Map();
+const scheduleDateFormat=new Intl.DateTimeFormat('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
 const vendorKinds = { antigravity:'Antigravity（反重力）',workbuddy:'WorkBuddy（兼容测试）',kimi:'Kimi Code',cursor:'Cursor Agent',codebuddy:'CodeBuddy Code','custom-acp':'自定义 ACP' };
 const acpPresets = {
   hermes: { label:'Hermes Agent', command:'hermes', args:['acp'] },
@@ -36,7 +38,7 @@ const slackChatLabel = 'Slack 私信（Dot / Grok Bot，试验）';
 const engineChoices = [['codex','Codex CLI'],['claude','Claude Code CLI'],...Object.entries(vendorKinds),['opencode','OpenCode'],[geminiWebEngine,'Gemini 网页版'],[slackChatEngine,slackChatLabel]];
 const workflowStages = { implement: '执行阶段', review: '验收阶段' };
 const workflowStatuses = {
-  queued: '排队中', running: '运行中', paused: '已暂停', complete: '已完成',
+  scheduled: '等待定时启动', queued: '排队中', running: '运行中', paused: '已暂停', complete: '已完成',
   unavailable: '候选角色不可用', needs_check: '待人工确认', round_limit: '已达轮数上限',
   failed: '失败', interrupted: '已中断', cancelled: '已取消', unresolved: '未解决',
 };
@@ -408,6 +410,7 @@ function activateChat({ targetMessageId } = {}) {
   skillCommands.close();
   $('workflow-status')?.remove();
   const c = chat(); const has = Boolean(c); $('composer').hidden = !has || Boolean(c.disbandedAt); $('empty-chat').hidden = has; $('messages').hidden = !has;
+  closeSendOptions(); renderScheduledTasks(c); renderScheduleSelection(c);
   $('tool-workflow').hidden = !c || Boolean(c.workflow || c.disbandedAt);
   if (toolMode==='workflow'&&!$('tools-panel').hidden) renderGroupWorkflows();
   const workflowFilter = filter === 'workflow';
@@ -420,7 +423,6 @@ function activateChat({ targetMessageId } = {}) {
   $('chat-subtitle').textContent = has ? (c.disbandedAt?'群聊已解散':c.workflow?.nodes?c.workflow.nodes.length+' 个步骤':c.roleIds.length+' 名角色参与')+' · '+project().name : workflowFilter ? '从当前项目创建工作流' : '选择项目，邀请你的 AI 角色';
   $('input').value = c?.draft || ''; renderAttachments();
   mentions.close(); composerTargetKey = undefined;
-  $('round-limit-control').hidden = !has || c.roleIds.length === 1;$('auto-stop-control').hidden=!has||c.roleIds.length===1;
   $('rounds').value=c?.maxRounds||1;$('auto-stop').checked=c?.autoStop!==false;
   $('group-flow').hidden = !has || c.roleIds.length < 2; if (has) $('reply-flow').value = c.relayReplies === false ? 'independent' : 'relay';
   bindChatRoleAvatars();
@@ -443,6 +445,7 @@ function activateChat({ targetMessageId } = {}) {
 }
 function renderMessages() {
   const c = chat(); if (!c || page !== 'projects') return;
+  renderScheduledTasks(c);
   refreshMessagePage();
   const view = historyView?.id === c.id ? historyView : null;
   const messages = (view?.messages || []).filter(message=>!message.workflowInstruction);
@@ -576,7 +579,7 @@ function renderMessages() {
   }
   const inputBusy=Boolean(state.inputBusy?.[c.id]||busy),queued=Boolean(c.inputQueue?.length);
   $('end-task').hidden = Boolean(workflowRun)||!busy&&!terminalBusy; $('end-task').disabled=Boolean(busy?.stopping||forceStop?.stopping);
-  $('send').hidden = false; $('send').innerHTML=icon(inputBusy||queued?'plus':'send')+(inputBusy||queued?'加入队列':'发送');
+  renderScheduleSelection(c);
   $('interrupt-send').hidden=Boolean(workflowRun)||!inputBusy&&!queued;if($('chat-summary'))$('chat-summary').disabled=Boolean(inputBusy||queued);
   renderInputQueue(c);
   if (shouldScroll) requestAnimationFrame(() => {
@@ -955,6 +958,7 @@ function renderSpeakingOrder() {
 }
 function renderDiscussion(){
   const c=chat();if(!c)return;const participants=composerRecipients().roleIds.length,relay=c.relayReplies!==false&&participants>1;
+  $('round-limit-control').hidden=$('auto-stop-control').hidden=!relay;
   $('rounds').disabled=!relay;$('auto-stop').disabled=!relay;
   const moderated=relay&&roleEnabled(c.moderatorRoleId),hint=relay?'轮数仅为上限，不要求跑满。最多 '+(Number($('rounds').value)||1)*participants+' 次角色发言；'+(moderated?($('auto-stop').checked?'主持人每轮额外判断一次；':'主持人本次不进行结束判断；')+(c.moderatorCompression!==false?'每次发送最多两次长历史压缩调用。':'长历史自动压缩已关闭。'):'轮数不能精确限制 Token。'):'单聊或独立作答每位角色仅回答一次。';
   $('round-limit-control').title=hint;$('auto-stop-control').title=relay?moderated?'每轮由所选主持人判断是否结束；关闭后不额外调用主持人判断，仍保留已启用的历史压缩。':'每轮全部参与者判断结束；信号不完整时停止自动追加。取消勾选则按指定上限执行。':hint;
@@ -1019,6 +1023,80 @@ async function saveQuick() {
   assertEffort(quickOffering(r),effort||role(r.id)?.effort);
   if(r.model!==model || (chat()?.roleSettings?.[r.id]?.effort||'')!==effort)await api['chat-role-settings'](chatId,r.id,{model,effort});
 }
+function scheduleFieldsMarkup() {
+  return '<div class="schedule-date-time"><label>日期<input data-schedule-date type="date"></label><label>时间<input data-schedule-time type="time"></label></div>';
+}
+function bindScheduleFields(host, at = Date.now()+30*60000) {
+  const date=host.querySelector('[data-schedule-date]'), time=host.querySelector('[data-schedule-time]');
+  const chosen=new Date(at), pad=value=>String(value).padStart(2,'0');
+  date.value=`${chosen.getFullYear()}-${pad(chosen.getMonth()+1)}-${pad(chosen.getDate())}`;
+  time.value=`${pad(chosen.getHours())}:${pad(chosen.getMinutes())}`;
+  return () => {
+    const day=date.value, clock=time.value;
+    const timestamp=new Date(`${day}T${clock}`).getTime();
+    const chosenTime=new Date(timestamp);
+    if (!day || !clock || !Number.isFinite(timestamp) || timestamp<=Date.now() ||
+        `${pad(chosenTime.getHours())}:${pad(chosenTime.getMinutes())}`!==clock) throw new Error('请选择一个有效的未来日期和时间。');
+    return timestamp;
+  };
+}
+function chooseSchedule(title, at, save, label='确认时间') {
+  dialog(`<h2>${title}</h2><div id="schedule-picker">${scheduleFieldsMarkup()}</div><p class="hint schedule-note">使用本机时间。应用未运行时错过的任务，将在下次打开后执行。</p>`,()=>save(read()),label);
+  const read=bindScheduleFields($('schedule-picker'), at && at>Date.now() ? at : undefined);
+}
+function workflowScheduleOptions(container) {
+  container.insertAdjacentHTML('beforeend', `<section class="workflow-start-options"><label>启动方式<select data-workflow-start-mode><option value="now">立即启动</option><option value="scheduled">定时启动</option></select></label><div data-workflow-start-time hidden>${scheduleFieldsMarkup()}<p class="hint">使用本机时间。应用未运行时错过的任务，将在下次打开后启动。</p></div></section>`);
+  const mode=container.querySelector('[data-workflow-start-mode]'), details=container.querySelector('[data-workflow-start-time]');
+  const read=bindScheduleFields(details);
+  let immediateLabel;
+  mode.onchange=()=>{
+    details.hidden=mode.value==='now';
+    const submit=$('dialog-submit');
+    if (details.hidden) { if(immediateLabel)submit.textContent=immediateLabel; }
+    else { immediateLabel=submit.textContent;submit.textContent='安排定时启动'; }
+  };
+  return ()=>mode.value==='scheduled' ? read() : undefined;
+}
+function closeSendOptions() {
+  $('send-options-menu').hidden=true;
+  $('send-options').setAttribute('aria-expanded','false');
+}
+function openDraftSchedule() {
+  const c=chat();if(!c||c.workflow||c.disbandedAt)return;
+  closeSendOptions();
+  chooseSchedule('定时发送',draftSchedules.get(c.id),at=>{draftSchedules.set(c.id,at);if(chatId===c.id)renderScheduleSelection(chat());});
+  $('dialog').addEventListener('close',()=>{if(chatId===c.id&&!$('dialog').open)$('input').focus();},{once:true});
+}
+function renderScheduleSelection(c) {
+  const at=!c?.disbandedAt && !c?.workflow && draftSchedules.get(c?.id);
+  $('draft-schedule').hidden=!at;
+  if(at)$('draft-schedule-time').textContent=scheduleDateFormat.format(at);
+  const queued=Boolean(c && (state.inputBusy?.[c.id]||state.running[c.id]||c.inputQueue?.length));
+  $('send').hidden=false;
+  $('send').innerHTML=icon(!at&&queued?'plus':'send')+(at?'定时发送':queued?'加入队列':'发送');
+}
+function renderScheduledTasks(c) {
+  const panel=$('scheduled-tasks'), tasks=c?.disbandedAt?[]:c?.scheduledTasks||[];
+  panel.hidden=!tasks.length;
+  const key=JSON.stringify([c?.id,tasks]);if(panel._key===key)return;panel._key=key;
+  $('scheduled-tasks-title').textContent=`定时任务（${tasks.length}）`;
+  const list=$('scheduled-tasks-list');list.replaceChildren();
+  for(const task of [...tasks].sort((a,b)=>a.at-b.at)) {
+    const row=document.createElement('article');row.className='queued-input';row.dataset.scheduleId=task.id;
+    const detail=document.createElement('div');detail.className='queued-input-content';
+    const title=document.createElement('p');title.textContent=task.title||(task.kind==='message'?'仅附件消息':'工作流');
+    const status=document.createElement('small');status.textContent=`${task.kind==='message'?'定时发送':'定时启动'} · ${scheduleDateFormat.format(task.at)}${task.error?' · 待处理':''}`;
+    detail.append(status,title);
+    if(task.files?.length){const files=document.createElement('small');files.textContent=`附件 · ${task.files.join('、')}`;detail.append(files);}
+    if(task.error){const reason=document.createElement('p');reason.className='message-note';reason.textContent=workflowMessages.get(task.error)||attachmentError(task.error);detail.append(reason);}
+    const controls=document.createElement('div');controls.className='queued-input-actions';
+    const edit=document.createElement('button'), cancel=document.createElement('button');
+    edit.type=cancel.type='button';edit.className=cancel.className='quiet';edit.textContent='改时间';cancel.textContent='取消';
+    edit.onclick=()=>chooseSchedule('修改定时任务',task.at,at=>api['schedule-edit'](c.id,task.id,at));
+    cancel.onclick=()=>{if(confirm(task.kind==='message'?'取消定时发送并移除这条待发消息？':'取消这个工作流的定时启动？'))action(()=>api['schedule-edit'](c.id,task.id,null));};
+    controls.append(edit,cancel);row.append(detail,controls);list.append(row);
+  }
+}
 async function send(summary = false, mode = 'queue') {
   const c = chat(); if (!c || c.disbandedAt) return; const draft = $('input').value; const recipients = composerRecipients(); const text = summary ? '请总结当前讨论中的共识、分歧、待确认问题和下一步行动。' : draft;
   if (!summary && recipients.blockedGuestIds?.length) {
@@ -1036,7 +1114,22 @@ async function send(summary = false, mode = 'queue') {
   if ((!text.trim()&&!files.length)||(!summary&&!recipients.content&&!files.length)) return; saveDraftNow();
   sendingChats.add(c.id);renderAttachments();
   const maxRounds=summary?1:Number($('rounds').value),autoStop=$('auto-stop').checked;
-  try { if(mode!=='steer')await saveQuick(); const result = await api.send({ chatId: c.id, text,attachmentIds:files.map(file=>file.id), roleIds: targets, rounds:maxRounds,autoStop, summary,mode }); if(result.accepted&&!summary){const current=state.chats.find(item=>item.id===c.id);if(current){const ids=new Set(files.map(file=>file.id));current.draftAttachments=(current.draftAttachments||[]).filter(file=>!ids.has(file.id));}if(chatId===c.id&&$('input').value===draft){$('input').value='';if(current)current.draft='';mentions.close();quickSettings();}} }
+  const selectedAt=!summary&&draftSchedules.get(c.id), at=mode==='queue'&&selectedAt;
+  try {
+    if(mode!=='steer')await saveQuick();
+    const value={chatId:c.id,text,attachmentIds:files.map(file=>file.id),roleIds:targets,rounds:maxRounds,autoStop,summary,mode};
+    const result=at?await api['schedule-message'](value,at):await api.send(value);
+    if(result.accepted&&!summary){
+      if(selectedAt&&draftSchedules.get(c.id)===selectedAt)draftSchedules.delete(c.id);
+      if(at)toast('已安排定时发送');
+      const current=state.chats.find(item=>item.id===c.id);
+      if(current){const ids=new Set(files.map(file=>file.id));current.draftAttachments=(current.draftAttachments||[]).filter(file=>!ids.has(file.id));}
+      if(chatId===c.id){
+        renderScheduleSelection(current);
+        if($('input').value===draft){$('input').value='';if(current)current.draft='';mentions.close();quickSettings();}
+      }
+    }
+  }
   catch (e) { toast(attachmentError(e)); }
   finally { sendingChats.delete(c.id);renderAttachments(); }
 }
@@ -1273,6 +1366,7 @@ function openWorkflow(existing,{groupTarget,definition}={}){
     '<button type="button" id="wf-ai-plan">AI 生成工作流</button> <button type="button" id="wf-graph-open">编排工作流 / 使用模板</button><label>任务目标<textarea id="wf-goal" rows="3" maxlength="16000" required></textarea></label><label>验收标准<textarea id="wf-criteria" rows="3" maxlength="16000" required></textarea></label><label>最多轮数<input id="wf-limit" type="number" min="1" max="20" value="3" required></label>';
   const moderation=`<label>选人方式<select id="wf-moderator" aria-describedby="wf-moderator-hint">${options(moderationOptions,moderatorId)}</select></label><p id="wf-moderator-hint" class="hint" hidden>有多个候选时由主持人先选一位。该角色不可用时，按列表顺序尝试其余候选。</p>`;
   const title=existing?'编辑工作流角色和主持人':groupTarget?'执行与验收工作流':'新建工作流';
+  let readSchedule=()=>undefined;
   dialog(`<h2>${title}</h2>${fields}${moderation}${stages.map(stage=>`<section class="setting-card"><h3>${stage==='review'?'验收角色':'执行角色'}</h3><div id="wf-${stage}"></div></section>`).join('')}<p id="wf-error" class="message-note" role="alert" hidden></p>`,async()=>{
     const submit=$('dialog-submit');submit.disabled=true;
     const feedback = $('wf-error');
@@ -1285,7 +1379,7 @@ function openWorkflow(existing,{groupTarget,definition}={}){
           criteria:$('wf-criteria').value,limit:$('wf-limit').valueAsNumber,teams,moderatorRoleId});
         return;
       }
-      const result=await invokeWorkflow('create',{projectId:activeProject.id,goal:$('wf-goal').value,criteria:$('wf-criteria').value,limit:Number($('wf-limit').value),teams,moderatorRoleId});
+      const result=await invokeWorkflow('create',{projectId:activeProject.id,goal:$('wf-goal').value,criteria:$('wf-criteria').value,limit:Number($('wf-limit').value),teams,moderatorRoleId,startAt:readSchedule()});
       await openConversationResult(result);filter='workflow';renderSidebar();
     }catch(error){
       feedback.textContent = error.message;
@@ -1294,6 +1388,7 @@ function openWorkflow(existing,{groupTarget,definition}={}){
       return false;
     }finally{submit.disabled=false;}
   },existing||groupTarget?'保存工作流':'创建并排队');
+  if(!existing&&!groupTarget) readSchedule=workflowScheduleOptions($('dialog-body'));
   function render(stage){
     const group=$('wf-'+stage),team=teams[stage];
     group.replaceChildren();
@@ -1355,7 +1450,7 @@ function openGraphWorkflow(activeProject,{goal='',draft}={}) {
   </div>`,async()=>{
     if (busy) return false;
     return perform(async()=>{
-      const result=await invokeWorkflow('create',{...value(),type:'graph',projectId:activeProject.id,goal:$('graph-goal').value});
+      const result=await invokeWorkflow('create',{...value(),type:'graph',projectId:activeProject.id,goal:$('graph-goal').value,startAt:readSchedule()});
       await openConversationResult(result);
       filter='workflow';renderSidebar();
     });
@@ -1363,6 +1458,7 @@ function openGraphWorkflow(activeProject,{goal='',draft}={}) {
   const modal=$('dialog');
   modal.classList.add('graph-workflow-dialog');
   const root=$('graph-workflow-editor'), feedback=$('graph-feedback');
+  const readSchedule=workflowScheduleOptions(root);
   const templates=[...(state.workflowTemplates || [])];
   const picker=$('graph-template-select'), load=$('graph-template-load');
   const starter=$('graph-starter'), title=$('graph-title');
@@ -1430,7 +1526,7 @@ function openGeneratedWorkflow(activeProject,{goal='',existing,rerun=false,group
   const fields=`<label ${definition?'hidden':''}>任务目标<textarea id="wf-plan-goal" rows="4" maxlength="16000" ${definition?'':'required'} ${existing||definition?'readonly':''}>${esc(flow?.goal||goal)}</textarea></label>`;
   const planning=flow?'':`<label id="wf-plan-planner-field">生成角色<select id="wf-plan-planner">${options(hostOptions,projectRoles[0]?.id || eligible[0].id)}</select></label>`;
   const preview=`<section id="wf-plan-preview" hidden><label>工作流名称<input id="wf-plan-title" maxlength="100" ${editing?'readonly':''}></label><label>未匹配规则时的主持人<select id="wf-plan-moderator">${options([['','不指定主持人'],...hostOptions],flow?.moderatorRoleId||'')}</select></label><p class="hint">每一步开始时读取角色优先级表。未匹配规则时，由这里选定的主持人选人。</p><label>整个工作流最多返工次数<input id="wf-rework-limit" type="number" min="0" max="20" value="3" required ${editing?'readonly':''}></label><div id="wf-plan-nodes"></div></section>`;
-  let readNodes, requestId, root, feedback, target, submit, goalInput, plannerField;
+  let readNodes, requestId, root, feedback, target, submit, goalInput, plannerField, readSchedule;
   dialog(`<h2>${title}</h2><div id="wf-plan-form">${fields}${planning}${preview}<p id="wf-plan-error" class="message-note" role="status" hidden></p></div>`,async()=>{
     submit.disabled=true;feedback.hidden=true;
     try {
@@ -1446,7 +1542,7 @@ function openGeneratedWorkflow(activeProject,{goal='',existing,rerun=false,group
       if (groupTarget) await saveGroupWorkflow(groupTarget,definition?.id,value);
       else if (editing) await invokeWorkflow('generated-update',existing.id,value);
       else {
-        const result=await invokeWorkflow('create',value);
+        const result=await invokeWorkflow('create',{...value,startAt:readSchedule()});
         await openConversationResult(result);filter='workflow';renderSidebar();
       }
     } catch(error) {
@@ -1458,6 +1554,7 @@ function openGeneratedWorkflow(activeProject,{goal='',existing,rerun=false,group
     }
   },editing?'保存设置':rerun?'创建并排队':'生成预览');
   root=$('wf-plan-form');feedback=$('wf-plan-error');target=$('dialog');submit=$('dialog-submit');goalInput=$('wf-plan-goal');plannerField=$('wf-plan-planner-field');
+  if(!editing&&!groupTarget)readSchedule=workflowScheduleOptions($('wf-plan-preview'));
   function showPreview(plan,moderatorId) {
     feedback.hidden=true;goalInput.readOnly=true;
     if (plannerField) plannerField.hidden=true;
@@ -2372,10 +2469,16 @@ function renderGroupWorkflows() {
     const saved=await invokeWorkflow('template-save',value());
     toast('已保存模板「'+saved.title+'」。');
   });
-  $('group-workflow-start').onclick=()=>dialog(`<h2>启动工作流</h2>
-    <p class="hint">将运行已保存的版本并固定群聊上文。目标留空时使用本群上文。</p>
-    <label>本次任务目标<textarea id="group-workflow-goal" rows="4" maxlength="16000"></textarea></label>`,
-    ()=>invokeWorkflow('group-start',c.id,definition.id,$('group-workflow-goal').value),'启动');
+  $('group-workflow-start').onclick=()=>{
+    dialog(`<h2>启动工作流</h2>
+      <p class="hint">使用已保存的工作流版本，并在启动时读取群聊上文。目标留空时使用本群上文。</p>
+      <label>本次任务目标<textarea id="group-workflow-goal" rows="4" maxlength="16000"></textarea></label>`,async()=>{
+      const goal=$('group-workflow-goal').value, at=readSchedule();
+      if(at){await api['schedule-workflow'](c.id,definition.id,goal,at);toast('已安排定时启动');}
+      else await invokeWorkflow('group-start',c.id,definition.id,goal);
+    },'启动');
+    const readSchedule=workflowScheduleOptions($('dialog-body'));
+  };
   $('group-workflow-stop').onclick=()=>action(()=>invokeWorkflow('group-stop',c.id,run.id));
   $('group-workflow-resume').onclick=()=>dialog(`<h2>继续工作流</h2><p class="hint">沿用启动时的定义和群聊上文。已有可用结果时会沿唯一出口继续。</p>
     <label>补充说明（可选）<textarea id="group-workflow-guidance" rows="4" maxlength="16000"></textarea></label>`,
@@ -2645,6 +2748,19 @@ $('empty-create').onclick = () => filter==='workflow'?openGroupWorkflowDestinati
 $('dialog-cancel').onclick = $('dialog-close').onclick = () => $('dialog').close();
 $('dialog').addEventListener('close', () => { usageCenter?.destroy();usageCenter=undefined;chatModelPicker?.destroy(); chatModelPicker = undefined;markReadAtBottom(); });
 $('dialog-form').onsubmit = e => { e.preventDefault(); action(async () => { if (await dialogSubmit() !== false) $('dialog').close(); }); };
+$('history-pages').insertAdjacentHTML('beforebegin','<details class="input-queue" id="scheduled-tasks" open hidden><summary id="scheduled-tasks-title"></summary><div id="scheduled-tasks-list"></div></details>');
+$('attachments').insertAdjacentHTML('afterend','<div id="draft-schedule" hidden><span>定时发送</span><button type="button" id="draft-schedule-time" class="quiet" aria-label="修改定时发送时间"></button><button type="button" id="draft-schedule-clear" class="icon-button" aria-label="移除定时发送时间">'+icon('x')+'</button></div>');
+const sendButton=$('send'), sendSplit=document.createElement('div');sendSplit.className='send-split';
+sendButton.before(sendSplit);sendSplit.append(sendButton);
+sendSplit.insertAdjacentHTML('beforeend','<button type="button" id="send-options" aria-label="发送选项" aria-expanded="false" aria-controls="send-options-menu">'+icon('chevron-down')+'</button><div id="send-options-menu" hidden><button type="button" id="send-schedule">定时发送</button></div>');
+$('send-options').onclick=()=>{
+  if(!$('send-options-menu').hidden){closeSendOptions();return;}
+  $('send-options-menu').hidden=false;$('send-options').setAttribute('aria-expanded','true');$('send-schedule').focus();
+};
+sendSplit.addEventListener('keydown',event=>{if(event.key==='Escape'&&!$('send-options-menu').hidden){event.stopPropagation();closeSendOptions();$('send-options').focus();}});
+document.addEventListener('pointerdown',event=>{if(!sendSplit.contains(event.target))closeSendOptions();});
+$('send-schedule').onclick=$('draft-schedule-time').onclick=openDraftSchedule;
+$('draft-schedule-clear').onclick=()=>{draftSchedules.delete(chatId);renderScheduleSelection(chat());$('input').focus();};
 $('send').onclick = () => send();
 $('end-task').onclick = () => action(() => api.pause(chatId));
 $('interrupt-send').onclick=()=>send(false,'interrupt');

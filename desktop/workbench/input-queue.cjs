@@ -19,7 +19,7 @@ class InputQueue {
   chat(id) { return this.store.get('chats', id); }
   save() { this.store.save(); this.changed(); }
   kick(id) { if (!this.closed) queueMicrotask(() => this.pump(id)); }
-  submit(id, value, mode = 'queue') {
+  submit(id, value, mode = 'queue', {scheduled = false} = {}) {
     if (this.closed) throw new Error('ai-team is closing.');
     if (!['queue', 'interrupt'].includes(mode)) throw new Error('Choose a valid input queue mode.');
     const chat = this.chat(id); chat.inputQueue ||= [];
@@ -27,11 +27,15 @@ class InputQueue {
     const wasEmpty = !chat.inputQueue.length;
     const entry = { id: crypto.randomUUID(), at: Date.now(), state: 'pending', value: structuredClone(value) };
     if (mode === 'interrupt' && this.dispatching.has(id)) throw new Error('Wait for the pending message to finish submitting before interrupting.');
+    const previous = scheduled ? {inputQueue: [...chat.inputQueue], queuePaused:chat.queuePaused,
+      queueReason:chat.queueReason, queueError:chat.queueError} : undefined;
     chat.inputQueue[mode === 'interrupt' ? 'unshift' : 'push'](entry);
     if (wasEmpty && !chat.localTask?.stopUnconfirmed) { chat.queuePaused = false; chat.queueReason = ''; chat.queueError = ''; }
-    this.accept(chat, entry.value);
+    if (!scheduled) this.accept(chat, entry.value);
     if (mode === 'interrupt') this.requestInterrupt(id);
-    this.save(); this.kick(id);
+    try { this.store.save(); }
+    catch (error) { if (previous) Object.assign(chat, previous); throw error; }
+    this.kick(id); this.changed();
     return { accepted: true, queued: true, queueId: entry.id };
   }
   requestInterrupt(id) {

@@ -108,9 +108,10 @@ class Store {
   summary() {
     const { chats, ...workspace } = this.state;
     return structuredClone({ ...workspace, chats: chats.map(chat => {
-      const { messages, nativeSessions, interactiveTerminals, moderatorMemory, voice, roleVoices, workflowRuns, ...metadata } = chat;
+      const { messages, nativeSessions, interactiveTerminals, moderatorMemory, voice, roleVoices, workflowRuns, scheduledTasks, ...metadata } = chat;
       return {
         ...metadata,
+        ...(scheduledTasks?.length ? {scheduledTasks:scheduledTasks.map(require('./scheduled-tasks.cjs').view)} : {}),
         ...(workflowRuns?{workflowRuns:workflowRuns.map(({baseSnapshot,sourceSnapshots,visits,activeSources,attempts,...run})=>
           ({...run,attempts:attempts.slice(-1)}))}:{}),
         historyVersion: this.database.historyVersion(chat.id),

@@ -14,7 +14,7 @@ function capacity(files){if(files.length>maxFiles)throw new Error('Attach at mos
 class Attachments{
   constructor(store){this.store=store;}
   files(chatId){return this.store.get('chats',chatId).draftAttachments||[];}
-  protectedPaths(){return new Set(this.store.state.chats.flatMap(chat=>[...(chat.draftAttachments||[]),...(chat.inputQueue||[]).flatMap(entry=>entry.value.files||[])].filter(file=>file.kind==='clipboard-image').map(file=>file.path)));}
+  protectedPaths(){return new Set(this.store.state.chats.flatMap(chat=>[...(chat.draftAttachments||[]),...(chat.inputQueue||[]).flatMap(entry=>entry.value.files||[]),...(chat.scheduledTasks||[]).flatMap(entry=>entry.kind==='message'?entry.value.files:[])].filter(file=>file.kind==='clipboard-image').map(file=>file.path)));}
   add(chatId,paths,image){
     const chat=this.store.get('chats',chatId),current=chat.draftAttachments||[];
     if(!Array.isArray(paths)||paths.length>maxFiles)throw new Error('Attach at most 8 files per message.');

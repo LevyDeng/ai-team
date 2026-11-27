@@ -21,6 +21,10 @@ async function run(window,store,app,directory,services) {
   assert.equal(await js('document.querySelector("#messages").scrollHeight-document.querySelector("#messages").scrollTop-document.querySelector("#messages").clientHeight<50'),true);
   const status=await js('(async()=> (await window.desk.snapshot()).connectionStatus)()');
   assert(!Object.entries(status).some(([id,state])=>id!=='local'&&state==='ready'));
+  if (process.argv.includes('--scheduled-tasks-only')) {
+    await require('./scheduled-tasks-smoke.cjs').run({window,store,app,directory,services,fixture,js,errors});
+    return;
+  }
   if (process.argv.includes('--cli-updates-only')) {
     const updates = services.cliUpdates;
     const executable = path.join(directory, 'fixture-codex.exe');
