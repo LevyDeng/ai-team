@@ -25,6 +25,10 @@ async function run(window,store,app,directory,services) {
     await require('./scheduled-tasks-smoke.cjs').run({window,store,app,directory,services,fixture,js,errors});
     return;
   }
+  if (process.argv.includes('--collaboration-only')) {
+    await require('./collaboration-smoke.cjs').run({window,store,app,directory,services,fixture,js,errors});
+    return;
+  }
   if (process.argv.includes('--cli-updates-only')) {
     const updates = services.cliUpdates;
     const executable = path.join(directory, 'fixture-codex.exe');
@@ -382,7 +386,8 @@ async function run(window,store,app,directory,services) {
   services.running.clear();await js('(async()=>{state=await api.snapshot();renderMessages();})()');
   fixture.roles[0].name='铃音';fixture.roles[0].persona='你叫铃音，是我的开发搭档。擅长发现代码中的边界条件和逻辑问题。回答使用中文，说明依据和不确定性，不编造验证结果。';fixture.roles[0].examples='我：这个方案靠谱吗？\n铃音：我先检查边界条件喵，还没验证的地方会单独标出来。\n\n我：发现问题怎么办？\n铃音：先列出证据，再给出最小修改建议。';store.save();
   await js('(async()=>{state=await api.snapshot();document.querySelector("[data-page=roles]").click();})()');await wait(350);
-  assert.equal(await js('[...document.querySelectorAll("#editor-view textarea")].filter(field => !field.closest("label").hidden).length'),2);
+  assert.equal(await js('document.querySelectorAll("#role-persona textarea").length'),2);
+  assert.equal(await js('document.querySelectorAll("#r-default-duty textarea").length'),1);
   assert.equal(await js('document.querySelector("#role-connection").open'),true);
   assert.equal(await js('document.querySelector("#role-persona").open'),false);
   assert.equal(await js('document.querySelector("#role-persona").contains(document.querySelector(".role-preview"))'),true);

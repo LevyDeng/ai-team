@@ -33,6 +33,8 @@ const vendors = require('./vendor-agents.cjs');
 const remoteAntigravity = require('./remote-antigravity.cjs');
 const discussion = require('./discussion.cjs');
 const scheduledTasks = require('./scheduled-tasks.cjs');
+const collaboration = require('./collaboration.js');
+const invitations = require('./agent-invitations.cjs');
 const { Backend } = require('../backend.cjs');
 const { KeepAwake } = require('../keep-awake.cjs');
 const { ProjectTerminals, projectFiles } = require('../project-tools.cjs');
@@ -100,7 +102,23 @@ const publishMessage = event => {
 const locations = new Locations(store, vault, backend, async (location, fingerprint) => {
   const result = await dialog.showMessageBox({ type: 'question', buttons: ['取消', '信任并连接'], defaultId: 0, cancelId: 0, title: '验证 SSH 主机', message: `${location.username}@${location.host}:${location.port}`, detail: `首次连接此主机，请核对服务器指纹：\n\n${fingerprint}\n\n仅在确认指纹正确后信任。` }); return result.response === 1;
 }, emit);
+const mcpTunnels = new (require('./mcp-tunnels.cjs').McpTunnels)({
+  root, store, locations, backend, emit,
+  approveDirectory: async (locationName, { directory, access, reason, signal }) => {
+    if (signal.aborted || quitting || !workbenchWindow || workbenchWindow.isDestroyed()) return false;
+    workbenchWindow.show();
+    workbenchWindow.focus();
+    const permission = access === 'read-write' ? '读取、新建和修改文本文件' : '读取';
+    const answer = await dialog.showMessageBox(workbenchWindow, {
+      signal, type: 'question', title: '远程 MCP 目录权限', message: '允许远程 MCP 访问这个项目目录吗？',
+      detail: `位置：${locationName}\n目录：${directory}\n权限：${permission}\n申请原因：${reason}\n\n授权持续到手动收回、隧道断开或退出工作台。`,
+      buttons: ['拒绝', '允许本次授权'], defaultId: 0, cancelId: 0, noLink: true,
+    });
+    return answer.response === 1;
+  },
+});
 const agents = new Agents(store, vault, locations, publishMessage, { fetch: providerFetch, network });
+agents.mcpTunnels = mcpTunnels;
 const geminiWeb = new GeminiWeb({store, emit:agents.emit, open:url=>shell.openExternal(url), copy:writeClipboardText,readClipboard:readClipboardText});
 const slackChat = new SlackChat({store, vault, emit:publishMessage, fetchFor:role=>network.fetchFor(role)});
 const attachments=new Attachments(store);
@@ -169,6 +187,7 @@ function snapshot() {
   const terminals=interactiveAgents.list();
   value.forceStops=Object.fromEntries(value.chats.map(chat=>[chat.id,forceStopTarget(chat,terminals)]));
   value.mcp = { ssh: backend.status.ssh, mcp: backend.status.mcp, tunnel: backend.status.tunnel, mcpOwned:backend.status.mcpOwned, tunnelOwned:backend.status.tunnelOwned, forceControl:backend.appliedForceControl };
+  value.mcpTunnels = mcpTunnels.status();
   value.claudeUpdate = claudeUpdater.snapshot();
   value.cliUpdates = cliUpdates.snapshot(executables);
   value.accountUsage = accountUsage.snapshot();
@@ -323,20 +342,52 @@ handle('role-delete', id => {
   if (busyRole(id)) throw new Error('请先结束此角色的任务和交互终端。');
   const memberships=store.state.chats.filter(c=>!c.disbandedAt&&c.roleIds.includes(id));
   if (memberships.length) throw new Error('请先从这些对话移除该角色：'+memberships.slice(0,3).map(chat=>chat.name).join('、')+(memberships.length>3?' 等':'')+'。');
-  store.get('roles', id); store.state.roles = store.state.roles.filter(r => r.id !== id); for (const p of store.state.projects) p.roleIds = p.roleIds.filter(r => r !== id); vault.remove('api:' + id);
+  store.get('roles', id); store.state.roles = store.state.roles.filter(r => r.id !== id);
+  for (const project of store.state.projects) {
+    project.roleIds = project.roleIds.filter(roleId => roleId !== id);
+    delete project.roleDuties?.[id];
+  }
+  vault.remove('api:' + id);
   if (vault.has(slackTokenKey(id))) vault.remove(slackTokenKey(id));
   store.state.workflowPriorities = store.state.workflowPriorities.map(rule => ({...rule,candidates:rule.candidates.filter(candidate => candidate.roleId !== id)})).filter(rule => rule.candidates.length);
   store.save(); emit();
 });
-handle('location-save', value => {
-  const location = store.saveLocation(value); if (value.passphrase) vault.set('ssh:' + location.id, value.passphrase);
+handle('location-save', async value => {
+  const previous = value?.id ? store.state.locations.find(l => l.id === value.id) : null;
+  const location = store.saveLocation(value);
+  if (value.passphrase) vault.set('ssh:' + location.id, value.passphrase);
   if (value.mcpToken) vault.set('mcp:' + location.id, value.mcpToken);
-  locations.disconnect(location.id); emit(); return location;
+  const sshChanged = !previous || Boolean(value.passphrase) || ['host', 'port', 'username', 'keyPath', 'os'].some(k => previous[k] !== location[k]);
+  const portChanged = previous?.mcpTunnel?.remotePort !== location.mcpTunnel?.remotePort;
+  if (sshChanged) {
+    await mcpTunnels.stop(location.id).catch(() => {});
+    locations.disconnect(location.id);
+  } else if (portChanged || previous?.mcpTunnel?.syncRemoteEnv !== location.mcpTunnel?.syncRemoteEnv) {
+    await mcpTunnels.stop(location.id).catch(() => {});
+  }
+  emit(); return location;
 });
 handle('location-proxy-save', (id, proxy) => { const location = store.saveLocationProxy(id, proxy); emit(); return location; });
-handle('location-delete', id => {
+handle('location-mcp-start', async value => {
+  const location = typeof value === 'string' ? store.get('locations', value) : store.saveLocation(value);
+  if (typeof value === 'object' && value) {
+    if (value.passphrase) vault.set('ssh:' + location.id, value.passphrase);
+    if (value.mcpToken) vault.set('mcp:' + location.id, value.mcpToken);
+  }
+  const status = await mcpTunnels.setupAndStart(location.id);
+  emit();
+  return { location: store.get('locations', location.id), status };
+});
+handle('location-mcp-stop', async id => {
+  const status = await mcpTunnels.stop(id);
+  emit();
+  return status;
+});
+handle('location-mcp-revoke-directories', id => mcpTunnels.revokeDirectoryAccess(id));
+handle('location-delete', async id => {
   if (id === 'local' || id === 'relay-server') throw new Error('Built-in locations cannot be deleted.');
   if (store.state.roles.some(r => r.locationId === id) || store.state.projects.some(p => p.directories.some(d => d.locationId === id))) throw new Error('Remove this location from roles and projects first.');
+  await mcpTunnels.stop(id).catch(() => {});
   locations.disconnect(id); store.state.locations = store.state.locations.filter(l => l.id !== id); vault.remove('ssh:' + id); vault.remove('mcp:' + id); store.save(); emit();
 });
 handle('location-test', async id => { await locations.connect(id); const location = store.get('locations', id); if (location.type === 'ssh') return await locations.exec(id, location.os === 'linux' ? 'uname -s; command -v python3; command -v claude || true; command -v codex || true; command -v opencode || true' : 'ver'); return 'Local connection ready.'; });
@@ -574,7 +625,8 @@ function pumpWorkflows(){
       try {
         const context=embedded?{workflowContextRunId:flow.id,workflowTitle:flow.title,workflowPath:path,
           messages:groupWorkflows.context(chat,flow,attempt.id),ignoreModeratorMemory:true,discussion:undefined}:{};
-        const receipt=await agents.run(chat.id,effectiveRole(chat,role),project,signal,false,{...context,relayReplies:true,workflowAttemptId:attempt.id,taskId:attempt.id});
+        const teamAssignments = invitations.context(chat, project, store.state.roles, role.id);
+        const receipt=await agents.run(chat.id,effectiveRole(chat,role),project,signal,false,{...context,teamAssignments,relayReplies:true,workflowAttemptId:attempt.id,taskId:attempt.id});
         if (embedded&&receipt.stopConfirmed===false&&receipt.status!=='complete'&&
             (signal.aborted||flow.type==='graph'||!workflowEngine.unavailable(receipt))) flow.stopUnconfirmed=true;
         return receipt;
@@ -1052,6 +1104,8 @@ async function startSend(value,inputQueueId) {
   if(interactiveAgents.active(chat.id)){
     if(roleIds.length!==1||value.summary)throw new Error('交互连接期间，请 @ 一位已连接角色发送。群聊接力请先结束交互连接。');
     const text=String(value.text||'');let wireText=require('./attachment-text.js').messageText({text,attachments:files});if(invocation?.skill.kind==='prompt')wireText+='\n\nExplicit skill instructions:\n'+skills.instructions(invocation.skill.id);
+    const duty = invitations.dutyPrompt(invitations.context(chat, project, store.state.roles, roleIds[0]));
+    if (duty) wireText += '\n\n' + duty;
     const result=interactiveAgents.submit(chat.id,roleIds[0],{text,wireText,attachments:files,inputQueueId,settings:{...effectiveRole(chat,store.get('roles',roleIds[0])),...value.roleSettings?.[roleIds[0]]}});
     if(invocation?.skill.kind==='prompt')skills.run(skills.scope(chat.id,roleIds[0],result.messageId),invocation.skill.id,invocation.prompt||'Apply the skill to this project.').catch(()=>{});
     store.save();emit();return result;
@@ -1075,16 +1129,30 @@ async function startSend(value,inputQueueId) {
   const controller = new AbortController();
   const roles = Object.fromEntries(executionRoleIds.map(id => [id, structuredClone({...effectiveRole(chat, store.get('roles', id)),...value.roleSettings?.[id]})]));
   const context = { relayReplies: relay,taskId:userMessage.id };skills.begin(userMessage.id);
+  const invited = new Set();
+  const currentProject = () => store.get('projects', chat.projectId);
+  const invitePolicy = () => collaboration.policy(store.state.settings, currentProject(), chat);
+  const supportsInvites = role => ![geminiWebEngine, slackChatEngine].includes(role.engine);
+  const assignments = id => invitations.context(chat, currentProject(), store.state.roles, id);
+  function candidateRoles(senderId) {
+    const policy = invitePolicy();
+    const remaining = policy.limit.value - invited.size;
+    if (!policy.allowed.value || remaining <= 0 || value.summary || !chat.roleIds.includes(senderId) ||
+        !store.state.roles.some(role => role.id === senderId && role.enabled !== false && supportsInvites(role))) return [];
+    return store.state.roles.filter(role => role.id !== senderId && role.enabled !== false && chat.roleIds.includes(role.id) &&
+      !invited.has(role.id) && supportsInvites(role) && project.directories.some(directory => directory.locationId === role.locationId) &&
+      currentProject().directories.some(directory => directory.locationId === role.locationId));
+  }
   const selectedRole = roles[roleIds[0]];
   if ((!smoke || process.argv.includes('--local-executor-only')) && roleIds.length === 1 && !value.summary && !invocation &&
-      canUseLocalExecutor(selectedRole, project)) {
+      !candidateRoles(selectedRole.id).length && canUseLocalExecutor(selectedRole, project)) {
     const task = {id:userMessage.id, roleId:selectedRole.id, createdAt:Date.now()};
     chat.localTask = task;
     const state = {...store.state, chats:store.state.chats.map(item => item.id === chat.id ? {...item, messages:item.messages.map(messageData)} : {
       id:item.id, projectId:item.projectId, name:item.name, roleIds:item.roleIds, disbandedAt:item.disbandedAt, updatedAt:item.updatedAt,
     })};
     store.save();
-    followLocalTask(chat, task, {chatId:chat.id, role:selectedRole, project, state});
+    followLocalTask(chat, task, {chatId:chat.id, role:selectedRole, project, state, teamAssignments:assignments(selectedRole.id)});
     return {accepted:true, messageId:userMessage.id};
   }
   const job = { controller, forceStopId:userMessage.id, roleIds:executionRoleIds, round: 1, rounds, roleId: roleIds[0],phase:'participant',taskId:userMessage.id }; running.set(chat.id, job); emit();updateBadges();
@@ -1104,11 +1172,37 @@ async function startSend(value,inputQueueId) {
         beforeRound:moderator?round=>moderator.beforeRound(round,rounds):undefined,
         reviewRound:moderator&&autoStop?round=>moderator.reviewRound(round,rounds):undefined,
         onTurn:(round,roleId)=>{job.round=round;job.roleId=roleId;job.phase=roles[roleId].engine===geminiWebEngine?'web-reply':'participant';emit();},
-        runTurn:(roleId,control)=>{
-          const role=roles[roleId],turnContext={...context,discussion:control};
+        runTurn:async (roleId,control)=>{
+          const role=roles[roleId],turnContext={...context,discussion:control,teamAssignments:assignments(roleId)};
           if(role.engine===geminiWebEngine)return geminiWeb.run(chat,role,controller.signal,turnContext,Boolean(value.summary));
           if(role.engine===slackChatEngine)return slackChat.run(chat,role,slackText,controller.signal);
-          return agents.run(chat.id,role,structuredClone(project),controller.signal,Boolean(value.summary),turnContext);
+          const targets = candidateRoles(roleId).map(target => ({id: target.id, name: target.name}));
+          turnContext.invitationOffer = invitations.offer(targets, invitePolicy().limit.value - invited.size);
+          const result = await agents.run(chat.id,role,structuredClone(project),controller.signal,Boolean(value.summary),turnContext);
+          if (result.status !== 'complete' || !turnContext.invitationOffer) return result;
+          for (const request of result.invitationRequests || []) {
+            if (controller.signal.aborted) break;
+            const target = candidateRoles(roleId).find(member => member.id === request.roleId);
+            if (!target || !targets.some(member => member.id === target.id)) continue;
+            invited.add(target.id);
+            const invitationTask = {from: role.name, task: request.task};
+            const notice = store.message(chat.id, {kind: 'system', agentInvitation:true, status: 'complete', text: `${role.name} 邀请 @${target.name} 协作\n${request.task}`});
+            publishMessage({chatId:chat.id,message:notice});
+            job.roleId = target.id;
+            if (!job.roleIds.includes(target.id)) job.roleIds.push(target.id);
+            emit();
+            try {
+              ensureCliReady(target);
+              await agents.run(chat.id,effectiveRole(chat,target),structuredClone(project),controller.signal,false,
+                {...context,teamAssignments:assignments(target.id),invitationTask});
+            } catch {
+              if (!controller.signal.aborted) {
+                const failure = store.message(chat.id, {kind:'system', status:'failed', text:`${target.name} 无法接受协作邀请，请检查角色配置和运行环境。`});
+                publishMessage({chatId:chat.id,message:failure});
+              }
+            }
+          }
+          return result;
         }});
       chat.lastDiscussion={...outcome,automatic:group&&autoStop,moderatorRoleId:moderatorId,userMessageId:userMessage.id,at:Date.now()};
       if (failedSlackRoles.length) {
@@ -1216,7 +1310,7 @@ handle('force-stop', async (id, expected) => {
   interruptChat(id);
   emit();
 });
-handle('settings', value => { const n = Number(value.maxJobs); if (!Number.isInteger(n) || n < 1 || n > 8) throw new Error('Choose between 1 and 8 concurrent discussions.'); const theme = value.theme ?? store.state.settings.theme; if (!themes.isValid(theme)) throw new Error('Choose a supported appearance.'); store.state.settings.theme = theme; nativeTheme.themeSource = themes.themeSource(theme); const background = themeBackground(theme); for (const window of BrowserWindow.getAllWindows()) window.setBackgroundColor(background); store.state.settings.keepAwake = value.keepAwake === true; store.state.settings.maxJobs = n; store.save(); keepAwake.setEnabled(store.state.settings.keepAwake); emit(); });
+handle('settings', value => { const n = Number(value.maxJobs); if (!Number.isInteger(n) || n < 1 || n > 8) throw new Error('Choose between 1 and 8 concurrent discussions.'); const theme = value.theme ?? store.state.settings.theme; if (!themes.isValid(theme)) throw new Error('Choose a supported appearance.'); const aiInvites = value.aiInvites === undefined ? undefined : collaboration.normalizePolicy(value.aiInvites); if (aiInvites) store.state.settings.aiInvites = aiInvites; store.state.settings.theme = theme; nativeTheme.themeSource = themes.themeSource(theme); const background = themeBackground(theme); for (const window of BrowserWindow.getAllWindows()) window.setBackgroundColor(background); store.state.settings.keepAwake = value.keepAwake === true; store.state.settings.maxJobs = n; store.save(); keepAwake.setEnabled(store.state.settings.keepAwake); emit(); });
 handle('pick', async (kind, initialPath) => {
   const options = { properties: [kind === 'folder' ? 'openDirectory' : 'openFile', ...(kind === 'files' ? ['multiSelections'] : [])] };
   const validPath = value => typeof value === 'string' && value.length <= 4096 && path.isAbsolute(value) && !/[\x00-\x1f]/.test(value);
@@ -1656,7 +1750,7 @@ async function requestQuit(restart = false, applyUpdate = false) {
       flow.pending = null;
     }
     const cleanup = [() => store.close(), () => quotaConsole.close(), () => accountUsage.close(),
-      () => cliUpdates.close(), () => claudeUpdater.close(), () => locations.close(), () => backend.stop(), () => keepAwake.dispose()];
+      () => cliUpdates.close(), () => claudeUpdater.close(), () => mcpTunnels.close(), () => locations.close(), () => backend.stop(), () => keepAwake.dispose()];
     for (const close of cleanup) {
       try { close(); } catch (error) { console.error('Workbench exit cleanup failed:', error); }
     }
@@ -1711,6 +1805,7 @@ async function requestQuit(restart = false, applyUpdate = false) {
     if (!smoke) {
       const timer = setTimeout(() => { if (!quitting) void cliUpdates.startup(); }, 3500);
       timer.unref();
+      void mcpTunnels.startupAutoStart();
     }
     if (skills.system.sources().some(source=>source.enabled&&source.locationId!=='local')) skills.system.refresh().then(emit);
     if (smoke) require('./smoke.cjs').run(w, store, app, data, { agents, running, inputQueue, notifications, backend, claudeUpdater, cliUpdates, avatars, dialog, modelCatalogs, providerFetch, network, accountUsage,imageSource,quotaConsole,interactiveAgents,skills,shell,clipboard,pumpScheduledTasks }).catch(error => { console.error(error); app.exit(1); });

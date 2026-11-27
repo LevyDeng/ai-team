@@ -306,7 +306,7 @@ function renderList() {
     $('sidebar-list').innerHTML = [...groups.values()].map(({label,location,skills}) => `<section class="skill-source-group"><h3>${esc(label)}${location ? ` · ${esc(location)}` : ''}</h3>${skills.map(s => `<button data-skill="${esc(s.id)}" class="list-row ${s.id===skillId?'active':''}">${icon('robot')}<div class="row-text"><div class="row-title">${esc(s.name)}</div><p>/${esc(s.command)} · ${s.enabled?(s.ready?'可用':'待配置'):'已停用'}</p></div></button>`).join('')}</section>`).join('') || `<p class="hint">${q ? '没有匹配的技能。' : '还没有技能。'}</p>`;
     document.querySelectorAll('[data-skill]').forEach(b=>b.onclick=()=>action(()=>editSkill(b.dataset.skill)));
   } else if (page === 'locations') {
-    $('sidebar-list').innerHTML = state.locations.filter(l => l.name.toLowerCase().includes(q)).map(l => `<button data-location="${l.id}" class="list-row ${l.id === locationId ? 'active' : ''}"><div class="group-avatar">${icon(l.type === 'local' ? 'device-desktop' : 'server')}</div><div class="row-text"><div class="row-title">${esc(l.name)}</div><p>${l.type === 'local' ? '本地 · 内置' : esc(l.username + '@' + l.host)}</p></div></button>`).join('');
+    $('sidebar-list').innerHTML = state.locations.filter(l => l.name.toLowerCase().includes(q)).map(l => { const conn = state.connectionStatus?.[l.id]; const tunnel = state.mcpTunnels?.tunnels?.[l.id]; const detail = l.type === 'local' ? '本地 · 内置' : `${l.username}@${l.host}` + (tunnel?.state === 'ready' ? ` · MCP 隧道 :${tunnel.remotePort}` : conn === 'ready' ? ' · SSH 已连接' : ''); return `<button data-location="${l.id}" class="list-row ${l.id === locationId ? 'active' : ''}"><div class="group-avatar">${icon(l.type === 'local' ? 'device-desktop' : 'server')}</div><div class="row-text"><div class="row-title">${esc(l.name)}</div><p>${esc(detail)}</p></div></button>`; }).join('');
     document.querySelectorAll('[data-location]').forEach(b => { b.onclick = () => editLocation(locationOf(b.dataset.location)); });
   } else {
     const list = $('sidebar-list');
@@ -462,7 +462,7 @@ function renderMessages() {
     let element = document.getElementById('msg-' + m.id);
     if (!element) {
       element = document.createElement('article'); element.id = 'msg-' + m.id; element.className = 'message ' + m.kind;
-      if (m.kind === 'system') { element.className = 'system-message'; element.textContent = m.text; list.append(element); continue; }
+      if (m.kind === 'system') { element.className = m.agentInvitation ? 'system-message agent-invitation' : 'system-message'; element.textContent = m.text; list.append(element); continue; }
       element.innerHTML = `${m.kind === 'user' ? `<img class="user-icon" src="icons/user.svg" alt="我">` : m.workflowResult ? group() : roleButton(m.roleId)}<div class="message-content">${m.kind === 'assistant' ? `<div class="message-meta"><b>${esc(m.roleName)}</b><span></span></div>` : ''}${m.workflowTitle&&!m.workflowResult?`<p class="workflow-message-label hint">${esc([m.workflowTitle,...(m.workflowPath||[]).map(step=>step.title+(step.round?' · 第 '+step.round+' 轮':''))].join(' / '))}</p>`:''}<div class="message-bubble"></div><div class="message-images" hidden></div><details class="message-reasoning" hidden><summary>思考摘要（CLI 提供）</summary><pre></pre></details><details class="message-tools" hidden><summary>工具活动</summary><ul></ul></details><div class="message-note" hidden></div><div class="message-footer"><time>${new Date(m.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time><span class="message-state"></span><button class="quiet task-output" ${m.kind !== 'assistant' || m.workflowResult ? 'hidden' : ''}>任务输出</button><button class="quiet copy-full">复制全文</button><button class="quiet restore" ${m.kind !== 'user' ? 'hidden' : ''}>恢复文字</button></div></div>`;
       element.querySelector('.copy-full').onclick = () => action(async () => { const current=visibleMessage(c.id,m.id)||m;await api.copy(window.deskAttachments.messageText(current)); toast('已复制整条消息'); });
       element.querySelector('.restore').textContent='恢复输入';
@@ -885,24 +885,32 @@ function openChatRole(id) {
   const c = chat(), r = chatRole(id); if (!c || c.disbandedAt || !r || !c.roleIds.includes(id)) return;
   const selection = c.roleSettings?.[id] || {};
   const cursor = r.engine === 'cursor';
-  const roleFields = `<details id="chat-role-persona"><summary>本对话人设与发言风格</summary>
+  const dutyFields = '<section class="chat-duty-section"><h3>本会话分工</h3><div id="c-role-duty"></div></section>';
+  const bindDuty = () => window.deskCollaborationUI.dutyEditor($('c-role-duty'), {
+    scope:'chat', role:r, parent:window.deskCollaboration.duty(r, project()), value:c.roleDuties?.[id],
+  });
+  const roleFields = `${dutyFields}<details id="chat-role-persona"><summary>本对话人设与发言风格</summary>
     <p class="hint">这是角色加入时复制的设定，保存后仅对此对话生效。</p>
     <label>角色设定<textarea id="chat-role-persona-text" maxlength="30000" rows="4"></textarea></label>
     <label>发言风格示例<textarea id="chat-role-examples" maxlength="30000" rows="4"></textarea></label>
     <button type="button" class="quiet" id="chat-role-copy-persona">从系统设定重新复制</button>
     </details>`;
   function bindRoleFields() {
+    const readDuty = bindDuty();
     $('chat-role-persona-text').value = r.persona || '';
     $('chat-role-examples').value = r.examples || '';
     $('chat-role-copy-persona').onclick = () => {
       $('chat-role-persona-text').value = role(id)?.persona || '';
       $('chat-role-examples').value = role(id)?.examples || '';
     };
-    return () => ({ persona: $('chat-role-persona-text').value, examples: $('chat-role-examples').value });
+    return () => ({ persona: $('chat-role-persona-text').value, examples: $('chat-role-examples').value, roleDuty: readDuty() });
   }
   let readRole;
   if (r.engine === slackChatEngine) {
-    dialog(`<h2>${esc(r.name)} · 本对话设置</h2><p class="hint">此角色可参加单聊或群聊。每次只发你本轮输入的正文到绑定的 Slack 私信。接力讨论中，后续角色可以看到它的回复。</p>`, null);
+    dialog(`<h2>${esc(r.name)} · 本对话设置</h2>${dutyFields}`, async () => {
+      await api['chat-role-settings'](c.id, id, {model:selection.model || '', effort:'', roleDuty:readRole()});
+    });
+    readRole = bindDuty();
     return;
   }
   if (r.engine === geminiWebEngine) {
@@ -953,7 +961,7 @@ function renderSpeakingOrder() {
   const ids = composerRecipients().roleIds, moderatorId = chat()?.moderatorRoleId;
   const text = ids.length ? '发言顺序：' + ids.map(id => role(id)?.name || id).join(' → ')+(chat()?.relayReplies!==false&&roleEnabled(moderatorId)?'；主持人：'+role(moderatorId).name:'') : '暂无可发言角色';
   $('speaking-order').textContent = text; $('speaking-order').title = text;
-  $('reply-flow').title = chat()?.relayReplies === false ? '各角色只读取用户消息和自己的历史回复' : '后一个角色可以读取前面的角色回复';
+  $('reply-flow').title = chat()?.relayReplies === false ? '各角色读取用户消息和自己的历史回复。收到 AI 邀请时，也会读取邀请任务。' : '后一个角色可以读取前面的角色回复';
   renderDiscussion();
   renderSteerButton();
 }
@@ -1138,7 +1146,7 @@ function dialog(html, submit, label = '保存') {
   usageCenter?.destroy();usageCenter=undefined;chatModelPicker?.destroy();chatModelPicker=undefined;
   dialogSubmit = submit;
   const modal = $('dialog');
-  modal.classList.remove('role-selection-dialog','usage-center-dialog','native-quota-open','graph-workflow-dialog');
+  modal.classList.remove('role-selection-dialog','usage-center-dialog','native-quota-open','graph-workflow-dialog','project-settings-dialog');
   const body = $('dialog-body');
   body.innerHTML = html;
   const heading = body.querySelector('h2');
@@ -1273,15 +1281,94 @@ function destructiveSetting(id, label, warning) {
 }
 function openProject(p) {
   const inviteRoles = state.roles.filter(r => r.enabled !== false || p?.roleIds.includes(r.id));
-  dialog(`<h2>${p ? '项目设置' : '新建项目'}</h2><label>项目名称<input id="p-name" value="${esc(p?.name || '')}" placeholder="例如：我的项目" required></label><label>项目工作目录<span class="hint">首个目录默认打开；请为角色的运行位置配置目录。</span></label><div id="directory-rows">${directoryRows(p?.directories || [{ locationId: 'local', path: '' }])}</div><button type="button" id="directory-add" class="quiet">${icon('plus')}添加目录</button><label>邀请角色</label><div class="checks">${inviteRoles.map(r => `<label><input type="checkbox" name="project-role" value="${r.id}" ${(!p || p.roleIds.includes(r.id)) ? 'checked' : ''}>${esc(r.name)}${r.enabled === false ? '（已禁用）' : ''}</label>`).join('') || '<p class="hint">没有可邀请的启用角色。</p>'}</div><label class="project-mention-setting"><input type="checkbox" id="p-guest-mentions" aria-describedby="project-mention-hint" ${p?.allowGuestMentions!==false?'checked':''}>允许在群聊中 @ 未入群的项目角色</label><p id="project-mention-hint" class="hint">被点名的角色只参与这次任务，群聊成员名单保持原样。</p>`, async () => {
-    const result = await api['project-save']({ id: p?.id, name: $('p-name').value, allowGuestMentions: $('p-guest-mentions').checked, directories: [...document.querySelectorAll('.directory-row')].map(row => ({ locationId: row.querySelector('select').value, path: row.querySelector('input').value })), roleIds: [...document.querySelectorAll('[name=project-role]:checked')].map(x => x.value) });
+  const duties = {...p?.roleDuties};
+  let selected = p?.roleIds || inviteRoles.map(r => r.id);
+  let focused = selected[0];
+  const tabs = [['general','常规'],['roles','角色'],['collaboration','协作']];
+  dialog(`<h2>${p ? '项目设置' : '新建项目'}</h2>
+    <div class="project-settings-tabs" role="tablist" aria-label="项目设置">${tabs.map(([id,label]) => `<button type="button" role="tab" id="p-tab-${id}" aria-controls="p-panel-${id}">${label}</button>`).join('')}</div>
+    <section id="p-panel-general" role="tabpanel" aria-labelledby="p-tab-general"><label>项目名称<input id="p-name" value="${esc(p?.name || '')}" placeholder="例如，我的项目" required></label><label>项目工作目录<span class="hint">首个目录默认打开。请为角色的运行位置配置目录。</span></label><div id="directory-rows">${directoryRows(p?.directories || [{ locationId: 'local', path: '' }])}</div><button type="button" id="directory-add" class="quiet">${icon('plus')}添加目录</button></section>
+    <section id="p-panel-roles" role="tabpanel" aria-labelledby="p-tab-roles" hidden>
+      <div class="project-roles-heading"><h3>项目成员</h3><button type="button" id="p-manage-roles" aria-expanded="false" aria-controls="p-role-picker">${icon('plus')}添加或移除角色</button></div>
+      <div id="p-role-picker" hidden></div>
+      <div class="project-roles-layout"><div id="p-role-list" aria-label="项目成员分工"></div><div id="p-role-duty" hidden></div></div>
+    </section>
+    <section id="p-panel-collaboration" role="tabpanel" aria-labelledby="p-tab-collaboration" hidden>
+      <h3>AI 邀请</h3><div id="p-ai-invites"></div>
+      <div class="project-guest-setting"><label class="project-mention-setting"><input type="checkbox" id="p-guest-mentions" aria-describedby="project-mention-hint" ${p?.allowGuestMentions!==false?'checked':''}>用户可点名未入群的项目角色</label><p id="project-mention-hint" class="hint">被点名的角色只参与这次任务。</p></div>
+    </section>`, async () => {
+    const result = await api['project-save']({ id: p?.id, name: $('p-name').value,
+      allowGuestMentions: $('p-guest-mentions').checked, aiInvites: readPolicy(), roleDuties: duties,
+      directories: [...$('directory-rows').querySelectorAll('.directory-row')].map(row => ({ locationId: row.querySelector('select').value, path: row.querySelector('input').value })), roleIds: selected });
     state = await api.snapshot();
     projectId = result.id; if (chat()?.projectId !== result.id) chatId = chats()[0]?.id; renderSidebar(); activateChat();
   });
+  $('dialog').classList.add('project-settings-dialog');
+  function showTab(active, focus = false) {
+    for (const [id] of tabs) {
+      const tab = $('p-tab-' + id);
+      tab.setAttribute('aria-selected', String(id === active));
+      tab.tabIndex = id === active ? 0 : -1;
+      $('p-panel-' + id).hidden = id !== active;
+      if (focus && id === active) tab.focus();
+    }
+  }
+  tabs.forEach(([id], index) => {
+    const tab = $('p-tab-' + id);
+    tab.onclick = () => showTab(id);
+    tab.onkeydown = event => {
+      const next = {ArrowLeft:(index+tabs.length-1)%tabs.length, ArrowRight:(index+1)%tabs.length, Home:0, End:tabs.length-1}[event.key];
+      if (next === undefined) return;
+      event.preventDefault();
+      showTab(tabs[next][0], true);
+    };
+  });
+  showTab('general');
+  $('p-panel-general').addEventListener('invalid', () => showTab('general'), true);
+  const readPolicy = window.deskCollaborationUI.policyEditor($('p-ai-invites'), 'project', state.settings, p);
+  const roster = $('p-role-list'), inspector = $('p-role-duty');
+  function renderRoleList() {
+    roster.innerHTML = selected.map(id => {
+      const r = role(id);
+      if (!r) return '';
+      const duty = window.deskCollaboration.duty(r, {roleDuties:duties});
+      return `<button type="button" class="project-role-row" data-project-member="${esc(id)}" aria-pressed="${id===focused}">${avatar(r)}<span><strong>${esc(r.name)}${r.enabled===false?' <small>已禁用</small>':''}</strong><span class="project-role-summary">${esc(duty.value || '未设置分工')}</span><small>${duty.source==='project'?'项目分工':'继承自全局'}</small></span></button>`;
+    }).join('') || '<p class="hint">还没有项目成员。添加角色后即可设置分工。</p>';
+    for (const row of roster.querySelectorAll('button')) row.onclick = () => {
+      focused = row.dataset.projectMember;
+      renderRoleList(); renderInspector();
+      [...roster.querySelectorAll('button')].find(button => button.dataset.projectMember === focused)?.focus();
+    };
+  }
+  function renderInspector() {
+    const r = focused && role(focused);
+    inspector.hidden = !r;
+    if (!r) return;
+    inspector.innerHTML = `<h3>${esc(r.name)}的分工</h3><div></div>`;
+    window.deskCollaborationUI.dutyEditor(inspector.lastElementChild, {
+      scope:'project', role:r, parent:window.deskCollaboration.duty(r), value:duties[r.id],
+      onChange(value) {
+        if (value === null) delete duties[r.id]; else duties[r.id] = value;
+        renderRoleList();
+      },
+    });
+  }
+  window.createRolePicker($('p-role-picker'), {roles:inviteRoles, selected, projectRoleIds:selected,
+    locationName:id=>locationOf(id)?.name, selectionHint:'选择要加入项目的角色。', inputName:'project-role', onChange(ids) {
+      selected = ids;
+      if (!selected.includes(focused)) focused = selected[0];
+      renderRoleList(); renderInspector();
+    }});
+  $('p-manage-roles').onclick = () => {
+    const picker = $('p-role-picker');
+    picker.hidden = !picker.hidden;
+    $('p-manage-roles').setAttribute('aria-expanded', String(!picker.hidden));
+    if (!picker.hidden) picker.querySelector('input[type=search]').focus();
+  };
   $('directory-add').onclick = () => { $('directory-rows').insertAdjacentHTML('beforeend', directoryRows([{ locationId: 'local', path: '' }])); bindDirectoryButtons(); }; bindDirectoryButtons();
   if (p) {
     const manual = state.settings.projectOrder === 'manual';
-    $('dialog-body').insertAdjacentHTML('beforeend',`<div class="tool-actions" ${manual?'':'hidden'}><button type="button" id="project-up" class="quiet">${icon('arrow-up')}上移项目</button><button type="button" id="project-down" class="quiet">${icon('arrow-down')}下移项目</button></div><section class="destructive-settings"><h3>危险操作</h3>
+    $('p-panel-general').insertAdjacentHTML('beforeend',`<div class="tool-actions" ${manual?'':'hidden'}><button type="button" id="project-up" class="quiet">${icon('arrow-up')}上移项目</button><button type="button" id="project-down" class="quiet">${icon('arrow-down')}下移项目</button></div><section class="destructive-settings"><h3>危险操作</h3>
       ${destructiveSetting('project-delete','删除项目并归档','项目和聊天将移出列表并存入本机归档。工作目录和磁盘文件会保留。')}</section>`);
     $('project-up').onclick = () => action(async () => { await api['project-move'](p.id, -1); toast('项目顺序已更新'); });
     $('project-down').onclick = () => action(async () => { await api['project-move'](p.id, 1); toast('项目顺序已更新'); });
@@ -1328,7 +1415,8 @@ function openPriorityRule(rule) {
     feedback.hidden = true;
     try {
       state.workflowPriorities = await api['workflow-priority-save'](rule?.id, value);
-      refreshPriorityView?.();
+      if (page === 'locations') renderLocationTunnelStatus();
+  refreshPriorityView?.();
       toast(value ? '优先级规则已保存' : '优先级规则已删除');
       return true;
     } catch (error) {
@@ -1781,7 +1869,7 @@ function openChat(c, preferredRole, onCreated) {
   dialog(`<h2>${c ? '对话设置' : '新建对话'}</h2><label>对话名称<input id="c-name" value="${esc(c?.name || '')}" placeholder="可留空，使用角色名或项目讨论组"></label><div class="role-picker-heading"><h3>选择参与角色</h3><span class="hint">选一位单聊，选多位群聊</span></div><div id="chat-role-picker"></div>`, async () => {
     const selected = orderPicker.selected();
     const defaults = selected.filter(id => defaultReplies.has(id));
-    const value = { id: c?.id, projectId: targetProjectId, name: $('c-name').value, roleIds: selected, defaultReplyRoleIds: defaults,moderatorRoleId:$('c-moderator').value,moderatorCompression:$('c-moderator-compression').checked };
+    const value = { id: c?.id, projectId: targetProjectId, name: $('c-name').value, roleIds: selected, defaultReplyRoleIds: defaults,moderatorRoleId:$('c-moderator').value,moderatorCompression:$('c-moderator-compression').checked,aiInvites:readPolicy() };
     if (c) await api['chat-save'](value);
     else {
       const result = await api['chat-add'](value);
@@ -1814,8 +1902,10 @@ function openChat(c, preferredRole, onCreated) {
     };
   }
   $('chat-speaking-settings').insertAdjacentHTML('afterend','<section id="chat-moderator-settings" class="moderator-settings"><h3>群聊主持人</h3><label>主持角色<select id="c-moderator" aria-label="群聊主持人"></select></label><label class="moderator-checkbox"><input type="checkbox" id="c-moderator-compression" '+(c?.moderatorCompression===false?'':'checked')+'>长历史自动压缩，保留原始记录</label><p class="hint">负责接力群聊的长历史压缩和结束判断，使用本对话中的模型设置。</p><p class="hint">每次任务最多压缩 2 次；压缩和结束判断均消耗模型额度。</p></section>');
+  $('chat-moderator-settings').insertAdjacentHTML('afterend','<section class="setting-card" id="c-ai-invites" hidden><h3>AI 邀请</h3><div></div></section>');
+  const readPolicy = window.deskCollaborationUI.policyEditor($('c-ai-invites').lastElementChild, 'chat', state.settings, project(), c);
   let moderatorConfigured=false;
-  const refreshModerator=ids=>{refreshDefaults(ids);const selected=moderatorConfigured?$('c-moderator').value:c?.moderatorRoleId||'';moderatorConfigured=true;const eligible=ids.filter(id=>!usesExternalConversation(role(id)?.engine));$('c-moderator').innerHTML=options([['','不指定（各角色共同判断）'],...eligible.map(id=>[id,(role(id)?.name||id)+(roleEnabled(id)?'':'（已禁用）')])],eligible.includes(selected)?selected:'');$('chat-moderator-settings').hidden=ids.length<2||!eligible.length;$('c-moderator-compression').disabled=!$('c-moderator').value;};
+  const refreshModerator=ids=>{refreshDefaults(ids);const selected=moderatorConfigured?$('c-moderator').value:c?.moderatorRoleId||'';moderatorConfigured=true;const eligible=ids.filter(id=>!usesExternalConversation(role(id)?.engine));$('c-moderator').innerHTML=options([['','不指定（各角色共同判断）'],...eligible.map(id=>[id,(role(id)?.name||id)+(roleEnabled(id)?'':'（已禁用）')])],eligible.includes(selected)?selected:'');$('chat-moderator-settings').hidden=ids.length<2||!eligible.length;$('c-ai-invites').hidden=ids.length<2||Boolean(c?.workflow);$('c-moderator-compression').disabled=!$('c-moderator').value;};
   $('c-moderator').onchange=()=>{$('c-moderator-compression').disabled=!$('c-moderator').value;};
   picker = window.createRolePicker($('chat-role-picker'), { roles: selectableRoles, selected: c?.roleIds || (roleEnabled(preferredRole) ? [preferredRole] : []), projectRoleIds: project().roleIds, locationName: id => locationOf(id)?.name, onChange: ids => { $('dialog-submit').disabled = ids.length === 0;const order=orderPicker.selected().filter(id=>ids.includes(id));for(const id of ids)if(!order.includes(id))order.push(id);orderPicker.set(order);$('chat-speaking-settings').hidden=ids.length<2;refreshModerator(order); } });
   if (c) {
@@ -1845,6 +1935,8 @@ function editRole(r) {
   personaFields.append($('r-persona').closest('label'),$('r-examples').closest('label'),$('r-description').closest('label'));
   personaSection.querySelector('.role-persona-content').append($('editor-view').querySelector('.role-preview'));
   $('role-form').insertBefore(personaSection,$('role-form').querySelector('.form-actions'));
+  $('avatar-picker').closest('.role-identity').insertAdjacentHTML('afterend','<div id="r-default-duty"></div>');
+  const readDefaultDuty = window.deskCollaborationUI.dutyEditor($('r-default-duty'), {scope:'global', role:value, value:value.defaultDuty});
   $('role-try').type='button';
   $('r-provider').closest('label').insertAdjacentHTML('afterend', `<label id="r-login-source-field">Codex 登录来源<select id="r-login-source">${options([['isolated','独立登录（此角色专用）'],['desktop','复用桌面版 Codex 登录']],value.codexLoginSource || 'isolated')}</select><small class="hint" id="r-login-source-hint"></small></label>`);
   $('r-login-source-field').insertAdjacentHTML('afterend','<div id="r-desktop-tools-field" class="wide"><div class="desktop-tool-inheritance"><strong id="r-desktop-tools-status"></strong><button type="button" id="r-desktop-tools-toggle" aria-describedby="r-desktop-tools-status"></button></div><input type="checkbox" id="r-desktop-tools" '+(value.codexDesktopTools===false?'':'checked')+' hidden><small class="hint">继承桌面版已启用的 MCP 和插件，适用于发言和主持人。关闭后仅使用本工具提供的工具。</small></div>');
@@ -2040,7 +2132,7 @@ function editRole(r) {
     const effort = useSlack() || isCursor() ? '' : $('r-effort').value;
     assertEffort(editorOffering(),effort);
     const slack = useSlack() ? {slackChannel:$('r-slack-channel').value, slackToken:$('r-slack-token').value} : {};
-    const next = await api['role-save']({ ...catalogDraft(), ...slack, name: $('r-name').value, avatar: selectedAvatar, avatarId: selectedAvatarId, persona: $('r-persona').value, examples: $('r-examples').value, model: picker.value(), effort, description: $('r-description').value, permission: $('r-permission').value, codexDesktopTools:$('r-desktop-tools').checked, allowLocationTools: $('r-location-tools').checked });
+    const next = await api['role-save']({ ...catalogDraft(), ...slack, name: $('r-name').value, avatar: selectedAvatar, avatarId: selectedAvatarId, persona: $('r-persona').value, examples: $('r-examples').value, defaultDuty:readDefaultDuty(), model: picker.value(), effort, description: $('r-description').value, permission: $('r-permission').value, codexDesktopTools:$('r-desktop-tools').checked, allowLocationTools: $('r-location-tools').checked });
     $('r-slack-token').value='';
     savedRoleId = next.id;
     roleId = next.id;
@@ -2098,20 +2190,92 @@ function editRole(r) {
     $('role-delete').onclick = () => action(async () => { if (confirm('删除这个角色？聊天记录会保留。')) { await api['role-delete'](r.id); state=await api.snapshot();editRole(state.roles[0]); } });
   }
 }
+function renderLocationTunnelStatus(id = locationId) {
+  const statusEl = $('location-tunnel-status');
+  const startBtn = $('location-mcp-start');
+  const stopBtn = $('location-mcp-stop');
+  if (!statusEl || !id || id === 'local') return;
+  const local = state.mcpTunnels?.localMcp || {};
+  const tunnel = state.mcpTunnels?.tunnels?.[id] || {};
+  const localLabel = local.state === 'ready' ? `就绪（127.0.0.1:${local.localPort || 8111}）` : local.state === 'starting' ? '启动中…' : '未启动';
+  const tunnelLabel = tunnel.state === 'ready' ? `已打通（服务器 127.0.0.1:${tunnel.remotePort}）` : tunnel.state === 'connecting' ? '正在打通隧道…' : tunnel.state === 'error' ? '失败' : '未连接';
+  const syncLabel = tunnel.syncedRemoteEnv && tunnel.remoteEnvPath ? ` · 已同步 ${tunnel.remoteEnvPath}` : '';
+  const errLabel = tunnel.error ? `\n错误：${tunnel.error}` : '';
+  const requests = tunnel.directoryRequests || [];
+  const approved = requests.filter(request => request.status === 'approved');
+  const details = approved.map(request => `${request.directory}（${request.access === 'read-write' ? '读写' : '只读'}）`);
+  if (requests.some(request => request.status === 'pending')) details.push('有目录权限申请等待确认');
+  const directoryLabel = details.length ? `\n远程 MCP 目录权限：${details.join('；')}` : '';
+  statusEl.textContent = `本机 Windows-MCP：${localLabel} · 反向隧道：${tunnelLabel}${syncLabel}${errLabel}${directoryLabel}`;
+  const revokeBtn = $('location-mcp-revoke-directories');
+  if (revokeBtn) revokeBtn.hidden = !requests.length;
+  if (startBtn) {
+    startBtn.textContent = tunnel.state === 'ready' ? '重新验证／重启 MCP 隧道' : tunnel.state === 'connecting' ? '正在配置并打通隧道…' : '一键配置并启动 MCP 隧道';
+    startBtn.disabled = tunnel.state === 'connecting';
+  }
+  if (stopBtn) stopBtn.hidden = tunnel.state !== 'ready';
+}
 function editLocation(l) {
   locationId = l?.id; renderList(); const local = l?.id === 'local'; const managed = l?.managed;
-  $('editor-view').innerHTML = `<form class="editor simple-form" id="location-form"><header><h1>${local ? '本机' : l ? '编辑位置' : '添加位置'}</h1><button type="submit" class="primary">保存位置</button></header><label class="field"><span>位置名称</span><input id="l-name" value="${esc(l?.name || '')}" ${local ? 'disabled' : 'required'} placeholder="例如：开发服务器"></label><div class="setting-card"><h3>1. 连接方式</h3><div class="form-grid"><label>连接方式<select disabled><option>${local ? '本地（内置）' : 'SSH'}</option></select></label><label>操作系统<select id="l-os" ${local || managed ? 'disabled' : ''}>${options([['linux','Linux'],['windows','Windows']],l?.os || 'linux')}</select></label>${!local ? `<label>主机地址<input id="l-host" value="${esc(l?.host || '')}" required ${managed ? 'disabled' : ''}></label><label>端口<input id="l-port" type="number" value="${l?.port || 22}" min="1" max="65535" required ${managed ? 'disabled' : ''}></label><label>SSH 用户<input id="l-user" value="${esc(l?.username || '')}" required ${managed ? 'disabled' : ''}></label><label>私钥口令（可选）<input id="l-passphrase" type="password" autocomplete="new-password" placeholder="留空保持不变"></label><label class="wide">私钥路径（留空使用 SSH Agent）<input id="l-key" value="${esc(l?.keyPath || '')}" ${managed ? 'disabled' : ''}></label>` : ''}</div>${managed ? '<p style="margin-top:15px">地址和密钥在原界面修改。共享 MCP／隧道时，请保持提供服务的界面运行。</p>' : ''}</div><div class="setting-card"><h3>2. Agent 操控方式</h3><p>SSH 用于命令、文件和终端；Windows-MCP 用于桌面操作。</p><label class="field"><span>操控方式</span><select id="l-control" ${local ? 'disabled' : ''}>${options(local ? [['ssh','本地命令 / 终端']] : [['ssh','SSH 命令与文件'],['windows-mcp','Windows-MCP 桌面操作']],l?.control || 'ssh')}</select></label>${!local ? `<label class="field"><span>Windows-MCP 地址（选择 MCP 时必填）</span><input id="l-mcp" value="${esc(l?.mcpUrl || '')}" placeholder="http://127.0.0.1:8111/mcp"></label><label class="field"><span>MCP 访问令牌</span><input id="l-token" type="password" autocomplete="new-password" placeholder="留空保持已保存值"></label>` : ''}<p>MCP 地址须能从 Agent 所在机器访问。</p></div><div class="setting-card"><h3>3. 模型服务代理</h3><p>角色默认使用此代理，可单独选择直连。</p><label class="field"><span>默认代理方式</span><select id="l-proxy-mode">${options([['system',local ? '跟随 Windows 系统代理' : '继承服务器代理环境变量'],['direct','不使用代理（直连）'],['custom','自定义 HTTP / HTTPS 代理']],l?.proxy?.mode || 'system')}</select></label><label class="field" id="l-proxy-address"><span>代理地址</span><input id="l-proxy-url" value="${esc(l?.proxy?.url || '')}" placeholder="http://127.0.0.1:7890"></label><p>${local ? '127.0.0.1 指当前电脑。' : '127.0.0.1 指服务器自身。'}支持 HTTP／HTTPS，无账号密码认证。</p></div><div id="location-test-result" class="hint"></div><div class="form-actions"><button type="button" id="location-test">${icon('refresh')}测试连接</button></div>${l&&!local&&!managed?`<section class="destructive-settings"><h3>危险操作</h3>${destructiveSetting('location-delete','删除位置','此位置将从列表移除。正在使用它的角色或项目需要先改用其他位置。')}</section>`:''}</form>`;
+  const tunnelCfg = l?.mcpTunnel || { enabled: false, remotePort: 18111, autoStart: false, syncRemoteEnv: true };
+  $('editor-view').innerHTML = `<form class="editor simple-form" id="location-form"><header><h1>${local ? '本机' : l ? '编辑位置' : '添加位置'}</h1><button type="submit" class="primary">保存位置</button></header><label class="field"><span>位置名称</span><input id="l-name" value="${esc(l?.name || '')}" ${local ? 'disabled' : 'required'} placeholder="例如：开发服务器"></label><div class="setting-card"><h3>1. 连接方式</h3><div class="form-grid"><label>连接方式<select disabled><option>${local ? '本地（内置）' : 'SSH'}</option></select></label><label>操作系统<select id="l-os" ${local || managed ? 'disabled' : ''}>${options([['linux','Linux'],['windows','Windows']],l?.os || 'linux')}</select></label>${!local ? `<label>主机地址<input id="l-host" value="${esc(l?.host || '')}" required ${managed ? 'disabled' : ''}></label><label>端口<input id="l-port" type="number" value="${l?.port || 22}" min="1" max="65535" required ${managed ? 'disabled' : ''}></label><label>SSH 用户<input id="l-user" value="${esc(l?.username || '')}" required ${managed ? 'disabled' : ''}></label><label>私钥口令（可选）<input id="l-passphrase" type="password" autocomplete="new-password" placeholder="留空保持不变"></label><label class="wide">私钥路径（留空使用 SSH Agent）<input id="l-key" value="${esc(l?.keyPath || '')}" ${managed ? 'disabled' : ''}></label>` : ''}</div>${managed ? '<p style="margin-top:15px">地址和密钥在原界面修改。共享 MCP／隧道时，请保持提供服务的界面运行。</p>' : ''}</div><div class="setting-card"><h3>2. Agent 操控方式与 MCP 隧道</h3><p>SSH 用于命令、文件和终端；Windows-MCP 用于从远端操作本机 Windows 桌面。</p><label class="field"><span>操控方式</span><select id="l-control" ${local ? 'disabled' : ''}>${options(local ? [['ssh','本地命令 / 终端']] : [['ssh','SSH 命令与文件'],['windows-mcp','外部 Windows-MCP 端点']],l?.control || 'ssh')}</select></label>${!local ? `<div id="l-mcp-fields"><label class="field"><span>Windows-MCP 地址（选择外部端点时必填）</span><input id="l-mcp" value="${esc(l?.mcpUrl || '')}" placeholder="http://127.0.0.1:8111/mcp"></label><label class="field"><span>MCP 访问令牌</span><input id="l-token" type="password" autocomplete="new-password" placeholder="留空保持已保存值"></label><p>MCP 地址须能从 Agent 所在机器访问。</p></div><div id="l-tunnel-fields" class="tunnel-section"><p class="hint">可一键在本机启动 Windows-MCP，并通过 SSH 反向隧道映射到这台 Linux 服务器（不限于 Relay VPS）。</p><label class="field"><span>服务器反向隧道端口（127.0.0.1）</span><input id="l-tunnel-port" type="number" min="1024" max="65535" value="${esc(tunnelCfg.remotePort || 18111)}" ${managed ? 'disabled' : ''}></label><div class="checks"><label><input id="l-tunnel-enabled" type="checkbox" ${managed || tunnelCfg.enabled ? 'checked' : ''} ${managed ? 'disabled' : ''}>允许该位置上的 Agent 自动使用此 MCP 隧道</label><label><input id="l-tunnel-auto" type="checkbox" ${tunnelCfg.autoStart ? 'checked' : ''}>启动工作台时自动连接并开启此隧道</label><label><input id="l-tunnel-sync" type="checkbox" ${managed || tunnelCfg.syncRemoteEnv !== false ? 'checked' : ''} ${managed ? 'disabled' : ''}>同步 ~/.windows-mcp/tunnel.env 到服务器（供网关或脚本读取）</label></div><div id="location-tunnel-status" class="hint tunnel-status" role="status"></div><div class="tunnel-actions"><button type="button" id="location-mcp-start">一键配置并启动 MCP 隧道</button><button type="button" id="location-mcp-revoke-directories" class="quiet" hidden>收回目录权限</button><button type="button" id="location-mcp-stop" class="quiet" hidden>停止 MCP 隧道</button></div></div>` : ''}</div><div class="setting-card"><h3>3. 模型服务代理</h3><p>角色默认使用此代理，可单独选择直连。</p><label class="field"><span>默认代理方式</span><select id="l-proxy-mode">${options([['system',local ? '跟随 Windows 系统代理' : '继承服务器代理环境变量'],['direct','不使用代理（直连）'],['custom','自定义 HTTP / HTTPS 代理']],l?.proxy?.mode || 'system')}</select></label><label class="field" id="l-proxy-address"><span>代理地址</span><input id="l-proxy-url" value="${esc(l?.proxy?.url || '')}" placeholder="http://127.0.0.1:7890"></label><p>${local ? '127.0.0.1 指当前电脑。' : '127.0.0.1 指服务器自身。'}支持 HTTP／HTTPS，无账号密码认证。</p></div><div id="location-test-result" class="hint"></div><div class="form-actions"><button type="button" id="location-test">${icon('refresh')}测试连接</button></div>${l&&!local&&!managed?`<section class="destructive-settings"><h3>危险操作</h3>${destructiveSetting('location-delete','删除位置','此位置将从列表移除。正在使用它的角色或项目需要先改用其他位置。')}</section>`:''}</form>`;
   const proxyValue = () => ({ mode: $('l-proxy-mode').value, url: $('l-proxy-url').value });
   $('l-proxy-mode').onchange = () => { $('l-proxy-address').hidden = $('l-proxy-mode').value !== 'custom'; }; $('l-proxy-mode').onchange();
+  if (!local) {
+    const syncControlFields = () => {
+      $('l-mcp-fields').hidden = $('l-control').value !== 'windows-mcp';
+      $('l-tunnel-fields').hidden = $('l-os').value !== 'linux';
+    };
+    $('l-control').onchange = syncControlFields;
+    $('l-os').onchange = syncControlFields;
+    syncControlFields();
+    renderLocationTunnelStatus(l?.id);
+  }
   const locationValue = () => ({
     id: l?.id, name: $('l-name').value, host: $('l-host').value.trim(), port: Number($('l-port').value),
     username: $('l-user').value.trim(), keyPath: $('l-key').value, passphrase: $('l-passphrase').value,
     os: $('l-os').value, control: $('l-control').value, mcpUrl: $('l-mcp').value,
-    mcpToken: $('l-token').value, proxy: proxyValue(),
+    mcpToken: $('l-token').value, proxy: proxyValue(), ...($('l-os').value === 'linux' ? { mcpTunnel: { enabled: $('l-tunnel-enabled').checked, remotePort: Number($('l-tunnel-port').value || 18111), autoStart: $('l-tunnel-auto').checked, syncRemoteEnv: $('l-tunnel-sync').checked } } : {}),
   });
   const save = async () => local ? api['location-proxy-save'](l.id, proxyValue()) : api['location-save'](locationValue());
   $('location-form').onsubmit = e => { e.preventDefault(); action(async () => { const next = await save(); toast('位置已保存'); editLocation(locationOf(next.id)); }); };
   $('location-test').onclick = () => action(async () => { $('location-test-result').textContent = '正在连接…'; const next = await save(); const result = await api['location-test'](next.id); $('location-test-result').textContent = result; });
+  if ($('location-mcp-start')) {
+    $('location-mcp-start').onclick = () => {
+      const form = $('location-form');
+      if (!form.reportValidity()) return;
+      action(async () => {
+        $('location-tunnel-status').textContent = '正在连接 SSH、启动本机 Windows-MCP 并打通反向隧道…';
+        $('location-mcp-start').disabled = true;
+        try {
+          const result = await api['location-mcp-start'](managed ? l.id : locationValue());
+          state = await api.snapshot();
+          toast('MCP 反向隧道已打通' + (result.status?.remotePort ? `（服务器 127.0.0.1:${result.status.remotePort}）` : ''));
+          editLocation(locationOf(result.location.id));
+        } finally {
+          if ($('location-mcp-start')) renderLocationTunnelStatus(l?.id);
+        }
+      });
+    };
+  }
+  if ($('location-mcp-stop')) {
+    $('location-mcp-stop').onclick = () => action(async () => {
+      if (!l?.id) return;
+      await api['location-mcp-stop'](l.id);
+      state = await api.snapshot();
+      renderLocationTunnelStatus(l.id);
+      toast('MCP 反向隧道已停止');
+    });
+  }
+  if ($('location-mcp-revoke-directories')) {
+    $('location-mcp-revoke-directories').onclick = () => action(async () => {
+      if (!l?.id) return;
+      await api['location-mcp-revoke-directories'](l.id);
+      state = await api.snapshot();
+      renderLocationTunnelStatus(l.id);
+      toast('已收回远程 MCP 目录权限');
+    });
+  }
   if (!local && !managed) bindSshKeySetup(locationValue);
   if ($('location-delete')) $('location-delete').onclick = () => action(async () => { if (confirm('删除这个位置？')) { await api['location-delete'](l.id); editLocation(state.locations[0]); } });
 }
@@ -2232,7 +2396,9 @@ function renderSettings() {
   ];
   const swatches = themeList.map(theme => `<button type="button" class="theme-swatch" data-theme-choice="${theme.id}" aria-pressed="${state.settings.theme === theme.id}"><span class="theme-swatch-preview" aria-hidden="true">${theme.swatches.map(color => `<span style="background:${color}"></span>`).join('')}</span><span class="theme-swatch-text"><strong>${esc(theme.label)}</strong><small>${esc(theme.description)}</small></span></button>`).join('');
   $('editor-view').innerHTML = `<form class="editor simple-form" id="settings-form"><header><h1>通用设置</h1><button class="primary" type="submit">保存设置</button></header><div class="setting-card"><h3>运行与唤醒</h3><div class="checks"><label><input type="checkbox" id="s-awake" ${state.settings.keepAwake ? 'checked' : ''}>保持电脑唤醒（前台和后台）</label></div><p>防止自动休眠和屏保；手动锁屏仍由 Windows 管理。</p><label class="field"><span>同时运行的讨论上限</span><input id="s-limit" type="number" min="1" max="8" value="${state.settings.maxJobs}"></label><p>群聊中的角色依次发言。</p></div><div class="setting-card"><h3>外观</h3><label class="field"><span>界面主题</span><select id="s-theme">${options(themeList.map(theme => [theme.id, theme.label]), state.settings.theme)}</select></label><div class="theme-swatches" role="group" aria-label="主题色预设">${swatches}</div><p>切换后立即生效，提供护眼绿、暖纸米、雾霭蓝与低蓝光深色主题。</p></div><div class="form-actions"><span class="hint">设置保存后即时生效</span></div></form>`;
-  $('settings-form').onsubmit = e => { e.preventDefault(); action(async () => { await api.settings({ keepAwake: $('s-awake').checked, maxJobs: Number($('s-limit').value), theme: $('s-theme').value }); toast('设置已保存'); }); };
+  $('settings-form').querySelector('.form-actions').insertAdjacentHTML('beforebegin','<section class="setting-card"><h3>AI 邀请</h3><div id="s-ai-invites"></div></section>');
+  const readPolicy = window.deskCollaborationUI.policyEditor($('s-ai-invites'), 'global', state.settings);
+  $('settings-form').onsubmit = e => { e.preventDefault(); action(async () => { await api.settings({ keepAwake: $('s-awake').checked, maxJobs: Number($('s-limit').value), theme: $('s-theme').value, aiInvites:readPolicy() }); toast('设置已保存'); }); };
   const applyThemeChoice = chosen => {
     $('s-theme').value = chosen;
     for (const button of $('editor-view').querySelectorAll('[data-theme-choice]')) {
@@ -2857,6 +3023,7 @@ api.on('state', value => {
   const previousChat = chatId;
   if (!chat()) chatId = chats()[0]?.id;
   renderList();
+  if (page === 'locations') renderLocationTunnelStatus();
   refreshPriorityView?.();
   if (page === 'projects') {
     renderProjectOptions();

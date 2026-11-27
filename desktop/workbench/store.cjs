@@ -7,6 +7,7 @@ const {isVendor,supportsRemote,customSettings}=require('./vendor-agents.cjs');
 const {engine:geminiWebEngine}=require('./gemini-web.cjs');
 const {engine:slackChatEngine, conversationId:slackConversationId}=require('./slack-chat.cjs');
 const workflowPriorities = require('./workflow-ratings.js');
+const collaboration = require('./collaboration.js');
 const themes = require('./themes.js');
 const { WorkspaceDatabase, messageView } = require('./workspace-db.cjs');
 const { messageText } = require('./attachment-text.js');
@@ -17,6 +18,20 @@ function atomic(file, value) {
   const temporary = file + '.' + id();
   try { fs.writeFileSync(temporary, JSON.stringify(value, null, 2), { mode: 0o600 }); fs.renameSync(temporary, file); }
   finally { try { fs.unlinkSync(temporary); } catch {} }
+}
+function normalizeMcpTunnel(value, os, previous) {
+  if (os !== 'linux') return undefined;
+  const raw = value && typeof value === 'object' ? value : previous && typeof previous === 'object' ? previous : null;
+  const remotePort = raw?.remotePort === undefined || raw?.remotePort === '' ? 18111 : Number(raw.remotePort);
+  if (!Number.isInteger(remotePort) || remotePort < 1024 || remotePort > 65535) {
+    throw new Error('MCP 反向隧道端口必须是 1024 到 65535 之间的整数。');
+  }
+  return {
+    enabled: Boolean(raw?.enabled),
+    remotePort,
+    autoStart: Boolean(raw?.autoStart),
+    syncRemoteEnv: raw?.syncRemoteEnv !== false,
+  };
 }
 function text(value, limit = 200) { return typeof value === 'string' ? value.trim().slice(0, limit) : ''; }
 function searchChatMessages(chats, query, offset, includeChat = false) {
@@ -245,6 +260,7 @@ class Store {
     }
     next.allowLocationTools = value.engine !== 'zcode' && value.allowLocationTools !== false;
     if (value.workflowRatings !== undefined) next.workflowRatings = require('./workflow-ratings.js').normalize(value.workflowRatings);
+    if (value.defaultDuty !== undefined) next.defaultDuty = collaboration.normalizeDuty(value.defaultDuty);
     if (isGeminiWeb || isSlackChat) Object.assign(next, {model:'', effort:'', executable:'', baseUrl:'', permission:'read-only', allowLocationTools:false});
     if (isSlackChat) next.slackChannel = slackConversationId(value.slackChannel ?? previous.slackChannel);
     else delete next.slackChannel;
@@ -284,7 +300,12 @@ class Store {
       const u = new URL(next.mcpUrl); if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password || u.search || u.hash) throw new Error('Enter the Windows-MCP HTTP endpoint without embedded credentials.');
     }
     // A managed location is bound to the original .env, never silently retarget it.
-    if (previous.managed && ['host', 'username', 'port', 'keyPath'].some(k => next[k] !== previous[k])) throw new Error('Edit the original Relay server connection from the classic interface. Add a new location for another server.');
+    if (previous.managed && ['host', 'username', 'port', 'keyPath'].some(key => next[key] !== previous[key])) throw new Error('Edit the original Relay server connection from the classic interface. Add a new location for another server.');
+    if (value.mcpTunnel !== undefined || previous.mcpTunnel !== undefined) {
+      const tunnel = normalizeMcpTunnel(value.mcpTunnel, next.os, previous.mcpTunnel);
+      if (tunnel) next.mcpTunnel = tunnel;
+      else delete next.mcpTunnel;
+    }
     next.proxy = proxySettings(value.proxy ?? previous.proxy);
     return next;
   }
@@ -320,6 +341,10 @@ class Store {
     const next = { ...previous, name, directories,
       allowGuestMentions: value.allowGuestMentions ?? previous.allowGuestMentions ?? true,
       roleIds: [...new Set(value.roleIds || [])].filter(r => this.state.roles.some(x => x.id === r)) };
+    if (value.aiInvites !== undefined) next.aiInvites = collaboration.normalizePolicy(value.aiInvites);
+    if (value.roleDuties !== undefined || next.roleDuties) {
+      next.roleDuties = collaboration.normalizeDuties(value.roleDuties ?? next.roleDuties, next.roleIds);
+    }
     const index = this.state.projects.findIndex(p => p.id === next.id);
     if (index < 0) this.state.projects.push(next); else this.state.projects[index] = next;
     this.save(); return next;
@@ -331,6 +356,7 @@ class Store {
     const chat = { id: id(), projectId: project.id, name: text(value.name, 100) || (roleIds.length > 1 ? '项目讨论组' : this.get('roles', roleIds[0]).name), roleIds, ...require('./moderator.cjs').settings(value,null,roleIds), messages: [], draft: '', unread: false, updatedAt: Date.now() };
     chat.defaultReplyRoleIds = defaultReplyRoleIds;
     Object.assign(chat, seed);
+    if (value.aiInvites !== undefined) chat.aiInvites = collaboration.normalizePolicy(value.aiInvites);
     conversations.initialize(chat, this.state.roles);
     project.roleIds = [...new Set([...project.roleIds, ...roleIds])];
     this.state.chats.unshift(chat); this.save(); return chat;
@@ -346,15 +372,18 @@ class Store {
     const roleIds = this.chatRoles(value.roleIds, chat.roleIds);
     const defaultReplyRoleIds = conversations.defaultReplies(value.defaultReplyRoleIds, roleIds, chat.defaultReplyRoleIds);
     const moderation=require('./moderator.cjs').settings(value,chat,roleIds);
+    const aiInvites = value.aiInvites === undefined ? chat.aiInvites : collaboration.normalizePolicy(value.aiInvites);
     if(moderation.moderatorRoleId!==chat.moderatorRoleId)delete chat.moderatorMemory;
     Object.assign(chat,moderation);
     chat.name = text(value.name, 100) || chat.name;
     for (const id of chat.roleIds.filter(id => !roleIds.includes(id))) {
       delete chat.rolePersonas?.[id];
       delete chat.roleVoices?.[id];
+      delete chat.roleDuties?.[id];
     }
     chat.roleIds = roleIds;
     chat.defaultReplyRoleIds = defaultReplyRoleIds;
+    if (aiInvites !== undefined) chat.aiInvites = aiInvites;
     conversations.initialize(chat, this.state.roles);
     project.roleIds = [...new Set([...project.roleIds, ...roleIds])];
     this.save(); return chat;
@@ -367,11 +396,14 @@ class Store {
     const chat = this.get('chats', chatId);
     if (!chat.roleIds.includes(roleId)) throw new Error('Choose a participant in this chat.');
     if (typeof value.model !== 'string' || value.model.length > 200 || /[\0\r\n]/.test(value.model) || typeof value.effort !== 'string' || !/^(?:[a-z][a-z0-9_-]{0,31})?$/.test(value.effort)) throw new Error('Enter a valid model and effort.');
+    const roleDuty = value.roleDuty == null ? value.roleDuty : collaboration.normalizeDuty(value.roleDuty);
     conversations.initialize(chat, this.state.roles);
     chat.roleSettings[roleId] = { model: value.model.trim(), effort: value.effort };
     if (value.persona !== undefined) chat.rolePersonas[roleId] = conversations.copyPersona({
       persona: text(value.persona, 30000), examples: text(value.examples, 30000)
     });
+    if (roleDuty === null) delete chat.roleDuties?.[roleId];
+    else if (roleDuty !== undefined) chat.roleDuties = {...chat.roleDuties, [roleId]: roleDuty};
     this.save(); return chat;
   }
   saveChatFlow(chatId, relayReplies) {

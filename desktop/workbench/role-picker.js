@@ -1,5 +1,5 @@
 (() => {
-  function createRolePicker(container, { roles, selected = [], projectRoleIds = [], locationName, onChange }) {
+  function createRolePicker(container, { roles, selected = [], projectRoleIds = [], locationName, selectionHint = '从下方选择参与这次对话的角色', inputName, onChange }) {
     const available = new Map(roles.map(role => [role.id, role]));
     const chosen = new Set(selected.filter(id => available.has(id)));
     const members = new Set(projectRoleIds);
@@ -24,7 +24,7 @@
       container.querySelector('.role-picker-clear').disabled = chosen.size === 0;
       chips.replaceChildren();
       if (!chosen.size) {
-        const empty = document.createElement('span'); empty.className = 'hint'; empty.textContent = '从下方选择参与这次对话的角色'; chips.append(empty);
+        const empty = document.createElement('span'); empty.className = 'hint'; empty.textContent = selectionHint; chips.append(empty);
       }
       for (const id of chosen) {
         const role = available.get(id); const button = document.createElement('button');
@@ -42,6 +42,7 @@
     for (const role of orderedRoles) {
       const element = document.createElement('label'); element.className = 'role-option';
       const input = document.createElement('input'); input.type = 'checkbox'; input.value = role.id; input.setAttribute('aria-label', role.name);
+      if (inputName) input.name = inputName;
       input.onchange = () => { input.checked ? chosen.add(role.id) : chosen.delete(role.id); refresh(); };
       const info = document.createElement('span'); info.className = 'role-option-info';
       const name = document.createElement('strong'); name.textContent = role.name;

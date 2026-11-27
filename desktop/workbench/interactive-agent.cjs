@@ -134,6 +134,10 @@ class InteractiveAgents {
         const remote = await this.locations.runner(location.id, directory.path);
         if (entry.info.state === 'ended' || this.closed) throw new Error('Interactive terminal was closed during startup.');
         const mcpTargets = role.allowLocationTools === false ? [] : project.directories.map(d=>this.store.get('locations',d.locationId)).filter(l=>l.control==='windows-mcp').map(l=>({url:l.mcpUrl,token:this.vault.get('mcp:'+l.id)}));
+        if (role.allowLocationTools !== false && !location.managed && location.os === 'linux' && this.agents?.mcpTunnels) {
+          const tunnelTarget = await this.agents.mcpTunnels.ensureForAgent(location.id);
+          if (tunnelTarget) mcpTargets.push(tunnelTarget);
+        }
         if(entry.skillScope){const local=await require('./mcp-tools.cjs').createTools({...project,directories:[]},this.store,this.locations,{service:this.agents.skills,scope:entry.skillScope});if(local){try{entry.skillBridge=await require('../reverse-routes.cjs').expose(remote.client,local);}catch(error){local.close();throw error;}mcpTargets.push({url:entry.skillBridge.url,token:entry.skillBridge.token});}}
         if(entry.info.state==='ended'||this.closed){entry.skillBridge?.close();throw new Error('Interactive terminal was closed during startup.');}
         const stream = await new Promise((resolve,reject)=>remote.client.exec('python3 '+shellQuote(remote.file),(error,value)=>error?reject(error):resolve(value)));

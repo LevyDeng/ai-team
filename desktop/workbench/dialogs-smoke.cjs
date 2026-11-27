@@ -129,7 +129,7 @@ async function run({window,store,app,directory,services,js,errors}){
   assert.equal(store.get('projects',other.id).name,'Renamed project fixture');
   await js(`$('project-edit').click()`);
   assert.match(await js(`$('project-delete').textContent`),/删除项目并归档/);
-  assert.equal(await js(`$('dialog-body').lastElementChild.contains($('project-delete'))`),true);
+  assert.equal(await js(`$('p-panel-general').lastElementChild.contains($('project-delete'))`),true);
   assert.match(await js(`$('project-delete-warning').textContent`),/磁盘文件会保留/);
   assert.equal(await js(`getComputedStyle($('project-delete')).backgroundColor`),'rgb(180, 35, 50)');
   services.dialog.showMessageBox=async ({buttons,detail})=>{

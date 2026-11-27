@@ -48,6 +48,34 @@ body.tools-wide #main { display:none; } body.tools-wide #tools-panel { flex:1;wi
 .schedule-date-time { display:grid;grid-template-columns:1fr 1fr;gap:10px; }
 .schedule-date-time input { width:100%; }
 .schedule-note,.workflow-start-options { margin-top:12px; }
+.project-settings-dialog { width:780px;max-width:calc(100vw - 32px); }
+.project-settings-tabs { display:flex;gap:8px;border-bottom:1px solid var(--line);margin-bottom:20px; }
+.project-settings-tabs button { border:0;border-bottom:2px solid transparent;border-radius:6px 6px 0 0;color:var(--muted); }
+.project-settings-tabs button[aria-selected="true"] { border-bottom-color:var(--green);color:var(--green-dark);font-weight:600; }
+.project-roles-heading,.duty-source,.duty-input-footer { display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap; }
+.project-roles-heading,.project-settings-dialog #p-role-picker { margin-bottom:14px; }
+.project-roles-layout { display:grid;grid-template-columns:minmax(0, 1fr) minmax(0, 1fr);gap:16px;align-items:start; }
+.project-role-row { display:flex;width:100%;justify-content:flex-start;gap:10px;text-align:left;background:transparent;border-color:transparent;padding:8px;margin-bottom:4px; }
+.project-role-row[aria-pressed="true"] { background:var(--selected);border-color:var(--accent-border); }
+.project-role-row .avatar { width:34px;height:34px; }
+.project-role-row > span { min-width:0; }
+.project-role-row strong,.project-role-summary { display:block;overflow:hidden;text-overflow:ellipsis; }
+.project-role-summary,.project-role-row small { font-size:12px;color:var(--muted); }
+#p-role-duty,.chat-duty-section { padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:var(--surface); }
+#p-role-duty h3,.chat-duty-section h3 { margin-bottom:6px;font-size:15px;overflow-wrap:anywhere; }
+.chat-duty-section { margin:12px 0; }
+.duty-inherited { white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px; }
+.duty-input label { margin:0; }
+.duty-input textarea { width:100%; }
+.duty-input-footer { justify-content:flex-end;margin-top:4px; }
+.duty-templates { display:flex;gap:2px;flex:1;flex-wrap:wrap; }
+#r-default-duty { margin:0 0 20px; }
+.collaboration-fields { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px; }
+.collaboration-fields select { width:100%; }
+.collaboration-effective { color:var(--green-dark);margin:8px 0 4px; }
+.project-guest-setting { border-top:1px solid var(--line);margin-top:20px;padding-top:8px; }
+.system-message.agent-invitation { color:var(--ink);background:var(--surface);border-left:3px solid var(--green);white-space:pre-wrap;overflow-wrap:anywhere; }
+@media(max-width:580px) { .project-roles-layout,.collaboration-fields { grid-template-columns:1fr; } }
 .dialog-header { position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:16px;background:var(--canvas);padding:8px 0 12px;margin:0 0 8px; }
 .dialog-header h2 { flex:1;min-width:0;margin:0;overflow-wrap:anywhere; }
 .dialog-header button { flex:none; }
@@ -87,6 +115,9 @@ form.editor > header > button[type=submit] { margin-inline-start:auto;flex:none;
 }
 .support-code figcaption { margin-bottom:12px;font-weight:650; }
 .support-code img { display:block;max-width:100%;max-height:360px;width:auto;height:auto;margin:auto;border-radius:6px;background:#fff; }
+.tunnel-section { margin-top:14px;padding-top:14px;border-top:1px solid var(--line); }
+.tunnel-status { white-space:pre-wrap;margin:8px 0 10px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface); }
+.tunnel-actions { display:flex;gap:10px;align-items:center;flex-wrap:wrap; }
 @media (max-width:800px) {
   .support-codes { grid-template-columns:minmax(0,1fr);max-width:390px; }
 }

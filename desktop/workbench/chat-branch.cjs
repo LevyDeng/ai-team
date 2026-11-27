@@ -24,10 +24,12 @@ function branch(store, source, name) {
   const messages = summary || recent.length ? [{id:randomUUID(),at:Date.now(),kind:'assistant',status:'complete',roleName:'Branch context',branchContext:true,text:context}] : [];
   return store.createChat({projectId:source.projectId,name,roleIds,
     defaultReplyRoleIds:(source.defaultReplyRoleIds||[]).filter(id=>roleIds.includes(id)),
-    moderatorRoleId:roleIds.includes(source.moderatorRoleId)?source.moderatorRoleId:'',moderatorCompression:source.moderatorCompression
+    moderatorRoleId:roleIds.includes(source.moderatorRoleId)?source.moderatorRoleId:'',moderatorCompression:source.moderatorCompression,
+    aiInvites:source.aiInvites
   },{
     sourceChatId:source.id,messages,relayReplies:source.relayReplies,maxRounds:source.maxRounds,autoStop:source.autoStop,
     roleSettings:structuredClone(source.roleSettings||{}),
+    roleDuties:Object.fromEntries(roleIds.filter(id=>Object.hasOwn(source.roleDuties||{},id)).map(id=>[id,source.roleDuties[id]])),
     rolePersonas:structuredClone(source.rolePersonas||{})
   });
 }

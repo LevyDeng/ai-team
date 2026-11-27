@@ -8,8 +8,20 @@ const { replacePackage } = require('./managed-npm.cjs');
 const run = promisify(execFile);
 const directory = path.resolve(__dirname, '../../.runtime/workbench/cli');
 const packageName = '@openai/codex';
+function managedExecutable(root, manifest, installRoot = root) {
+  try {
+    const { executable } = JSON.parse(fs.readFileSync(path.join(root, manifest), 'utf8'));
+    const file = path.resolve(root, executable);
+    if (file.startsWith(installRoot + path.sep) && fs.statSync(file).isFile()) return file;
+  } catch {}
+  return '';
+}
 function managed() {
-  try { const value = JSON.parse(fs.readFileSync(path.join(directory,'ready.json'),'utf8')); const file = path.resolve(directory,value.executable); if (file.startsWith(directory + path.sep) && fs.existsSync(file)) return file; } catch {} return '';
+  return managedExecutable(directory, 'ready.json');
+}
+function apiDeskManaged() {
+  const root = path.resolve(process.env.API_DESK_DATA_DIR || path.join(__dirname, '../../../codex-api-desk/.local'));
+  return managedExecutable(root, 'runtime-ready.json', path.join(root, 'runtime'));
 }
 function installed() {
   if (!managed()) return '';
@@ -38,4 +50,4 @@ async function install({ request, env: installEnv = process.env, expected } = {}
     return {version:latest,executable};
   } finally { updating=false; }
 }
-module.exports={managed,installed,latest:request=>npmLatest(packageName,request),install};
+module.exports={managed,apiDeskManaged,installed,latest:request=>npmLatest(packageName,request),install};

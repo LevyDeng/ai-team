@@ -30,6 +30,7 @@ function promptFor(chat, role, project, context, summary) {
   return [
     `Your role is ${role.name}. Respond to the current request in the user's language.`,
     role.persona && `Role instructions:\n${role.persona}`,
+    require('./agent-invitations.cjs').dutyPrompt(context.teamAssignments),
     role.examples && `Style examples:\n${role.examples}`,
     context.skillInstructions && `Requested skill instructions:\n${context.skillInstructions}`,
     describeProjectDirectories(project),

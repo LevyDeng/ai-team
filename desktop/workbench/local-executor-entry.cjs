@@ -52,7 +52,7 @@ function launch(directory) {
     skills.begin(id);
     try {
       const message = await agents.run(chat.id, request.role, request.project, controller.signal, false,
-        {relayReplies:chat.relayReplies !== false, taskId:id});
+          {relayReplies:chat.relayReplies !== false, taskId:id, teamAssignments:request.teamAssignments});
       result = { status:message.status, stopConfirmed:message.stopConfirmed };
       if (controller.signal.aborted && !result.stopConfirmed) {
         save();
