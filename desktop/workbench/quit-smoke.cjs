@@ -104,6 +104,13 @@ async function run({window, store, app, services, fixture, js, mode}) {
       services.shell.openExternal = async url => { opened = url; };
       await js(`document.querySelector('[data-page="settings"]').click()`);
       assert.deepEqual(await js(`[...document.querySelectorAll('#sidebar-list [data-settings-section]')].map(item => item.dataset.settingsSection)`), ['general', 'updates', 'about']);
+      await js(`document.querySelector('[data-settings-section="updates"]').click()`);
+      assert.equal(await js(`Boolean($('app-update-check'))`), app.isPackaged);
+      if (!app.isPackaged) assert.match(await js(`$('app-update-title').parentElement.textContent`), /Git/);
+      await js(`$('app-update-release-page').click()`);
+      await until(() => Boolean(opened));
+      assert.equal(opened, supportUrl + '/releases');
+      opened = undefined;
       await js(`document.querySelector('[data-settings-section="about"]').click()`);
       assert.equal(await js(`$('about-title').textContent`), '关于');
       assert.equal(await js(`document.querySelector('.about-intro .pill').textContent`), 'v' + require('../package.json').version);

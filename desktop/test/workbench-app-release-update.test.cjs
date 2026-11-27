@@ -67,8 +67,20 @@ test('app update distinguishes no release, no package and a failed check', async
   response = Response.json(release('v0.2.0', [asset('v0.2.0', '0.2.0')]));
   assert.equal((await update.check()).status, 'available');
   response = new Response(null, { status: 403 });
-  await assert.rejects(update.check());
+  await assert.rejects(update.check(), /HTTP 403/);
   await assert.rejects(update.download());
+});
+
+test('a rate-limited update check can still open the official releases page', async () => {
+  const opened = [];
+  const update = new AppReleaseUpdate({
+    request: async () => new Response(null, { status: 403, headers: { 'x-ratelimit-remaining': '0' } }),
+    open: async url => opened.push(url),
+  });
+  await assert.rejects(update.check(), /\u68c0\u67e5\u9891\u7387/);
+  await assert.rejects(update.download());
+  await update.openReleases();
+  assert.deepEqual(opened, ['https://github.com/LevyDeng/ai-team/releases']);
 });
 
 test('one-click updating requires a supported package and GitHub verification metadata', async () => {

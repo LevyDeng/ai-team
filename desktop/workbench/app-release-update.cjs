@@ -11,7 +11,8 @@ const { setTimeout: delay } = require('node:timers/promises');
 
 const repository = 'LevyDeng/ai-team';
 const latestUrl = `https://api.github.com/repos/${repository}/releases/latest`;
-const releaseBase = `https://github.com/${repository}/releases/download/`;
+const releasesUrl = `https://github.com/${repository}/releases`;
+const releaseBase = releasesUrl + '/download/';
 const packageName = /^ai-team-(\d+\.\d+\.\d+)-win-x64\.zip$/;
 const releaseTag = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 const maxZipSize = 1024 ** 3;
@@ -73,10 +74,14 @@ class AppReleaseUpdate {
         signal: AbortSignal.timeout(15000), redirect: 'error', cache: 'no-store',
       });
     } catch {
-      throw new Error('无法连接 GitHub，请检查网络后重试。');
+      throw new Error('应用无法连接 GitHub。可以在浏览器中打开 GitHub 发布页。');
     }
     if (response.status === 404) return { status: 'no-release' };
-    if (!response.ok) throw new Error('GitHub 暂时无法提供版本信息，请稍后重试。');
+    if (response.status === 429 || (response.status === 403 &&
+        (response.headers.get('x-ratelimit-remaining') === '0' || response.headers.has('retry-after')))) {
+      throw new Error('GitHub 暂时限制了检查频率。可以在浏览器中打开 GitHub 发布页。');
+    }
+    if (!response.ok) throw new Error(`获取 GitHub 版本信息失败（HTTP ${response.status}）。可以在浏览器中打开 GitHub 发布页。`);
     let release;
     try { release = await response.json(); }
     catch { throw new Error('GitHub 返回的版本信息无法读取，请稍后重试。'); }
@@ -93,6 +98,11 @@ class AppReleaseUpdate {
     if (!this.available) throw new Error('请先检查应用更新。');
     try { await this.open(this.available.url); }
     catch { throw new Error('无法在浏览器中打开下载链接，请稍后重试。'); }
+  }
+
+  async openReleases() {
+    try { await this.open(releasesUrl); }
+    catch { throw new Error('无法在浏览器中打开 GitHub 发布页。'); }
   }
 
   status() {

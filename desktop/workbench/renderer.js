@@ -2268,18 +2268,31 @@ function renderAppUpdate() {
 }
 
 function renderUpdateCenter() {
+  const source = state.appPackaged === false;
   $('editor-view').innerHTML = `<div class="editor simple-form cli-updates-page"><header><h1>更新中心</h1></header>
     <section class="setting-card" aria-labelledby="app-update-title">
       <h3 id="app-update-title">应用更新</h3>
-      <p>当前版本 v${esc(state.appVersion)}</p>
+      ${source ? '<p>当前从源码启动。通过 Git 同步代码后，重启应用即可使用更新。</p>' : `<p>当前版本 v${esc(state.appVersion)}</p>`}
       <div class="cli-update-actions">
-        <button type="button" id="app-update-check">检查应用更新</button>
+        ${source ? '' : `<button type="button" id="app-update-check">检查应用更新</button>
         <button type="button" id="app-update-download" hidden>下载更新</button>
-        <button type="button" id="app-update-install" hidden>更新并重启</button>
+        <button type="button" id="app-update-install" hidden>更新并重启</button>`}
+        <button type="button" id="app-update-release-page">查看 GitHub 发布页</button>
       </div>
-      <p class="hint" id="app-update-status" role="status"></p>
+      ${source ? '' : '<p class="hint" id="app-update-status" role="status"></p>'}
     </section>
     <div id="cli-updates"></div><div id="claude-updater"></div><p class="hint">包括 Claude Code、OpenCode、Cursor Agent、WorkBuddy 以及自定义 ACP 角色正在使用的 CLI，可在此检查并安装可用更新。</p></div>`;
+  cliUpdatesView = window.createCliUpdatesView($('cli-updates'), {
+    request: (verb, ...args) => api['cli-update-' + verb](...args),
+    error: problem => toast(problem.message),
+  });
+  claudeUpdateView = window.createClaudeUpdateView($('claude-updater'), {
+    request: operation => api['claude-cli'](operation), error: problem => toast(problem.message),
+  });
+  cliUpdatesView.render(state.cliUpdates);
+  claudeUpdateView.render(state.claudeUpdate);
+  $('app-update-release-page').onclick = () => action(() => api['app-update-release-page']());
+  if (source) return;
   $('app-update-check').onclick = async () => {
     appUpdate = { status: 'checking' };
     renderAppUpdate();
@@ -2310,15 +2323,6 @@ function renderUpdateCenter() {
       renderAppUpdate();
     }
   }).catch(() => {});
-  cliUpdatesView = window.createCliUpdatesView($('cli-updates'), {
-    request: (verb, ...args) => api['cli-update-' + verb](...args),
-    error: problem => toast(problem.message),
-  });
-  claudeUpdateView = window.createClaudeUpdateView($('claude-updater'), {
-    request: operation => api['claude-cli'](operation), error: problem => toast(problem.message),
-  });
-  cliUpdatesView.render(state.cliUpdates);
-  claudeUpdateView.render(state.claudeUpdate);
 }
 function renderToolDirectory() { const select = $('tool-directory'); const previous = select.value; select.innerHTML = options((project()?.directories || []).map((d,i) => [i, (locationOf(d.locationId)?.name || d.locationId) + ' · ' + d.path]), previous || 0); }
 let groupWorkflowEditor;

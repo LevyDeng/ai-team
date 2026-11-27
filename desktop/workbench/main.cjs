@@ -175,6 +175,7 @@ function snapshot() {
   value.skills=skills.list();
   value.skillSources=skills.system.sources();
   value.appVersion = require('../package.json').version;
+  value.appPackaged = app.isPackaged;
   return value;
 }
 const quitBlockedCommands = new Set(['workflow-create', 'workflow-resume', 'workflow-plan', 'workflow-group-start', 'workflow-group-resume', 'terminal-open', 'role-login']);
@@ -250,6 +251,7 @@ handle('claude-cli', async action => {
 });
 handle('cli-update-preference', (key, value) => cliUpdates.savePreference(key, value));
 handle('app-update-check', () => appReleaseUpdate.check());
+handle('app-update-release-page', () => appReleaseUpdate.openReleases());
 handle('app-update-download', () => appReleaseUpdate.download());
 handle('app-update-status', () => appReleaseUpdate.status());
 handle('app-update-prepare', () => appReleaseUpdate.prepare());
