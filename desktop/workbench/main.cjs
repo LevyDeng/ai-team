@@ -77,15 +77,8 @@ let confirmingQuit = false, quitting = false, quitReady = false, workbenchWindow
 // Chromium's network stack follows the user's system proxy; Node fetch does not.
 const providerFetch = (input, options) => net.fetch(input, options);
 const chatById = id => store.state.chats.find(chat => chat.id === id);
-const { PhoneLink, addresses: phoneAddresses } = require('./phone-link.cjs');
-const phoneLink = new PhoneLink({
-  runtime: path.join(data, 'phone'), getChat: chatById,
-  submit: (chatId, text) => submitChat({ chatId, text, plain: true }),
-  changed: () => emit(),
-});
 const network = new ProxyRouter(store, { app, session });
 const emit = () => {
-  phoneLink.sync();
   const windows = BrowserWindow.getAllWindows();
   if (!windows.length) return;
   const value = snapshot();
@@ -101,7 +94,6 @@ const sendMessage = ({ chatId, message }) => {
 };
 const publishMessage = event => {
   if (!event) { emit(); return; }
-  phoneLink.message(event.chatId, event.message);
   sendMessage(event);
 };
 const locations = new Locations(store, vault, backend, async (location, fingerprint) => {
@@ -165,7 +157,6 @@ const notifications=new (require('./notifications.cjs').CompletionNotifications)
 backend.on('status', emit);
 function snapshot() {
   const value = store.summary();
-  value.phoneLink = phoneLink.status();
   const executables = new Map();
   value.roles = value.roles.map(r => {
     const virtual = r.engine === geminiWebEngine || r.engine === slackChatEngine || r.locationId !== 'local';
@@ -839,9 +830,6 @@ handle('chat-role-settings', (chatId, roleId, value) => {
   const chat = store.saveChatRole(chatId, roleId, value);
   emit(); return chat;
 });
-handle('phone-addresses', () => phoneAddresses());
-handle('phone-open', (chatId, address) => phoneLink.open(chatId, address));
-handle('phone-close', () => phoneLink.close());
 handle('chat-session-reset',(chatId,roleId)=>{const chat=store.get('chats',chatId);if(!chat.roleIds.includes(roleId))throw new Error('Choose a participant in this chat.');if(running.has(chatId)||interactiveAgents.active(chatId))throw new Error('Pause the discussion and end its interactive terminal before resetting a native session.');if(chat.nativeSessions)delete chat.nativeSessions[roleId];store.save();emit();return snapshot();});
 handle('chat-flow', (chatId, value) => { activeChat(chatId);const chat = store.saveChatFlow(chatId, value); emit(); return chat; });
 handle('chat-order', (chatId, ids) => { activeChat(chatId);const chat = store.saveChatOrder(chatId, ids); emit(); return chat; });
@@ -1559,7 +1547,6 @@ async function requestQuit(restart = false, applyUpdate = false) {
     try { inputQueue.close(); } catch (error) { console.error('Could not save the paused queue:', error); }
     for (const job of running.values()) if (!restart || !job.localExecutor) job.controller.abort();
     skills.close();
-    phoneLink.close();
     agents.close();
     const terminalsClosed = interactiveAgents.closeAll();
     for (const manager of terminalManagers.values()) manager.closeAll();

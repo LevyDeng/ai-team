@@ -23,9 +23,6 @@ for(const command of ['save','start','stop','resume','finish','confirm-stop']){
 api['workflow-priority-save']=(...args)=>ipcRenderer.invoke('desk:workflow-priority-save',...args);
 api['workflow-template-save']=value=>ipcRenderer.invoke('desk:workflow-template-save',value);
 for(const name of ['chat-branch','chat-handoff'])api[name]=(...args)=>ipcRenderer.invoke('desk:'+name,...args);
-for (const name of ['phone-addresses', 'phone-open', 'phone-close']) {
-  api[name] = (...args) => ipcRenderer.invoke('desk:' + name, ...args);
-}
 for(const name of ['workbench-restart','workbench-quit','workbench-support'])api[name]=()=>ipcRenderer.invoke('desk:'+name);
 api.on = (name, callback) => { if (!['state', 'terminal', 'message','agent-terminal','quota'].includes(name)) throw new Error('Invalid event.'); const listener = (_e, value) => callback(value); ipcRenderer.on('desk:' + name, listener); return () => ipcRenderer.removeListener('desk:' + name, listener); };
 api.onFiles = (callback, drag = () => {}) => {

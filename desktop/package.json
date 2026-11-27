@@ -1,6 +1,6 @@
 {
   "name": "ai-team",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "A personal desktop workspace for remote Claude and Codex CLIs with Windows MCP",
   "supportUrl": "https://github.com/LevyDeng/ai-team",

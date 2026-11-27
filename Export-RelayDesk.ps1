@@ -42,15 +42,6 @@ try {
         New-Item -ItemType Directory -Path (Split-Path $destination) -Force | Out-Null
         Copy-Item -LiteralPath $_.FullName -Destination $destination
     }
-    $androidSource = Join-Path $PSScriptRoot 'android'
-    Get-ChildItem -LiteralPath $androidSource -Recurse -File | Where-Object {
-        $_.Extension -in @('.java', '.xml', '.ps1')
-    } | ForEach-Object {
-        $relative = $_.FullName.Substring($androidSource.Length).TrimStart('\')
-        $destination = Join-Path (Join-Path $stage 'android') $relative
-        New-Item -ItemType Directory -Path (Split-Path $destination) -Force | Out-Null
-        Copy-Item -LiteralPath $_.FullName -Destination $destination
-    }
     $OutputPath = [IO.Path]::GetFullPath($OutputPath)
     New-Item -ItemType Directory -Path (Split-Path $OutputPath) -Force | Out-Null
     Add-Type -AssemblyName System.IO.Compression.FileSystem

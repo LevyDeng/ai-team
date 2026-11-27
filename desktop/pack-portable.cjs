@@ -30,7 +30,7 @@ try {
     'Create-DesktopShortcut.ps1', 'Env.ps1', 'Export-RelayDesk.ps1', 'Install-CodeBuddyCommand.ps1', 'Keep-Awake.ps1',
     'New-Secret.ps1', 'Ports.ps1', 'ProcessLifetime.ps1', 'README.md', 'relay-desk.vbs', 'setup-relay-desk.cmd',
     'Setup-RelayDesk.ps1', 'setup-ssh.cmd', 'Setup-Ssh.ps1', 'start-win-mcp-svr.cmd', 'Start-WindowsMcp.ps1',
-    'bin', 'desktop', 'docs', 'server', 'android', ':(exclude)desktop/test'];
+    'bin', 'desktop', 'docs', 'server', ':(exclude)desktop/test'];
   execFileSync('git', ['archive', '--format=tar', '--output', payload, 'HEAD', '--', ...paths], { cwd: root, stdio: 'inherit' });
   fs.cpSync(electron, bundle, { recursive: true });
   fs.renameSync(path.join(bundle, 'electron.exe'), path.join(bundle, 'ai-team.exe'));

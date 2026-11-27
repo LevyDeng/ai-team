@@ -107,10 +107,6 @@ function rememberProject() {
 }
 const engineLabel = engine => engine === slackChatEngine ? slackChatLabel : ({ codex:'Codex CLI', claude:'Claude Code', opencode:'OpenCode', [geminiWebEngine]:'Gemini 网页版', ...vendorKinds }[engine] || engine);
 function toast(value) { $('toast').textContent = String(value); $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 6000); }
-function renderPhoneStatus() {
-  if ($('phone-status')) $('phone-status').textContent = state.phoneLink?.connected ? '手机已连接' :
-    state.phoneLink ? '等待 Android 手机连接' : '手机连接已关闭';
-}
 const uiErrorMessages = new Map([
   ['Use unique domain and duty pairs with whole-number ratings from 1 to 10.', '请填写领域、职责和 1 到 10 的整数评分。每种组合只能评分一次，最多 80 项。'],
   ['Choose one location and a slash prefix for each skill source.', '请为每个技能来源选择一个位置并填写命令前缀。'],
@@ -1667,48 +1663,6 @@ function addChatActions(source) {
   $('chat-branch').onclick=()=>{$('dialog').close();openBranch(source);};
   $('chat-handoff').onclick=()=>{$('dialog').close();openHandoff(source);};
 }
-async function openPhoneLink(c) {
-  const addresses = await api['phone-addresses']();
-  const current = state.phoneLink;
-  const active = current?.chatId === c.id;
-  dialog(`<h2>手机连接</h2><p id="phone-status" class="hint">${current?.connected ? '手机已连接' : active ? '等待 Android 手机连接' : '手机连接已关闭'}</p>
-    <p class="hint">电脑与 Android 手机连接同一个 Wi-Fi。配对后，手机只能访问当前对话。</p>
-    <label>电脑的局域网地址<select id="phone-address">${options(addresses.map(item => [item.address, item.name + ' · ' + item.address]), current?.address)}</select></label>
-    <div class="tool-actions"><button type="button" id="phone-start">${active ? '显示配对码' : '开启手机连接'}</button>
-    <button type="button" id="phone-close" ${current ? '' : 'hidden'}>关闭手机连接</button></div>
-    <div id="phone-code-panel" hidden><canvas id="phone-qr" aria-label="手机配对二维码"></canvas>
-    <label>配对码<input id="phone-code" readonly></label><button type="button" id="phone-copy">复制配对码</button></div>`, () => {}, '完成');
-  const start = $('phone-start');
-  start.disabled = !addresses.length || Boolean(current && !active);
-  $('phone-address').disabled = Boolean(current);
-  start.onclick = () => action(async () => {
-    start.disabled = true;
-    try {
-      const { code, qr } = await api['phone-open'](c.id, $('phone-address').value);
-      if (!$('dialog').open || !$('phone-qr')) return;
-      const canvas = $('phone-qr'), scale = 4;
-      canvas.width = canvas.height = qr.length * scale;
-      const context = canvas.getContext('2d');
-      context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height);
-      context.fillStyle = '#000';
-      qr.forEach((row, y) => row.forEach((dark, x) => { if (dark) context.fillRect(x * scale, y * scale, scale, scale); }));
-      $('phone-code').value = code;
-      $('phone-code-panel').hidden = false;
-      $('phone-close').hidden = false;
-      $('phone-address').disabled = true;
-    } finally { start.disabled = false; }
-  });
-  $('phone-close').onclick = () => action(async () => {
-    await api['phone-close']();
-    $('phone-code-panel').hidden = true;
-    $('phone-code').value = '';
-    $('phone-close').hidden = true;
-    $('phone-address').disabled = false;
-    start.disabled = !addresses.length;
-    start.textContent = '开启手机连接';
-  });
-  $('phone-copy').onclick = () => action(() => api.copy($('phone-code').value));
-}
 function openChat(c, preferredRole, onCreated) {
   if(c?.disbandedAt){
     dialog('<h2>群聊已解散</h2><p>聊天记录仍可查看。</p><button type="button" class="quiet" id="remove-disbanded-chat">移出列表并存入归档</button>',()=>{},'关闭');
@@ -1744,13 +1698,6 @@ function openChat(c, preferredRole, onCreated) {
   }, c ? '保存' : '创建对话');
   $('dialog').classList.add('role-selection-dialog');
   if(c)addChatActions(c);
-  if (c) {
-    $('chat-handoff').insertAdjacentHTML('afterend', '<button type="button" id="chat-phone-link">手机连接</button>');
-    $('chat-phone-link').onclick = () => action(async () => {
-      $('dialog').close();
-      await openPhoneLink(c);
-    });
-  }
   if(c)$('dialog-body').insertAdjacentHTML('afterbegin','<p class="hint">保存后下次运行生效；交互连接需重新建立。</p>');
   if(c?.roleIds.length>1){
     $('dialog-body').insertAdjacentHTML('beforeend','<section class="setting-card"><h3>讨论工具</h3><p class="hint">总结共识、分歧和下一步，消耗模型额度。</p><button type="button" id="chat-summary" class="quiet">总结讨论</button></section>');
@@ -2775,7 +2722,6 @@ api.on('state', value => {
   }
   const previousChat = chatId;
   if (!chat()) chatId = chats()[0]?.id;
-  renderPhoneStatus();
   renderList();
   refreshPriorityView?.();
   if (page === 'projects') {
